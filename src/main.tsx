@@ -9,11 +9,13 @@ import {
   CircleAlert,
   ClipboardList,
   FileUp,
+  Filter,
   LoaderCircle,
   LockKeyhole,
   Phone,
   PhoneCall,
   Plus,
+  Search,
   ShieldCheck,
   SlidersHorizontal,
   UserPlus,
@@ -149,7 +151,7 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
 }
 
 function App() {
-  const [screen, setScreen] = useState<(typeof nav)[number]["key"]>("queue");
+  const [screen, setScreen] = useState<(typeof nav)[number]["key"]>("leads");
   const [state, setState] = useState<State | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -355,6 +357,11 @@ function App() {
             selectedId={selected?.id || null}
             onSelect={setSelectedId}
             onDnc={setDnc}
+            onOpen={(id) => {
+              setSelectedId(id);
+              setScreen("queue");
+            }}
+            onNotice={setNotice}
           />
         )}
         {screen === "followups" && (
@@ -555,52 +562,132 @@ function LeadList({
   selectedId,
   onSelect,
   onDnc,
+  onOpen,
+  onNotice,
 }: {
   leads: Lead[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onDnc: (lead: Lead, value: boolean) => void;
+  onOpen: (id: string) => void;
+  onNotice: (message: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const [segment, setSegment] = useState<
+    "all" | "to-call" | "try-again" | "follow-up" | "closed"
+  >("all");
+  const groups = {
+    "to-call": leads.filter((lead) => !lead.dnc && lead.status === "Ready"),
+    "try-again": leads.filter((lead) => /again|answer|busy|failed/i.test(lead.status)),
+    "follow-up": leads.filter((lead) => lead.status === "Follow-up"),
+    closed: leads.filter((lead) => lead.dnc || /closed|not interested|wrong/i.test(lead.status)),
+  };
+  const tabs = [
+    { key: "all" as const, label: "All leads", detail: "Every active prospect", count: leads.length },
+    { key: "to-call" as const, label: "To call", detail: "Ready for a first attempt", count: groups["to-call"].length },
+    { key: "try-again" as const, label: "Try again", detail: "No answer, busy, or failed", count: groups["try-again"].length },
+    { key: "follow-up" as const, label: "Follow up", detail: "A scheduled next step", count: groups["follow-up"].length },
+    { key: "closed" as const, label: "Closed", detail: "DNC or no longer active", count: groups.closed.length },
+  ];
+  const visibleLeads = (segment === "all" ? leads : groups[segment]).filter((lead) =>
+    [lead.name, lead.company, lead.phone, lead.status].join(" ").toLowerCase().includes(query.trim().toLowerCase()),
+  );
+
   return (
-    <section className="table-section">
-      <div className="section-controls">
-        <p>{leads.length} contacts in this workspace</p>
-        <span>Filters are not configured in this release.</span>
-      </div>
-      <div className="lead-table" role="table">
-        <div className="table-head" role="row">
-          <span>Contact</span>
-          <span>Company</span>
-          <span>Phone</span>
-          <span>Stage</span>
-          <span>Calling</span>
+    <section className="lead-workspace">
+      <header className="lead-workspace__intro">
+        <div>
+          <h2>Leads</h2>
+          <p>Everyone you’re calling, with the next action easy to spot.</p>
         </div>
-        {leads.map((lead) => (
-          <div
-            className={
-              lead.id === selectedId ? "table-row is-current" : "table-row"
-            }
-            role="row"
-            key={lead.id}
+        <span className="lead-workspace__count">{leads.length} active records</span>
+      </header>
+
+      <div className="lead-buckets" role="tablist" aria-label="Lead status">
+        {tabs.map((tab) => (
+          <button
+            type="button"
+            key={tab.key}
+            role="tab"
+            aria-selected={segment === tab.key}
+            className={segment === tab.key ? "lead-bucket is-active" : "lead-bucket"}
+            onClick={() => setSegment(tab.key)}
           >
-            <button onClick={() => onSelect(lead.id)}>
-              <b>{lead.name}</b>
-              <small>{lead.role}</small>
-            </button>
-            <span>{lead.company}</span>
-            <span>{lead.phone}</span>
-            <Status>{lead.status}</Status>
-            <button
-              className={
-                lead.dnc ? "link-button link-button--alert" : "link-button"
-              }
-              onClick={() => onDnc(lead, !lead.dnc)}
-            >
-              {lead.dnc ? "Suppressed" : "Allowed"}
-            </button>
-          </div>
+            <span>{tab.label}</span>
+            <strong>{tab.count}</strong>
+            <small>{tab.detail}</small>
+          </button>
         ))}
       </div>
+
+      <div className="lead-toolbar">
+        <label className="lead-search">
+          <Search size={18} aria-hidden="true" />
+          <span className="sr-only">Search leads</span>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search leads…"
+          />
+        </label>
+        <div className="lead-toolbar__actions">
+          <button className="toolbar-button" type="button" onClick={() => onNotice("Saved filters are the next implementation slice.")}>
+            <Filter size={16} /> Filters
+          </button>
+          <button className="toolbar-button" type="button" onClick={() => onNotice("CSV import mapping is the next implementation slice. Add a lead manually for this build.")}>
+            <FileUp size={16} /> Import CSV
+          </button>
+        </div>
+      </div>
+
+      <div className="lead-table-wrap">
+        <table className="lead-list-table">
+          <thead>
+            <tr>
+              <th scope="col"><span className="sr-only">Select</span></th>
+              <th scope="col">Prospect</th>
+              <th scope="col">Contact</th>
+              <th scope="col">Status</th>
+              <th scope="col">Next step</th>
+              <th scope="col"><span className="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleLeads.map((lead) => (
+              <tr className={lead.id === selectedId ? "is-current" : undefined} key={lead.id}>
+                <td><input type="checkbox" aria-label={`Select ${lead.name}`} /></td>
+                <td>
+                  <button className="prospect-button" type="button" onClick={() => onOpen(lead.id)}>
+                    <b>{lead.name}</b>
+                    <small>{lead.company}</small>
+                  </button>
+                </td>
+                <td>
+                  <span className="contact-phone">{lead.phone}</span>
+                  <small>{lead.timezone.replace("America/", "")}</small>
+                </td>
+                <td><Status tone={lead.dnc ? "alert" : lead.status === "Follow-up" ? "good" : "quiet"}>{lead.dnc ? "DNC" : lead.status}</Status></td>
+                <td><span className="next-step">{lead.dnc ? "Suppressed" : lead.due}</span></td>
+                <td className="lead-row-actions">
+                  <button type="button" onClick={() => onOpen(lead.id)}>Open</button>
+                  <button
+                    type="button"
+                    className={lead.dnc ? "is-alert" : undefined}
+                    onClick={() => onDnc(lead, !lead.dnc)}
+                  >
+                    {lead.dnc ? "Allow" : "DNC"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!visibleLeads.length && (
+          <div className="lead-list-empty">
+            <Search size={19} /> No leads match this view.
+          </div>
+        )}
+        </div>
     </section>
   );
 }
