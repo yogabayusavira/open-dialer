@@ -13,12 +13,16 @@ import {
 } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
+import pg from "pg";
 
 const port = Number(process.env.PORT || 3000);
 const root = process.cwd();
 const storeDir = join(root, "data");
 const storePath = join(storeDir, "callboard.json");
 const distDir = join(root, "dist");
+const databaseUrl = process.env.DATABASE_URL?.trim();
+const database = databaseUrl ? new pg.Pool({ connectionString: databaseUrl }) : null;
+let databaseReady;
 const sessions = new Map();
 const loginAttempts = new Map();
 const sessionLifetimeMs = 12 * 60 * 60 * 1000;
@@ -98,28 +102,82 @@ const defaultState = {
   ],
 };
 
-function readState() {
-  if (!existsSync(storePath)) return structuredClone(defaultState);
-  try {
-    const stored = JSON.parse(readFileSync(storePath, "utf8"));
-    if (!stored || typeof stored !== "object" || Array.isArray(stored))
-      return structuredClone(defaultState);
-    return {
-      ...structuredClone(defaultState),
-      ...stored,
-      leads: Array.isArray(stored.leads)
-        ? stored.leads
-        : structuredClone(defaultState.leads),
-      activity: Array.isArray(stored.activity)
-        ? stored.activity
-        : structuredClone(defaultState.activity),
-      connection: stored.connection || null,
-    };
-  } catch {
+async function databaseClient() {
+  if (!database) return null;
+  if (!databaseReady) {
+    databaseReady = database
+      .query(`
+        CREATE TABLE IF NOT EXISTS callboard_state (
+          id TEXT PRIMARY KEY,
+          payload JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `)
+      .catch((error) => {
+        databaseReady = undefined;
+        throw error;
+      });
+  }
+  await databaseReady;
+  return database;
+}
+
+function normalizeState(stored) {
+  if (!stored || typeof stored !== "object" || Array.isArray(stored))
     return structuredClone(defaultState);
+  return {
+    ...structuredClone(defaultState),
+    ...stored,
+    leads: Array.isArray(stored.leads)
+      ? stored.leads
+      : structuredClone(defaultState.leads),
+    activity: Array.isArray(stored.activity)
+      ? stored.activity
+      : structuredClone(defaultState.activity),
+    connection: stored.connection || null,
+  };
+}
+
+function readFileState() {
+  if (!existsSync(storePath)) return null;
+  try {
+    return normalizeState(JSON.parse(readFileSync(storePath, "utf8")));
+  } catch {
+    return null;
   }
 }
-function writeState(state) {
+
+async function readState() {
+  const client = await databaseClient();
+  if (client) {
+    const result = await client.query(
+      "SELECT payload FROM callboard_state WHERE id = $1",
+      ["workspace"],
+    );
+    if (result.rows[0]) return normalizeState(result.rows[0].payload);
+    const legacyState = readFileState();
+    if (legacyState) {
+      await writeState(legacyState);
+      return legacyState;
+    }
+    return structuredClone(defaultState);
+  }
+  return readFileState() || structuredClone(defaultState);
+}
+async function writeState(state) {
+  const client = await databaseClient();
+  if (client) {
+    await client.query(
+      `
+        INSERT INTO callboard_state (id, payload, updated_at)
+        VALUES ($1, $2::jsonb, NOW())
+        ON CONFLICT (id) DO UPDATE
+        SET payload = EXCLUDED.payload, updated_at = NOW()
+      `,
+      ["workspace", JSON.stringify(state)],
+    );
+    return;
+  }
   mkdirSync(storeDir, { recursive: true });
   writeFileSync(storePath, JSON.stringify(state, null, 2), { mode: 0o600 });
 }
@@ -320,14 +378,14 @@ createServer(async (req, res) => {
     if (url.pathname.startsWith("/api/") && !isAuthenticated(req))
       return json(res, 401, { error: "Sign in to access this workspace." });
     if (url.pathname === "/api/state" && req.method === "GET")
-      return json(res, 200, safeState(readState()));
+      return json(res, 200, safeState(await readState()));
     if (url.pathname === "/api/leads" && req.method === "POST") {
       const body = await getBody(req);
       if (!body.name?.trim() || !body.phone?.trim())
         return json(res, 400, {
           error: "A lead needs a name and phone number.",
         });
-      const state = readState();
+      const state = await readState();
       const lead = {
         id: `lead_${Date.now()}`,
         name: body.name.trim(),
@@ -347,12 +405,12 @@ createServer(async (req, res) => {
         action: "Lead added",
         detail: `${lead.name} · ${lead.company}`,
       });
-      writeState(state);
+      await writeState(state);
       return json(res, 201, lead);
     }
     if (url.pathname.match(/^\/api\/leads\/[^/]+$/) && req.method === "PATCH") {
       const body = await getBody(req);
-      const state = readState();
+      const state = await readState();
       const lead = state.leads.find(
         (item) => item.id === url.pathname.split("/").pop(),
       );
@@ -369,7 +427,7 @@ createServer(async (req, res) => {
         action: lead.dnc ? "DNC suppression" : "Lead updated",
         detail: `${lead.name} · ${lead.company}`,
       });
-      writeState(state);
+      await writeState(state);
       return json(res, 200, lead);
     }
     if (url.pathname === "/api/twilio/validate" && req.method === "POST") {
@@ -391,7 +449,7 @@ createServer(async (req, res) => {
           error:
             "That number is no longer available or is not voice-capable. Validate again and choose an eligible number.",
         });
-      const state = readState();
+      const state = await readState();
       state.connection = {
         accountSid,
         selectedNumberSid: verifiedNumber.sid,
@@ -406,11 +464,11 @@ createServer(async (req, res) => {
         action: "Telephony connected",
         detail: `Default line ${verifiedNumber.number}`,
       });
-      writeState(state);
+      await writeState(state);
       return json(res, 201, { connection: safeState(state).connection });
     }
     if (url.pathname === "/api/twilio/connection" && req.method === "DELETE") {
-      const state = readState();
+      const state = await readState();
       state.connection = null;
       state.activity.unshift({
         id: `event_${Date.now()}`,
@@ -418,12 +476,12 @@ createServer(async (req, res) => {
         action: "Telephony disconnected",
         detail: "Stored credentials removed",
       });
-      writeState(state);
+      await writeState(state);
       return json(res, 204, {});
     }
     if (url.pathname === "/api/calls/prepare" && req.method === "POST") {
       const { leadId } = await getBody(req);
-      const state = readState();
+      const state = await readState();
       const lead = state.leads.find((item) => item.id === leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
       if (lead.dnc)
