@@ -7,18 +7,22 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
+  CircleDot,
   ClipboardList,
+  Database,
   FileUp,
   Filter,
   LoaderCircle,
   LockKeyhole,
   MoreHorizontal,
   Phone,
+  PhoneIncoming,
   PhoneCall,
   Plus,
   Search,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   UserPlus,
   Users,
   X,
@@ -50,7 +54,19 @@ type State = {
 };
 type NumberOption = { sid: string; number: string; label: string };
 type Session = { requiresAuth: boolean; authenticated: boolean };
-type Screen = "queue" | "leads" | "followups" | "activity" | "settings";
+type Screen = "queue" | "calls" | "leads" | "followups" | "activity" | "settings";
+type SettingsArea = "calling" | "workspace" | "integrations" | "account";
+type SettingsPage =
+  | "numbers"
+  | "outcomes"
+  | "voicemail"
+  | "team"
+  | "fields"
+  | "research"
+  | "crm"
+  | "profile"
+  | "billing"
+  | "privacy";
 
 class ApiError extends Error {
   constructor(
@@ -64,7 +80,7 @@ class ApiError extends Error {
 const nav = [
   { id: "dashboard", key: "queue", label: "Dashboard", icon: Activity },
   { id: "leads", key: "leads", label: "Leads", icon: Users },
-  { id: "calls", key: "queue", label: "Calls", icon: Phone },
+  { id: "calls", key: "calls", label: "Calls", icon: Phone },
   { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock },
   { id: "sequences", key: "activity", label: "Sequences", icon: ClipboardList },
   { id: "pipeline", key: "activity", label: "Pipeline", icon: SlidersHorizontal },
@@ -171,6 +187,7 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [showLeadForm, setShowLeadForm] = useState(false);
+  const [tourStep, setTourStep] = useState<number | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -333,7 +350,7 @@ function App() {
         </div>
       </aside>
       <section className="workbench">
-        <header className="topbar">
+        {screen !== "calls" && <header className="topbar">
           <div>
             <p className="date-line">Workspace</p>
             <h1>
@@ -352,11 +369,7 @@ function App() {
           <div className="top-actions">
             <button
               className="quick-tour-button"
-              onClick={() =>
-                setNotice(
-                  "Quick tour is coming in a later release.",
-                )
-              }
+              onClick={() => setTourStep(0)}
             >
               <BadgeCheck size={17} /> Quick tour
             </button>
@@ -367,7 +380,7 @@ function App() {
               <Plus size={18} /> Add lead
             </button>
           </div>
-        </header>
+        </header>}
         {notice && (
           <div className="notice" role="status">
             <CircleAlert size={18} />
@@ -385,6 +398,16 @@ function App() {
             onPrepare={prepareCall}
             onDnc={setDnc}
             onSettings={() => setScreen("settings")}
+          />
+        )}
+        {screen === "calls" && (
+          <CallHistory
+            onStartDialing={() => setScreen("leads")}
+            onOpenDialer={() =>
+              setNotice("Manual dialing needs a configured Voice bridge before it can be used.")
+            }
+            onOpenPhoneNumbers={() => setScreen("settings")}
+            onUpgrade={() => setNotice("Billing and plan management has not been implemented yet.")}
           />
         )}
         {screen === "leads" && (
@@ -428,7 +451,151 @@ function App() {
           }}
         />
       )}
+      {tourStep !== null && (
+        <QuickTour
+          step={tourStep}
+          onClose={() => setTourStep(null)}
+          onBack={() => setTourStep((current) => Math.max(0, (current || 0) - 1))}
+          onNext={() => {
+            if (tourStep === 0) setScreen("leads");
+            if (tourStep === 2) {
+              setScreen("queue");
+              setTourStep(null);
+              return;
+            }
+            setTourStep((current) => Math.min(2, (current || 0) + 1));
+          }}
+        />
+      )}
     </main>
+  );
+}
+
+function CallHistory({
+  onStartDialing,
+  onOpenDialer,
+  onOpenPhoneNumbers,
+  onUpgrade,
+}: {
+  onStartDialing: () => void;
+  onOpenDialer: () => void;
+  onOpenPhoneNumbers: () => void;
+  onUpgrade: () => void;
+}) {
+  const [view, setView] = useState<"conversations" | "attempts" | "callbacks">("conversations");
+  const [query, setQuery] = useState("");
+  const [range, setRange] = useState("Last 30 days");
+  const [outcome, setOutcome] = useState("All outcomes");
+  const isCallbacks = view === "callbacks";
+  const subtitle =
+    view === "conversations"
+      ? "0 calls where someone actually talked"
+      : view === "attempts"
+        ? "0 dial attempts"
+        : "Leads who called back the number you dialed them from";
+
+  return (
+    <section className="calls-page" aria-labelledby="calls-heading">
+      <header className="calls-page__header">
+        <div className="calls-page__title">
+          <span className="calls-page__icon"><PhoneCall size={21} /></span>
+          <div>
+            <h1 id="calls-heading">Calls</h1>
+            <p>{subtitle}</p>
+          </div>
+        </div>
+        <div className="calls-page__actions">
+          <button className="calls-outline-button" onClick={onOpenDialer}>
+            <Phone size={15} /> Phone dialer
+          </button>
+          <button className="calls-export-button" disabled>
+            Export
+          </button>
+        </div>
+      </header>
+
+      <div className="calls-limit" aria-label="Monthly calling limit">
+        <strong>0 / 500 calls this month</strong>
+        <span>500 left on the free plan — resets on the 1st.</span>
+        <button type="button" onClick={onUpgrade}>
+          Upgrade for unlimited →
+        </button>
+      </div>
+
+      <div className="calls-tabs" role="tablist" aria-label="Call history view">
+        <button
+          className={view === "conversations" ? "is-active" : ""}
+          aria-selected={view === "conversations"}
+          onClick={() => setView("conversations")}
+        >
+          Conversations
+        </button>
+        <button
+          className={view === "attempts" ? "is-active" : ""}
+          aria-selected={view === "attempts"}
+          onClick={() => setView("attempts")}
+        >
+          All attempts
+        </button>
+        <button
+          className={view === "callbacks" ? "is-active" : ""}
+          aria-selected={view === "callbacks"}
+          onClick={() => setView("callbacks")}
+        >
+          Callbacks
+        </button>
+      </div>
+
+      {!isCallbacks && (
+        <div className="calls-filters">
+          <label className="calls-search">
+            <Search size={17} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search anything..."
+              aria-label="Search calls"
+            />
+          </label>
+          <label className="calls-select">
+            <select value={range} onChange={(event) => setRange(event.target.value)} aria-label="Date range">
+              <option>Last 7 days</option>
+              <option>Last 30 days</option>
+              <option>Last 90 days</option>
+              <option>All time</option>
+            </select>
+          </label>
+          <label className="calls-select">
+            <select value={outcome} onChange={(event) => setOutcome(event.target.value)} aria-label="Call outcome">
+              <option>All outcomes</option>
+              <option>Interested</option>
+              <option>Callback</option>
+              <option>No answer</option>
+              <option>Do not call</option>
+            </select>
+          </label>
+        </div>
+      )}
+
+      <div className="calls-empty">
+        {isCallbacks ? (
+          <>
+            <p>Callbacks are off. Turn them on and every lead who calls back the number you dialed them from shows up here.</p>
+            <button type="button" onClick={onOpenPhoneNumbers}>Turn on callbacks in Phone numbers →</button>
+          </>
+        ) : (
+          <>
+            <p>{view === "conversations" ? "No conversations in this range." : "No calls in this range."}</p>
+            <span>
+              {view === "conversations"
+                ? "Calls appear here once someone picks up. "
+                : "The CSV export includes timestamps, outcomes, notes, and transcripts. "}
+              <button type="button" onClick={onStartDialing}>Start dialing →</button>
+            </span>
+          </>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -682,6 +849,16 @@ function LeadList({
 
       <div className="lead-table-wrap">
         <table className="lead-list-table">
+          <colgroup>
+            <col className="lead-col--select" />
+            <col className="lead-col--prospect" />
+            <col className="lead-col--contact" />
+            <col className="lead-col--status" />
+            <col className="lead-col--last-call" />
+            <col className="lead-col--email" />
+            <col className="lead-col--sequence" />
+            <col className="lead-col--actions" />
+          </colgroup>
           <thead>
             <tr>
               <th scope="col"><span className="sr-only">Select</span></th>
@@ -731,19 +908,24 @@ function LeadList({
                   <span className="contact-phone">{lead.phone}</span>
                   <small>{localTime(lead.timezone)} local</small>
                 </td>
-                <td><Status tone={lead.dnc ? "alert" : "quiet"}>{statusLabel}</Status></td>
+                <td>
+                  <span className={lead.dnc ? "lead-status is-dnc" : "lead-status"}>
+                    {!lead.dnc && <Plus size={13} aria-hidden="true" />}
+                    {statusLabel}
+                  </span>
+                </td>
                 <td><span className="next-step">{lead.dnc ? "—" : "Not yet"}</span></td>
                 <td><span className="empty-cell">—</span></td>
                 <td><span className="empty-cell">—</span></td>
                 <td className="lead-row-actions">
-                  <button type="button" onClick={() => onOpen(lead.id)}>View</button>
                   <button
                     type="button"
-                    className={lead.dnc ? "is-alert" : undefined}
-                    onClick={() => onDnc(lead, !lead.dnc)}
+                    className="convert-button"
+                    onClick={() => onNotice("Opportunity conversion will be added with the Pipeline workspace.")}
                   >
-                    {lead.dnc ? "Allow" : "DNC"}
+                    <CircleDot size={16} aria-hidden="true" /> Convert
                   </button>
+                  <button type="button" onClick={() => onOpen(lead.id)}>View</button>
                 </td>
                 </tr>
               );
@@ -812,6 +994,58 @@ function ActivityLog({ activity }: { activity: State["activity"] }) {
   );
 }
 
+function QuickTour({
+  step,
+  onClose,
+  onBack,
+  onNext,
+}: {
+  step: number;
+  onClose: () => void;
+  onBack: () => void;
+  onNext: () => void;
+}) {
+  const steps = [
+    {
+      eyebrow: "YOUR WORKSPACE · 1 OF 3",
+      title: "Your calling space is ready.",
+      body: "Keep your leads, calling queue, and next actions in one calm workspace.",
+      action: "Show my leads",
+    },
+    {
+      eyebrow: "YOUR WORKSPACE · 2 OF 3",
+      title: "Start with a clean list.",
+      body: "Add leads one at a time today, then bring in a CSV when your import flow is ready.",
+      action: "Next stop",
+    },
+    {
+      eyebrow: "YOUR WORKSPACE · 3 OF 3",
+      title: "Choose a lead, then call responsibly.",
+      body: "Open a lead before calling. Connect a selected Twilio line in Settings before any outbound call can be prepared.",
+      action: "Open calling queue",
+    },
+  ];
+  const current = steps[step];
+  return (
+    <div className="tour-backdrop" role="presentation">
+      <section className="tour-card" role="dialog" aria-modal="true" aria-labelledby="tour-title">
+        <div className="tour-card__head">
+          <span>{current.eyebrow}</span>
+          <button type="button" onClick={onClose}>Skip tour</button>
+        </div>
+        <Sparkles size={22} aria-hidden="true" />
+        <h2 id="tour-title">{current.title}</h2>
+        <p>{current.body}</p>
+        <div className="tour-card__actions">
+          {step > 0 ? <button type="button" className="quiet-button" onClick={onBack}>Back</button> : <span />}
+          <button type="button" className="primary-button" onClick={onNext}>{current.action} <ChevronRight size={16} /></button>
+        </div>
+        <button type="button" className="tour-explore" onClick={onClose}>I’ll explore on my own</button>
+      </section>
+    </div>
+  );
+}
+
 function Settings({
   connection,
   onRefresh,
@@ -826,6 +1060,8 @@ function Settings({
   const [numbers, setNumbers] = useState<NumberOption[]>([]);
   const [selected, setSelected] = useState<NumberOption | null>(null);
   const [busy, setBusy] = useState(false);
+  const [area, setArea] = useState<SettingsArea>("calling");
+  const [page, setPage] = useState<SettingsPage>("numbers");
   const validate = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
@@ -885,8 +1121,47 @@ function Settings({
       );
     }
   };
+  const selectPage = (nextArea: SettingsArea, nextPage: SettingsPage) => {
+    setArea(nextArea);
+    setPage(nextPage);
+  };
+  const sections: Record<SettingsArea, { id: SettingsPage; label: string }[]> = {
+    calling: [
+      { id: "numbers", label: "Phone numbers" },
+      { id: "outcomes", label: "Call outcomes" },
+      { id: "voicemail", label: "Voicemail drop" },
+    ],
+    workspace: [
+      { id: "team", label: "Team" },
+      { id: "fields", label: "Custom fields" },
+      { id: "research", label: "AI research" },
+    ],
+    integrations: [{ id: "crm", label: "CRM integrations" }],
+    account: [
+      { id: "profile", label: "Profile" },
+      { id: "billing", label: "Billing & plan" },
+      { id: "privacy", label: "Privacy" },
+    ],
+  };
   return (
-    <section className="settings-grid">
+    <section className="settings-page">
+      <div className="settings-tabs" role="tablist" aria-label="Settings sections">
+        {(["calling", "workspace", "integrations", "account"] as SettingsArea[]).map((item) => (
+          <button key={item} type="button" role="tab" aria-selected={area === item} className={area === item ? "is-active" : ""} onClick={() => selectPage(item, sections[item][0].id)}>
+            {item}
+          </button>
+        ))}
+      </div>
+      <div className="settings-layout">
+        <aside className="settings-nav" aria-label={`${area} settings`}>
+          <span>{area} settings</span>
+          {sections[area].map((item) => (
+            <button key={item.id} type="button" className={page === item.id ? "is-active" : ""} onClick={() => setPage(item.id)}>{item.label}</button>
+          ))}
+        </aside>
+        <div className="settings-content">
+        {page === "numbers" ? (
+          <section className="settings-grid">
       <article className="settings-card connection-card">
         <div>
           <span className="panel-kicker">Telephony</span>
@@ -1018,8 +1293,62 @@ function Settings({
           </span>
         </div>
       </article>
+          </section>
+        ) : (
+          <SettingsPanel page={page} connection={connection} onNotice={onNotice} />
+        )}
+        </div>
+      </div>
     </section>
   );
+}
+
+function SettingsPanel({
+  page,
+  connection,
+  onNotice,
+}: {
+  page: Exclude<SettingsPage, "numbers">;
+  connection: Connection | null;
+  onNotice: (message: string) => void;
+}) {
+  const [outcomes, setOutcomes] = useState([
+    "Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call",
+  ]);
+  const [teamName, setTeamName] = useState(() => localStorage.getItem("callboard-team-name") || "");
+  const [fieldName, setFieldName] = useState("");
+  const [fields, setFields] = useState<string[]>(() => JSON.parse(localStorage.getItem("callboard-lead-fields") || "[]"));
+  const [researchEnabled, setResearchEnabled] = useState(localStorage.getItem("callboard-research") === "true");
+  const [profile, setProfile] = useState(() => ({
+    firstName: localStorage.getItem("callboard-first-name") || "",
+    company: localStorage.getItem("callboard-company") || "",
+    phone: localStorage.getItem("callboard-phone") || "",
+  }));
+  if (page === "outcomes") {
+    return <section className="settings-panel"><span className="panel-kicker">Calling</span><h2>Call outcomes</h2><p>Choose which outcomes appear after a call. These preferences only shape the workspace; they do not place or automate calls.</p><div className="outcome-list">{outcomes.map((outcome) => <label key={outcome}><input type="checkbox" checked onChange={() => setOutcomes((current) => current.filter((item) => item !== outcome))} />{outcome}</label>)}</div><button className="quiet-button" onClick={() => setOutcomes(["Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call"])}>Restore defaults</button></section>;
+  }
+  if (page === "voicemail") {
+    return <section className="settings-panel"><span className="panel-kicker">Calling</span><h2>Voicemail drop</h2><p>There is no recording configured. Add a compliant audio upload flow and Twilio Voice webhook before enabling voicemail drop.</p><div className="settings-callout"><PhoneIncoming size={20} /><span>This area is intentionally disabled until the calling bridge is production-ready.</span></div></section>;
+  }
+  if (page === "team") {
+    return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Team</h2><p>Name your workspace now. Member invitations and role management stay off until multi-user authentication is enabled.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); localStorage.setItem("callboard-team-name", teamName); onNotice("Workspace name saved in this browser."); }}><label>Workspace name<input value={teamName} onChange={(event) => setTeamName(event.target.value)} placeholder="Your company or team" /></label><button className="primary-button" type="submit">Save workspace</button></form></section>;
+  }
+  if (page === "fields") {
+    return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Custom fields</h2><p>Capture the fields your team actually needs on every lead.</p><form className="inline-form" onSubmit={(event) => { event.preventDefault(); const value = fieldName.trim(); if (!value || fields.includes(value)) return; const next = [...fields, value]; setFields(next); localStorage.setItem("callboard-lead-fields", JSON.stringify(next)); setFieldName(""); }}><input value={fieldName} onChange={(event) => setFieldName(event.target.value)} placeholder="e.g. Territory" /><button className="primary-button" type="submit">Add field</button></form><div className="field-pills">{fields.length ? fields.map((field) => <button key={field} type="button" onClick={() => { const next = fields.filter((item) => item !== field); setFields(next); localStorage.setItem("callboard-lead-fields", JSON.stringify(next)); }}>{field} <X size={13} /></button>) : <span>No custom fields yet.</span>}</div></section>;
+  }
+  if (page === "research") {
+    return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>AI research</h2><p>Keep enrichment off until you connect a provider and decide which lead data may leave Callboard.</p><label className="toggle-row"><span><b>Research workspace</b><small>Store this preference locally; no enrichment runs from this setting.</small></span><input type="checkbox" checked={researchEnabled} onChange={(event) => { setResearchEnabled(event.target.checked); localStorage.setItem("callboard-research", String(event.target.checked)); }} /></label></section>;
+  }
+  if (page === "crm") {
+    return <section className="settings-panel"><span className="panel-kicker">Integrations</span><h2>CRM integrations</h2><p>Keep your CRM current after calls without copying notes by hand.</p><div className="integration-card"><Database size={22} /><div><b>CRM sync</b><small>Not connected. The first integration should use an explicit OAuth connection and a one-way activity sync.</small></div><Status tone="quiet">Not connected</Status></div></section>;
+  }
+  if (page === "profile") {
+    return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Profile</h2><p>Your personal and company details for this Callboard workspace.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); localStorage.setItem("callboard-first-name", profile.firstName); localStorage.setItem("callboard-company", profile.company); localStorage.setItem("callboard-phone", profile.phone); onNotice("Profile saved in this browser."); }}><label>First name<input value={profile.firstName} onChange={(event) => setProfile({ ...profile, firstName: event.target.value })} /></label><label>Business phone<input value={profile.phone} onChange={(event) => setProfile({ ...profile, phone: event.target.value })} /></label><label>Company<input value={profile.company} onChange={(event) => setProfile({ ...profile, company: event.target.value })} /></label><button className="primary-button" type="submit">Save profile</button></form></section>;
+  }
+  if (page === "billing") {
+    return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Billing &amp; plan</h2><p>Callboard does not process payments. Your carrier usage is billed by Twilio; deployment and database costs are managed in Dokploy.</p><div className="settings-callout"><ShieldCheck size={20} /><span>{connection ? "A Twilio line is connected. Review carrier usage in your Twilio account." : "No Twilio line is connected yet."}</span></div></section>;
+  }
+  return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Privacy</h2><p>Telephony credentials are encrypted server-side. This browser stores only non-sensitive workspace preferences such as your profile and custom field names.</p><div className="settings-callout"><ShieldCheck size={20} /><span>Never enter Twilio credentials into a third-party integration field.</span></div></section>;
 }
 
 function LeadForm({
