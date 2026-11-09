@@ -49,6 +49,7 @@ type State = {
 };
 type NumberOption = { sid: string; number: string; label: string };
 type Session = { requiresAuth: boolean; authenticated: boolean };
+type Screen = "queue" | "leads" | "followups" | "activity" | "settings";
 
 class ApiError extends Error {
   constructor(
@@ -60,11 +61,12 @@ class ApiError extends Error {
 }
 
 const nav = [
-  { key: "queue", label: "Calling queue", icon: PhoneCall },
-  { key: "leads", label: "Leads", icon: Users },
-  { key: "followups", label: "Follow-ups", icon: CalendarClock },
-  { key: "activity", label: "Activity", icon: Activity },
-  { key: "settings", label: "Settings", icon: SlidersHorizontal },
+  { id: "dashboard", key: "queue", label: "Dashboard", icon: Activity },
+  { id: "leads", key: "leads", label: "Leads", icon: Users },
+  { id: "calls", key: "queue", label: "Calls", icon: Phone },
+  { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock },
+  { id: "sequences", key: "activity", label: "Sequences", icon: ClipboardList },
+  { id: "pipeline", key: "activity", label: "Pipeline", icon: SlidersHorizontal },
 ] as const;
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -151,7 +153,7 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
 }
 
 function App() {
-  const [screen, setScreen] = useState<(typeof nav)[number]["key"]>("leads");
+  const [screen, setScreen] = useState<Screen>("leads");
   const [state, setState] = useState<State | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -275,41 +277,58 @@ function App() {
           <span className="brand-mark">C</span>
           <span>callboard</span>
         </div>
-        <div className="operator">
-          <span className="operator-dot" /> Operator workspace
-        </div>
+        <div className="workspace-label">Workspace</div>
         <nav aria-label="Workspace navigation">
-          {nav.map(({ key, label, icon: Icon }) => (
+          {nav.map(({ id, key, label, icon: Icon }) => (
             <button
-              key={key}
+              key={id}
               className={
-                screen === key ? "nav-item nav-item--active" : "nav-item"
+                (screen === key && (key !== "queue" || id === "dashboard")) ||
+                (screen === "activity" && id === "sequences")
+                  ? "nav-item nav-item--active"
+                  : "nav-item"
               }
               onClick={() => setScreen(key)}
             >
               <Icon size={18} />
               <span>{label}</span>
-              {key === "followups" && <b>{followUps.length}</b>}
+              {id === "tasks" && <b>{followUps.length}</b>}
             </button>
           ))}
+          <button className="nav-item" type="button" onClick={() => setNotice("Additional workspace tools are coming in a later release.")}>
+            <ChevronRight size={18} />
+            <span>More</span>
+          </button>
         </nav>
         <div className="sidebar-footer">
-          <ShieldCheck size={18} />
-          <span>
-            Responsible calling
-            <br />
-            <strong>controls on</strong>
-          </span>
+          <button className="nav-item sidebar-utility" type="button" onClick={() => setNotice("The dark workspace theme is active.")}>
+            <ShieldCheck size={18} />
+            <span>Light mode</span>
+          </button>
+          <button className="nav-item sidebar-utility" type="button" onClick={() => setScreen("settings")}>
+            <SlidersHorizontal size={18} />
+            <span>Settings</span>
+          </button>
+          <button className="account-summary" type="button" onClick={() => setScreen("settings")}>
+            <span className="account-summary__avatar">C</span>
+            <span>
+              <b>Callboard workspace</b>
+              <small>Account &amp; billing</small>
+            </span>
+            <ChevronRight size={15} />
+          </button>
         </div>
       </aside>
       <section className="workbench">
         <header className="topbar">
           <div>
-            <p className="date-line">{todayLabel}</p>
+            <p className="date-line">Workspace</p>
             <h1>
               {screen === "queue"
                 ? "Today’s route"
-                : nav.find((item) => item.key === screen)?.label}
+                : screen === "settings"
+                  ? "Settings"
+                  : nav.find((item) => item.key === screen)?.label}
             </h1>
           </div>
           <div className="top-actions">
@@ -597,7 +616,6 @@ function LeadList({
     <section className="lead-workspace">
       <header className="lead-workspace__intro">
         <div>
-          <h2>Leads</h2>
           <p>Everyone you’re calling, with the next action easy to spot.</p>
         </div>
         <span className="lead-workspace__count">{leads.length} active records</span>
