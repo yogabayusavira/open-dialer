@@ -67,6 +67,7 @@ const nav = [
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, {
+    cache: "no-store",
     ...options,
     headers: {
       "content-type": "application/json",
