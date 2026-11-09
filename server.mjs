@@ -101,7 +101,20 @@ const defaultState = {
 function readState() {
   if (!existsSync(storePath)) return structuredClone(defaultState);
   try {
-    return JSON.parse(readFileSync(storePath, "utf8"));
+    const stored = JSON.parse(readFileSync(storePath, "utf8"));
+    if (!stored || typeof stored !== "object" || Array.isArray(stored))
+      return structuredClone(defaultState);
+    return {
+      ...structuredClone(defaultState),
+      ...stored,
+      leads: Array.isArray(stored.leads)
+        ? stored.leads
+        : structuredClone(defaultState.leads),
+      activity: Array.isArray(stored.activity)
+        ? stored.activity
+        : structuredClone(defaultState.activity),
+      connection: stored.connection || null,
+    };
   } catch {
     return structuredClone(defaultState);
   }
