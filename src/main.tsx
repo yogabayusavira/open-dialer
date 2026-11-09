@@ -12,6 +12,7 @@ import {
   Filter,
   LoaderCircle,
   LockKeyhole,
+  MoreHorizontal,
   Phone,
   PhoneCall,
   Plus,
@@ -93,6 +94,18 @@ function Status({
   tone?: "quiet" | "good" | "alert";
 }) {
   return <span className={`status status--${tone}`}>{children}</span>;
+}
+
+function localTime(timezone: string) {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: timezone,
+    }).format(new Date());
+  } catch {
+    return timezone.replace("America/", "").replace("_", " ");
+  }
 }
 
 function Login({ onSignedIn }: { onSignedIn: () => void }) {
@@ -296,7 +309,7 @@ function App() {
             </button>
           ))}
           <button className="nav-item" type="button" onClick={() => setNotice("Additional workspace tools are coming in a later release.")}>
-            <ChevronRight size={18} />
+            <MoreHorizontal size={18} />
             <span>More</span>
           </button>
         </nav>
@@ -330,18 +343,22 @@ function App() {
                   ? "Settings"
                   : nav.find((item) => item.key === screen)?.label}
             </h1>
+            {screen === "leads" && (
+              <p className="page-subtitle">
+                Everyone you’re calling, with the next action easy to spot.
+              </p>
+            )}
           </div>
           <div className="top-actions">
             <button
-              className="icon-button"
-              aria-label="Import leads"
+              className="quick-tour-button"
               onClick={() =>
                 setNotice(
-                  "CSV import mapping is the next implementation slice. Add a lead manually for this build.",
+                  "Quick tour is coming in a later release.",
                 )
               }
             >
-              <FileUp size={18} />
+              <BadgeCheck size={17} /> Quick tour
             </button>
             <button
               className="primary-button"
@@ -614,13 +631,6 @@ function LeadList({
 
   return (
     <section className="lead-workspace">
-      <header className="lead-workspace__intro">
-        <div>
-          <p>Everyone you’re calling, with the next action easy to spot.</p>
-        </div>
-        <span className="lead-workspace__count">{leads.length} active records</span>
-      </header>
-
       <div className="lead-buckets" role="tablist" aria-label="Lead status">
         {tabs.map((tab) => (
           <button
@@ -658,8 +668,14 @@ function LeadList({
           <button className="toolbar-button" type="button" onClick={() => onNotice("Saved filters are the next implementation slice.")}>
             <Filter size={16} /> Filters
           </button>
+          <button className="toolbar-button toolbar-button--select" type="button" onClick={() => onNotice("Sorting controls are coming in a later release.")}>
+            Newest first <ChevronRight size={15} />
+          </button>
           <button className="toolbar-button" type="button" onClick={() => onNotice("CSV import mapping is the next implementation slice. Add a lead manually for this build.")}>
             <FileUp size={16} /> Import CSV
+          </button>
+          <button className="toolbar-button" type="button" onClick={() => onNotice("DNC list upload is not configured in this release.")}>
+            DNC list
           </button>
         </div>
       </div>
@@ -672,28 +688,55 @@ function LeadList({
               <th scope="col">Prospect</th>
               <th scope="col">Contact</th>
               <th scope="col">Status</th>
-              <th scope="col">Next step</th>
+              <th scope="col">Last call</th>
+              <th scope="col">Email activity</th>
+              <th scope="col">Sequence</th>
               <th scope="col"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody>
-            {visibleLeads.map((lead) => (
-              <tr className={lead.id === selectedId ? "is-current" : undefined} key={lead.id}>
+            {visibleLeads.map((lead) => {
+              const initials = lead.name
+                .split(" ")
+                .map((part) => part[0])
+                .join("")
+                .slice(0, 2)
+                .toUpperCase();
+              const tag = lead.dnc
+                ? "do not call"
+                : lead.status === "Follow-up"
+                  ? "needs follow up"
+                  : "no status";
+              const statusLabel = lead.dnc
+                ? "DNC"
+                : lead.status === "Follow-up"
+                  ? "FOLLOW UP"
+                  : "NEW";
+              return (
+                <tr className={lead.id === selectedId ? "is-current" : undefined} key={lead.id}>
                 <td><input type="checkbox" aria-label={`Select ${lead.name}`} /></td>
                 <td>
                   <button className="prospect-button" type="button" onClick={() => onOpen(lead.id)}>
-                    <b>{lead.name}</b>
-                    <small>{lead.company}</small>
+                    <span className="prospect-identity">
+                      <i aria-hidden="true">{initials}</i>
+                      <span>
+                        <b>{lead.name}</b>
+                        <small>{lead.company}</small>
+                        <em>{tag}</em>
+                      </span>
+                    </span>
                   </button>
                 </td>
                 <td>
                   <span className="contact-phone">{lead.phone}</span>
-                  <small>{lead.timezone.replace("America/", "")}</small>
+                  <small>{localTime(lead.timezone)} local</small>
                 </td>
-                <td><Status tone={lead.dnc ? "alert" : lead.status === "Follow-up" ? "good" : "quiet"}>{lead.dnc ? "DNC" : lead.status}</Status></td>
-                <td><span className="next-step">{lead.dnc ? "Suppressed" : lead.due}</span></td>
+                <td><Status tone={lead.dnc ? "alert" : "quiet"}>{statusLabel}</Status></td>
+                <td><span className="next-step">{lead.dnc ? "—" : "Not yet"}</span></td>
+                <td><span className="empty-cell">—</span></td>
+                <td><span className="empty-cell">—</span></td>
                 <td className="lead-row-actions">
-                  <button type="button" onClick={() => onOpen(lead.id)}>Open</button>
+                  <button type="button" onClick={() => onOpen(lead.id)}>View</button>
                   <button
                     type="button"
                     className={lead.dnc ? "is-alert" : undefined}
@@ -702,8 +745,9 @@ function LeadList({
                     {lead.dnc ? "Allow" : "DNC"}
                   </button>
                 </td>
-              </tr>
-            ))}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
         {!visibleLeads.length && (
@@ -711,7 +755,16 @@ function LeadList({
             <Search size={19} /> No leads match this view.
           </div>
         )}
+      </div>
+      <footer className="lead-pagination">
+        <span>Showing <b>{visibleLeads.length ? 1 : 0}</b> to <b>{visibleLeads.length}</b> of <b>{visibleLeads.length}</b> prospects</span>
+        <div>
+          <span>Per page: <b>50</b></span>
+          <button type="button" disabled>Previous</button>
+          <span>Page <b>1</b> of <b>1</b></span>
+          <button type="button" disabled>Next</button>
         </div>
+      </footer>
     </section>
   );
 }
