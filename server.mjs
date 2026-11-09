@@ -1,6 +1,7 @@
 import {
   createCipheriv,
   createHash,
+  createHmac,
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
@@ -26,6 +27,7 @@ let databaseReady;
 const sessions = new Map();
 const loginAttempts = new Map();
 const sessionLifetimeMs = 12 * 60 * 60 * 1000;
+const rememberedSessionLifetimeMs = 30 * 24 * 60 * 60 * 1000;
 const loginWindowMs = 15 * 60 * 1000;
 const loginLimit = 5;
 const defaultState = {
@@ -252,28 +254,47 @@ function isAuthenticated(req) {
   if (!password) return process.env.NODE_ENV !== "production";
   const token = cookies(req).callboard_session;
   const session = token && sessions.get(token);
-  if (!session || session.expiresAt <= Date.now()) {
-    if (token) sessions.delete(token);
-    return false;
-  }
-  return true;
+  if (session && session.expiresAt > Date.now()) return true;
+  if (token) sessions.delete(token);
+  const remembered = cookies(req).callboard_remember;
+  const [expiresAt, signature] = remembered?.split(".") || [];
+  if (!/^\d{13}$/.test(expiresAt || "") || !signature) return false;
+  if (Number(expiresAt) <= Date.now()) return false;
+  const expected = createHmac("sha256", password)
+    .update(`callboard-remember:${expiresAt}`)
+    .digest("base64url");
+  return safeEqual(signature, expected);
 }
-function setSession(res) {
+function cookieAttributes(maxAge) {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  return `HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure}`;
+}
+function setSession(res, remember = false) {
+  if (remember) {
+    const expiresAt = String(Date.now() + rememberedSessionLifetimeMs);
+    const signature = createHmac("sha256", configuredAdminPassword())
+      .update(`callboard-remember:${expiresAt}`)
+      .digest("base64url");
+    res.setHeader("set-cookie", [
+      `callboard_remember=${expiresAt}.${signature}; ${cookieAttributes(rememberedSessionLifetimeMs / 1000)}`,
+      `callboard_session=; ${cookieAttributes(0)}`,
+    ]);
+    return;
+  }
   const token = randomBytes(32).toString("base64url");
   sessions.set(token, { expiresAt: Date.now() + sessionLifetimeMs });
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  res.setHeader(
-    "set-cookie",
-    `callboard_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secure}`,
-  );
+  res.setHeader("set-cookie", [
+    `callboard_session=${token}; ${cookieAttributes(sessionLifetimeMs / 1000)}`,
+    `callboard_remember=; ${cookieAttributes(0)}`,
+  ]);
 }
 function clearSession(req, res) {
   const token = cookies(req).callboard_session;
   if (token) sessions.delete(token);
-  res.setHeader(
-    "set-cookie",
-    "callboard_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
-  );
+  res.setHeader("set-cookie", [
+    `callboard_session=; ${cookieAttributes(0)}`,
+    `callboard_remember=; ${cookieAttributes(0)}`,
+  ]);
 }
 function requestKey(req) {
   return req.socket.remoteAddress || "unknown";
@@ -359,7 +380,7 @@ createServer(async (req, res) => {
         return json(res, 401, { error: "Incorrect Callboard password." });
       }
       clearFailedLogins(req);
-      setSession(res);
+      setSession(res, body.remember === true);
       return json(res, 204, {});
     }
     if (url.pathname === "/api/session" && req.method === "DELETE") {

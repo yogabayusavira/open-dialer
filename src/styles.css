@@ -1929,6 +1929,36 @@ button:focus-visible,
 input:focus-visible {
   outline-color: #a782fa;
 }
+.login-page { background: #111110; }
+.login-card {
+  border: 1px solid #30302d;
+  background: #1c1c1a;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .42);
+}
+.login-card .brand,
+.login-card h1 { color: #f3f2ed; }
+.login-card p { color: #aaa9a2; }
+.login-card > label { color: #c7c6c0; }
+.login-card input {
+  border-color: #3a3a36;
+  background: #151513;
+  color: #f3f2ed;
+}
+.login-card .login-remember {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #c7c6c0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.login-card .login-remember input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: #7c3aed;
+}
 @media (max-width: 820px) {
   .calls-page { padding: 26px 0 40px; }
   .calls-limit { align-items: flex-start; flex-wrap: wrap; padding: 10px 12px; }

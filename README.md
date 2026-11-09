@@ -36,4 +36,4 @@ Before enabling real calls, configure Twilio Voice/TwiML and status webhooks, ve
 - Never put a Twilio Auth Token in browser source, build-time environment variables, or Git.
 - The validation request sends credentials only to Callboard's server; responses never include the token.
 - Persisted tokens are AES-256-GCM encrypted using `CALLBOARD_ENCRYPTION_KEY`.
-- Production access uses a single app password, rate-limited sign-in, and a server-held 12-hour session. Add real identity and workspace authorization before multi-user use.
+- Production access uses a single app password and rate-limited sign-in. Operators can opt into a signed 30-day browser cookie; changing the application password invalidates it. Add real identity and workspace authorization before multi-user use.

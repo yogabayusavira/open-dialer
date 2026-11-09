@@ -126,6 +126,7 @@ function localTime(timezone: string) {
 
 function Login({ onSignedIn }: { onSignedIn: () => void }) {
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const submit = async (event: FormEvent) => {
@@ -135,7 +136,7 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
     try {
       await api("/api/session", {
         method: "POST",
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ password, remember }),
       });
       setPassword("");
       onSignedIn();
@@ -166,6 +167,14 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
             autoComplete="current-password"
             required
           />
+        </label>
+        <label className="login-remember">
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(event) => setRemember(event.target.checked)}
+          />
+          <span>Remember me for 30 days</span>
         </label>
         {error && <p className="form-error">{error}</p>}
         <button className="primary-button" type="submit" disabled={busy}>
