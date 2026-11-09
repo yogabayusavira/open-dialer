@@ -634,6 +634,12 @@ function LeadList({
             <span>{tab.label}</span>
             <strong>{tab.count}</strong>
             <small>{tab.detail}</small>
+            {tab.key === "all" && (
+              <div className="lead-bucket__quota" aria-label={`${leads.length} active leads`}>
+                <span><i style={{ width: `${Math.min(100, leads.length * 8)}%` }} /></span>
+                <em>{leads.length} active leads</em>
+              </div>
+            )}
           </button>
         ))}
       </div>

@@ -1618,3 +1618,60 @@ body {
     display: none;
   }
 }
+
+/* DialSheet-style neutral list palette */
+.lead-bucket.is-active {
+  border: 2px solid #e9e8e1;
+  box-shadow: none;
+  background:
+    radial-gradient(circle at 77% 88%, rgba(87, 111, 127, 0.58), transparent 45%),
+    linear-gradient(135deg, #080808 0%, #181817 55%, #242a2e 100%);
+}
+.lead-bucket.is-active span,
+.lead-bucket.is-active strong,
+.lead-bucket.is-active small {
+  color: #f1f0ea;
+}
+.lead-bucket.is-active small {
+  opacity: 0.94;
+}
+.lead-bucket__quota {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  margin-top: auto;
+}
+.lead-bucket__quota > span {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #1b1b1a;
+}
+.lead-bucket__quota i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #f0efe8;
+}
+.lead-bucket__quota em {
+  color: #a9a9a2;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1;
+}
+.lead-bucket.is-active .lead-bucket__quota em {
+  color: #aaa9a3;
+}
+.lead-list-table tbody tr.is-current,
+.call-list-item.is-selected {
+  background: #20201e;
+  border-left-color: #e8e7e0;
+}
+.status--good {
+  background: #30302d;
+  color: #deded7;
+}
+.nav-item--active svg {
+  color: #41c77b;
+}
