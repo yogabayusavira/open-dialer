@@ -159,6 +159,9 @@ function App() {
   const refresh = async () => {
     try {
       const next = await api<State>("/api/state");
+      if (!Array.isArray(next.leads) || !Array.isArray(next.activity)) {
+        throw new Error("The Callboard API is unavailable. Check that the service is running with node server.mjs.");
+      }
       setState(next);
       setLoadError(null);
       setSelectedId((current) => current || next.leads[0]?.id || null);
@@ -347,7 +350,7 @@ function App() {
         )}
         {screen === "leads" && (
           <LeadList
-            leads={followUps}
+            leads={state.leads}
             selectedId={selected?.id || null}
             onSelect={setSelectedId}
             onDnc={setDnc}
@@ -355,7 +358,7 @@ function App() {
         )}
         {screen === "followups" && (
           <FollowUps
-            leads={state.leads}
+            leads={followUps}
             onSelect={(id) => {
               setSelectedId(id);
               setScreen("queue");
