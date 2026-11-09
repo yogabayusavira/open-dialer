@@ -1875,6 +1875,60 @@ body {
   font-size: 12px;
 }
 .calls-empty button:hover { color: #c3a8ff; }
+
+/* Dark workspace controls: later rules must override the legacy light palette. */
+.primary-button,
+.call-button {
+  border: 1px solid #8e5cff;
+  background: #7c3aed;
+  color: #ffffff;
+}
+.primary-button:hover,
+.call-button:hover {
+  background: #8b4cf3;
+  color: #ffffff;
+}
+.quiet-button,
+.outline-button {
+  border-color: #3a3a36;
+  background: #1c1c1a;
+  color: #e9e8e2;
+}
+.quiet-button:hover,
+.outline-button:hover {
+  border-color: #55554f;
+  background: #262624;
+  color: #ffffff;
+}
+.connection-card form label {
+  color: #c7c6c0;
+}
+.number-option {
+  border-color: #3a3a36;
+  background: #181817;
+  color: #e5e4de !important;
+}
+.number-option.is-selected {
+  border-color: #8e5cff;
+  background: #24183b;
+}
+.number-option small { color: #aaa9a2; }
+.empty-state {
+  border: 1px solid #333330;
+  border-radius: 8px;
+  background: #181817;
+  color: #aaa9a2;
+}
+.checklist { color: #aaa9a2; }
+.checklist svg { color: #a782fa; }
+.checklist code {
+  background: #292927;
+  color: #e0dfd9;
+}
+button:focus-visible,
+input:focus-visible {
+  outline-color: #a782fa;
+}
 @media (max-width: 820px) {
   .calls-page { padding: 26px 0 40px; }
   .calls-limit { align-items: flex-start; flex-wrap: wrap; padding: 10px 12px; }
