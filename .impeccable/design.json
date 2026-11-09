@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-09T00:00:00Z",
+  "title": "Design System: Callboard",
+  "extensions": {
+    "shadows": [
+      {"name": "dialog", "value": "0 18px 50px rgba(12, 26, 16, 0.25)", "purpose": "Lift the add-lead dialog above its backdrop."},
+      {"name": "login", "value": "0 18px 50px rgba(0, 0, 0, 0.28)", "purpose": "Lift the sign-in card."}
+    ],
+    "motion": [{"name": "spinner", "value": "spin 0.9s linear infinite", "purpose": "Indicate an ongoing request; animation stops when prefers-reduced-motion is reduce."}],
+    "breakpoints": [{"name": "queue", "value": "1120px"}, {"name": "compact", "value": "820px"}, {"name": "small", "value": "490px"}]
+  },
+  "components": [
+    {"name":"Primary button","kind":"button","refersTo":"button-primary","description":"Main action.","html":"<button class=\"ds-primary\">Add lead</button>","css":".ds-primary{border:0;border-radius:9px;min-height:43px;padding:0 16px;background:#122018;color:#fff;font:800 14px Inter,system-ui,sans-serif;cursor:pointer}.ds-primary:hover{background:#244333}.ds-primary:focus-visible{outline:3px solid #b7ed64;outline-offset:3px}.ds-primary:disabled{cursor:not-allowed;opacity:.55}"},
+    {"name":"Quiet button","kind":"button","description":"Secondary action.","html":"<button class=\"ds-quiet\">Do not call</button>","css":".ds-quiet{background:#f8f5ed;border:1px solid #cfcdbf;color:#254235;border-radius:9px;min-height:42px;padding:0 14px;font:14px Inter,system-ui,sans-serif;cursor:pointer}.ds-quiet:focus-visible{outline:3px solid #b7ed64;outline-offset:3px}"},
+    {"name":"Text input","kind":"input","description":"Labelled form input.","html":"<label class=\"ds-label\">Name<input class=\"ds-input\" placeholder=\"Name\"></label>","css":".ds-label{display:grid;gap:7px;color:#41604e;font:800 12px Inter,system-ui,sans-serif}.ds-input{height:43px;padding:0 12px;border:1px solid #babdb1;border-radius:7px;background:#fffdf8;color:#17251e;font:14px Inter,system-ui,sans-serif}.ds-input:focus-visible{outline:3px solid #b7ed64;outline-offset:3px}"},
+    {"name":"Active navigation","kind":"nav","description":"Selected workspace section.","html":"<nav class=\"ds-nav\"><button class=\"ds-nav-item\">Calling queue <b>3</b></button></nav>","css":".ds-nav{background:#122018;padding:12px;width:210px}.ds-nav-item{display:flex;align-items:center;justify-content:space-between;width:100%;border:0;border-radius:9px;background:#d9f99d;color:#122018;padding:12px 11px;font:800 14px Inter,system-ui,sans-serif;text-align:left}.ds-nav-item b{background:#122018;color:#d9f99d;border-radius:12px;padding:3px 7px;font-size:11px}.ds-nav-item:focus-visible{outline:3px solid #b7ed64;outline-offset:3px}"},
+    {"name":"Status","kind":"chip","refersTo":"status-quiet","description":"Text-labelled state.","html":"<span class=\"ds-status\">Window pending</span>","css":".ds-status{display:inline-flex;border-radius:99px;padding:5px 9px;background:#e8e8df;color:#536158;font:800 11px Inter,system-ui,sans-serif;letter-spacing:.02em;text-transform:uppercase}"},
+    {"name":"Selected queue item","kind":"custom","description":"Current route selection.","html":"<button class=\"ds-stop\"><span>09:30</span><span><b>Jordan Lee</b><small>Example company</small></span><span>›</span></button>","css":".ds-stop{display:grid;grid-template-columns:48px 1fr 17px;align-items:center;gap:9px;width:260px;text-align:left;border:0;border-left:3px solid #355b3d;background:#e6f5c7;color:#213a2d;padding:15px 14px;font:700 12px Inter,system-ui,sans-serif}.ds-stop b,.ds-stop small{display:block}.ds-stop b{font-size:14px}.ds-stop small{color:#688073;font-size:12px;font-weight:400;margin-top:3px}.ds-stop:focus-visible{outline:3px solid #b7ed64;outline-offset:3px}"}
+  ],
+  "narrative": {
+    "northStar": "The route board",
+    "overview": "A practical working interface organized around the next call. Warm paper surfaces, dark forest navigation, fine rules, and a restrained lime selection make the current stop easy to find while guardrails remain alongside it.",
+    "keyCharacteristics": ["Dense, legible work areas with clear labels and dividers.", "Flat tonal panels and compact controls, with depth reserved for overlays.", "Status and compliance information expressed in words as well as color."],
+    "rules": [],
+    "dos": ["Do keep the current lead, next action, and calling constraints together.", "Do pair status color with explicit text.", "Do preserve visible keyboard focus and labelled controls."],
+    "donts": ["Don't present deferred calling, import, or follow-up capabilities as already available."]
+  }
+}
+

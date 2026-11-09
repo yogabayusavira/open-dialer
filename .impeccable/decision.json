@@ -1,0 +1,99 @@
+{
+  "title": "Choose Callboard's working world",
+  "question": "The app needs a working visual system. Keep the assigned route-board direction, take an alternate, or re-roll.",
+  "options": [
+    {
+      "id": "assigned-route-board",
+      "kind": "assigned",
+      "label": "Route board",
+      "kicker": "THE ROLL",
+      "lineage": "public wayfinding and departure boards",
+      "thesis": "A calm route board that puts the next responsible call at the top of the schedule.",
+      "palette": ["#122018", "#d9f99d", "#f7f3e8", "#d8694b"],
+      "materials": ["painted wayfinding panels", "precise timetable rules"],
+      "viewport": "A familiar product shell leads with a call queue, due time, compliance state, and one clear next action.",
+      "risk": "Can feel transport-themed if the route rhythm overwhelms ordinary product controls.",
+      "raised": [
+        {"from": "data-sublime field", "raise": "A named information-density discipline keeps dates, counts, and outcomes scanable without visual noise."},
+        {"from": "reference setting", "raise": "One-pixel rules and an annotation rail make compliance context precise at every size."}
+      ],
+      "html": ".impeccable/mocks/decision/assigned-route-board.html",
+      "comp": ".impeccable/mocks/decision/assigned-route-board.webp"
+    },
+    {
+      "id": "model-pick-studio-ledger",
+      "kind": "pick",
+      "label": "Studio ledger",
+      "kicker": "IMPECCABLE’S PICK",
+      "lineage": "editorial production notes and proof sheets",
+      "thesis": "Each lead reads as a working record with its promise, history, and next edit visible together.",
+      "palette": ["#202328", "#f4efe6", "#a5d8ff", "#e46d54"],
+      "materials": ["uncoated paper", "editorial margin notes"],
+      "viewport": "A standard app shell surrounds a lead queue with a focused contact dossier and a durable follow-up rail.",
+      "risk": "More familiar than the route-board system, so it may be less memorable.",
+      "html": ".impeccable/mocks/decision/model-pick-studio-ledger.html",
+      "comp": ".impeccable/mocks/decision/model-pick-studio-ledger.webp"
+    },
+    {
+      "id": "challenger-reference-setting",
+      "kind": "challenger",
+      "catalogId": "rw-centre-rail-reference-setting",
+      "label": "Reference setting",
+      "verdict": "competitive",
+      "lineage": "annotated reference editions",
+      "thesis": "Calls and compliance notes move beside the lead list as a compact apparatus.",
+      "palette": ["#28251f", "#f1e8d7", "#aa2d25"],
+      "materials": ["bone paper", "hairline rules"],
+      "viewport": "A conventional product layout pairs the calling queue with a narrow, keyed compliance rail.",
+      "case": "Strong on precision and auditability, but the dense reading posture slows an operator who is moving through calls.",
+      "risk": "Can make a rapid work queue feel overly academic.",
+      "html": ".impeccable/mocks/decision/challenger-reference-setting.html",
+      "comp": ".impeccable/mocks/decision/challenger-reference-setting.webp",
+      "hero": "https://impeccable.style/worlds/cards/rw-centre-rail-reference-setting-hero.webp"
+    },
+    {
+      "id": "challenger-data-sublime",
+      "kind": "challenger",
+      "catalogId": "ikeda-datamatics",
+      "label": "Data field",
+      "verdict": "declined",
+      "lineage": "data-sublime barcode fields",
+      "thesis": "A monochrome field turns calling activity into signal and cadence.",
+      "palette": ["#000000", "#ffffff"],
+      "materials": ["hairline bars", "monospace numerics"],
+      "viewport": "A product shell uses dense call metrics above an ordinary lead queue.",
+      "risk": "Pure contrast and motion obscure the human decision at the center of every call.",
+      "kept": "Information density with explicit, easily scanned numeric rhythm.",
+      "hero": "https://impeccable.style/worlds/cards/ikeda-datamatics-hero.webp"
+    },
+    {
+      "id": "challenger-timetable",
+      "kind": "challenger",
+      "catalogId": "rw-timetable-slide-rack",
+      "label": "Timetable rack",
+      "verdict": "declined",
+      "lineage": "pocket airline timetables",
+      "thesis": "The day is a sequence of scheduled outcomes on a raked information rail.",
+      "palette": ["#d6a728", "#26353a", "#f3eadb", "#9e2d29"],
+      "materials": ["tinted schedule panes", "tick rails"],
+      "viewport": "A familiar workspace uses scheduling rhythm to frame the upcoming calls and follow-ups.",
+      "risk": "The directional metaphor is too close to the product's queue mechanics and could become a costume.",
+      "kept": "A clear chronology that exposes the next commitment without turning controls into decoration.",
+      "hero": "https://impeccable.style/worlds/cards/rw-timetable-slide-rack-hero.webp"
+    }
+  ],
+  "reroll": {"registers": ["safer", "bolder"]},
+  "buildPath": {"value": "code", "toggle": true},
+  "canon": true,
+  "canonCard": {
+    "kind": "canon",
+    "label": "The category standard",
+    "thesis": "A clean sales dashboard with conventional navigation, tables, and forms.",
+    "palette": ["#ffffff", "#111827", "#2563eb"],
+    "materials": ["clean grid", "neutral cards"],
+    "viewport": "The expected call dashboard, executed cleanly and predictably.",
+    "risk": "It offers little evidence that this tool takes careful calling seriously.",
+    "comp": ".impeccable/mocks/decision/canon.webp"
+  },
+  "steer": true
+}
