@@ -377,7 +377,7 @@ createServer(async (req, res) => {
       const body = await getBody(req);
       if (!safeEqual(body.password || "", password)) {
         recordFailedLogin(req);
-        return json(res, 401, { error: "Incorrect Callboard password." });
+        return json(res, 401, { error: "Incorrect Open Dialer password." });
       }
       clearFailedLogins(req);
       setSession(res, body.remember === true);
@@ -439,7 +439,7 @@ createServer(async (req, res) => {
       if (typeof body.dnc === "boolean") {
         lead.dnc = body.dnc;
         lead.status = body.dnc ? "Paused" : "Ready";
-        lead.note = body.dnc ? "Do not call: set from Callboard." : lead.note;
+        lead.note = body.dnc ? "Do not call: set from Open Dialer." : lead.note;
       }
       if (typeof body.status === "string") lead.status = body.status;
       state.activity.unshift({
@@ -540,4 +540,4 @@ createServer(async (req, res) => {
         error instanceof Error ? error.message : "Unexpected server error.",
     });
   }
-}).listen(port, "0.0.0.0", () => console.log(`Callboard listening on ${port}`));
+}).listen(port, "0.0.0.0", () => console.log(`Open Dialer v2 listening on ${port}`));

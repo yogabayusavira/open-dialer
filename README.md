@@ -1,6 +1,6 @@
-# Callboard
+# Open Dialer v2
 
-Callboard is an original, single-workspace outbound-calling CRM foundation. It focuses on a responsible lead workflow: choose the next lead, preserve context, and apply do-not-call protection. Calling-window checks and call outcomes are reserved for the Voice bridge phase.
+Open Dialer v2 is an original, single-workspace outbound-calling CRM foundation. It focuses on a responsible lead workflow: choose the next lead, preserve context, and apply do-not-call protection. Calling-window checks and call outcomes are reserved for the Voice bridge phase.
 
 ## What is included
 
@@ -20,7 +20,7 @@ npm start
 
 Open `http://localhost:3000`.
 
-For interface development, run `npm run dev` instead. When `DATABASE_URL` is set, Callboard persists runtime data in PostgreSQL. Without it, local development falls back to `data/callboard.json`.
+For interface development, run `npm run dev` instead. When `DATABASE_URL` is set, Open Dialer v2 persists runtime data in PostgreSQL. Without it, local development falls back to `data/callboard.json`.
 
 ## Dokploy deployment
 
@@ -34,6 +34,6 @@ Before enabling real calls, configure Twilio Voice/TwiML and status webhooks, ve
 ## Security boundaries
 
 - Never put a Twilio Auth Token in browser source, build-time environment variables, or Git.
-- The validation request sends credentials only to Callboard's server; responses never include the token.
+- The validation request sends credentials only to Open Dialer v2's server; responses never include the token.
 - Persisted tokens are AES-256-GCM encrypted using `CALLBOARD_ENCRYPTION_KEY`.
 - Production access uses a single app password and rate-limited sign-in. Operators can opt into a signed 30-day browser cookie; changing the application password invalidates it. Add real identity and workspace authorization before multi-user use.

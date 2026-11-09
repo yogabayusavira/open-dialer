@@ -16,7 +16,7 @@ Independent sales operators and small outbound teams who need to work a lead lis
 
 ## Product Purpose
 
-Callboard is an original cold-calling workspace. It brings lead intake, a focused calling queue, outcomes, notes, and follow-ups into one deliberate workflow so a caller can move from preparation to the next action without losing context.
+Open Dialer v2 is an original cold-calling workspace. It brings lead intake, a focused calling queue, outcomes, notes, and follow-ups into one deliberate workflow so a caller can move from preparation to the next action without losing context.
 
 ## Positioning
 

@@ -1,105 +1,176 @@
 ---
-name: Callboard
-description: A focused route board for responsible calling work.
+name: Open Dialer v2
+description: A dense, calm operating workspace for responsible outbound calling.
 colors:
-  ink: "#122018"
-  text: "#17251e"
-  paper: "#f4f1e8"
-  surface: "#faf8f1"
-  recessed: "#e8e5d9"
-  divider: "#c8c8ba"
-  muted: "#607568"
-  lime: "#d9f99d"
-  selected: "#e6f5c7"
-  good: "#e3f5bf"
-  alert: "#fde4db"
-  alert-ink: "#8e3529"
-  focus: "#b7ed64"
+  canvas: "#111110"
+  sidebar: "#151513"
+  surface: "#1c1c1a"
+  surface-raised: "#20201e"
+  input: "#181817"
+  border: "#30302d"
+  text: "#f3f2ed"
+  text-muted: "#aaa9a2"
+  accent: "#4a0d72"
+  accent-hover: "#5c0f8d"
+  accent-text: "#e4c8ff"
+  accent-subtle: "#251436"
+  accent-border: "#3b2573"
+  link: "#cda4ff"
+  danger: "#f1aaa0"
 typography:
-  headline:
+  page:
     fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
-    fontSize: "35px"
-    lineHeight: 1.05
-    letterSpacing: "-0.045em"
+    fontSize: "32px"
+    fontWeight: 750
+    lineHeight: 1.2
+    letterSpacing: "-0.03em"
+  title:
+    fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+    fontSize: "20px"
+    fontWeight: 750
+    lineHeight: 1.2
+  body:
+    fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+    fontSize: "14px"
+    fontWeight: 400
+    lineHeight: 1.5
+  meta:
+    fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+    fontSize: "12px"
+    fontWeight: 600
+    lineHeight: 1.2
   label:
     fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
-    fontSize: "11px"
+    fontSize: "10px"
     fontWeight: 800
-    letterSpacing: "0.12em"
+    lineHeight: 1.2
+    letterSpacing: "0.06em"
 rounded:
-  input: "7px"
-  control: "9px"
-  dialog: "12px"
-  pill: "99px"
+  control: "8px"
+  surface: "12px"
+  pill: "999px"
 spacing:
-  small: "8px"
-  control-gap: "10px"
-  panel: "28px"
-  workbench: "46px"
+  1: "4px"
+  2: "8px"
+  3: "12px"
+  4: "16px"
+  5: "24px"
+  6: "32px"
+  7: "48px"
 components:
   button-primary:
-    backgroundColor: "{colors.ink}"
-    textColor: "#ffffff"
+    backgroundColor: "{colors.accent}"
+    textColor: "{colors.accent-text}"
+    typography: "{typography.meta}"
     rounded: "{rounded.control}"
-    padding: "0 16px"
-    height: "43px"
-  button-primary-hover:
-    backgroundColor: "#244333"
-  status-quiet:
-    backgroundColor: "#e8e8df"
-    textColor: "#536158"
-    rounded: "{rounded.pill}"
-    padding: "5px 9px"
+    padding: "0 {spacing.4}"
+    height: "40px"
+  button-secondary:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.text}"
+    typography: "{typography.meta}"
+    rounded: "{rounded.control}"
+    padding: "0 {spacing.3}"
+    height: "40px"
+  input:
+    backgroundColor: "{colors.input}"
+    textColor: "{colors.text}"
+    typography: "{typography.body}"
+    rounded: "{rounded.control}"
+    padding: "0 {spacing.3}"
+    height: "40px"
 ---
 
-# Design System: Callboard
+# Design System: Open Dialer v2
 
 ## Overview
 
-**Creative North Star: "The route board"**
+**Creative North Star: "The focused switchboard."**
 
-A practical working interface organized around the next call. Warm paper surfaces, dark forest navigation, fine rules, and a restrained lime selection make the current stop easy to find while guardrails remain alongside it.
+Open Dialer v2 is an Operate-mode product: dense enough to work from all day, quiet enough that a caller can scan the next decision without visual noise. Dark neutral layers do the structural work; one aubergine accent communicates selection and forward action.
+
+It uses one sans-serif family. Hierarchy comes from the approved type scale, weight, and space—not extra fonts or near-duplicate sizes.
 
 **Key Characteristics:**
-- Dense, legible work areas with clear labels and dividers.
-- Flat tonal panels and compact controls, with depth reserved for overlays.
-- Status and compliance information expressed in words as well as color.
+
+- Compact, high-contrast operational surfaces with meaningful dividers.
+- One purposeful accent color; status is always named as well as colored.
+- A stable control vocabulary so a familiar action looks familiar on every screen.
 
 ## Colors
 
-Dark forest `#122018` anchors the sidebar and primary actions; `#17251e` is the default text. Warm paper `#f4f1e8`, surface `#faf8f1`, recessed `#e8e5d9`, and divider `#c8c8ba` form the workspace. Muted green `#607568` supports secondary text. Lime `#d9f99d` marks active navigation and small identity accents; pale green `#e6f5c7` marks the selected queue item. Status pills use quiet gray, good green, or alert coral with text labels. The focus outline is `#b7ed64`.
+The palette is intentionally narrow: neutral layers establish hierarchy, and aubergine communicates action.
+
+### Primary
+
+- **Aubergine action:** `accent`, `accent-hover`, and `accent-text` are the only primary-action colors. Use them for the primary button, selected navigation, conversion, and keyboard focus.
+
+### Neutral
+
+- **Night canvas:** `canvas` is the application backdrop; `sidebar` is a quiet navigation plane.
+- **Layered work surface:** `surface`, `surface-raised`, and `input` separate grouped work without decorative shadows.
+- **Readable ink:** `text`, `text-muted`, and `border` are the general content, helper, and rule colors.
+
+### Feedback
+
+- **Named warning:** `danger` is reserved for destructive or failed states. Do not use the accent color for errors.
+
+**The One Accent Rule.** Do not introduce blue, green, or a second purple for a normal action. If a state needs semantic meaning, pair its limited color with explicit text.
 
 ## Typography
 
-The interface uses Inter when available, followed by system sans-serif fallbacks. The page title is 35px with tight tracking and a 1.05 line height; the selected lead name is 33px. Compact 11px, bold, tracked uppercase labels mark dates, panel kickers, and facts. Body and control text generally ranges from 12–16px. The call objective uses 16px / 1.55 and a maximum width of 56 characters.
+Use the one `Inter` system stack in `src/design-system.css`. The approved text sizes are exactly **10, 12, 14, 20, and 32px**. Icons may use their own optical sizes; they are not a second type scale.
+
+- `label` (10px): uppercase table headers, compact section labels, and navigation grouping.
+- `meta` (12px): buttons, supporting data, compact controls, and secondary navigation.
+- `body` (14px): forms, list content, descriptions, and default copy.
+- `title` (20px): card, panel, and brand titles.
+- `page` (32px): page headings only.
+
+**The Five-Step Type Rule.** No 11px, 13px, 15px, 17px, or 18px text in new interface work. Choose the nearest approved role before adding a local override.
 
 ## Layout
 
-A 240px sidebar sits beside a centered workbench capped at 1640px, with 46px horizontal padding. The queue is a bordered three-column board: lead list, current call panel, and guardrails. Dividers and 20–31px panel padding establish rhythm; controls typically use 8–10px gaps. Other views use rows, a two-column settings grid, or a narrow activity list.
+The application uses an anchored left navigation rail and a fluid workbench. Desktop work is compact; at 820px and below, controls gain a 44px minimum height and action groups may scroll rather than collapse their labels.
 
-At 1120px and below, workbench padding becomes 28px and guardrails move beneath the two queue columns. At 820px and below, the sidebar becomes a sticky header with horizontally scrolling navigation, the queue stacks, and the lead list scrolls horizontally; settings, facts, and guardrails become one column. The table hides some fields and rearranges into two columns. At 490px and below, the add action becomes icon-only, call actions stack, and another table field is hidden. The body has a 320px minimum width.
+Use 4px only inside a tight component, 8–16px inside a control group, 24–32px between related regions, and 48px between major page sections.
+
+**The Grouping Rule.** Space within a related group is always smaller than space between groups. Do not solve hierarchy with random margins.
 
 ## Elevation & Depth
 
-The workspace is mostly flat, separated by borders and tonal changes. The sign-in card and lead dialog use `0 18px 50px` shadows; the dialog sits on a dark translucent backdrop.
+The workspace is tonal, not card-heavy. Standard surfaces use a border and adjacent tonal contrast. Only protected overlays such as dialogs use the single dialog shadow (`0 18px 50px rgb(0 0 0 / 28%)`).
 
 ## Shapes
 
-Controls use 9px corners, inputs 7px, and dialogs 12px. Statuses are fully rounded pills; the brand mark and activity marks are circles. Tables and work panels rely primarily on square edges and fine borders.
+Controls have gently rounded 8px corners; panels use 12px corners; pills are only for compact status, tags, or segmented controls. Do not invent a new radius for a new screen.
 
 ## Components
 
-- **Navigation:** icon and text rows with a lime active background; a count badge appears where applicable. The compact header preserves horizontal scrolling.
-- **Buttons:** dark filled primary and call actions; pale bordered quiet and outline actions. Primary hover changes to `#244333`. Disabled controls use 0.55 opacity and a not-allowed cursor.
-- **Queue:** selectable lead rows pair time, name, company, and chevron. Selection uses a pale green fill and dark left rule, which becomes a bottom rule on small screens. The current stop places facts, objective, call action, and compliance note together.
-- **Status and feedback:** uppercase pills pair tone with a label; notices use an icon and text. Forms have visible labels, inline errors, and busy states. Empty settings show a centered explanatory panel.
-- **Inputs and dialogs:** inputs are 43px high with light backgrounds and borders. The add-lead form is a scrollable, labelled modal; the sign-in card uses the same compact form language.
-- **Accessibility:** buttons and inputs have a 3px lime `:focus-visible` outline with 3px offset. Icon-only controls have accessible labels, the lead dialog has dialog semantics, and notices/errors use status or alert roles where implemented. Loading spinners stop animating when the user prefers reduced motion.
+All controls must map to one of these roles before new CSS is written:
+
+| Role | Existing classes | Use |
+| --- | --- | --- |
+| Primary | `primary-button`, `call-button`, `convert-button` | One forward action per context. |
+| Secondary | `quiet-button`, `outline-button`, `calls-outline-button`, `toolbar-button`, `quick-tour-button` | A visible alternative or grouped utility. |
+| Ghost / text | Inline row actions and pagination actions | Low-emphasis actions where the surrounding row supplies the boundary. |
+| Icon-only | `icon-button`, `close-button` | A familiar action with an accessible label. |
+| Destructive | Secondary shape plus `danger` text | Irreversible actions only; never make it the default primary action. |
+
+Inputs share the same 40px control height, 8px radius, border, placeholder, and focus ring. Tables use label headers, 14px primary content, and 12px supporting copy. Status chips are descriptive text first and color second.
+
+**The Variant Rule.** New screens may compose existing roles but may not create a new button look, input radius, color, or font size without first updating this document and `src/design-system.css`.
 
 ## Do's and Don'ts
 
-- Do keep the current lead, next action, and calling constraints together.
-- Do pair status color with explicit text.
-- Do preserve visible keyboard focus and labelled controls.
-- Don't present deferred calling, import, or follow-up capabilities as already available.
+Do:
 
+- Use `src/design-system.css` variables for all new color, type, spacing, radius, and focus decisions.
+- Reuse an existing action role before adding a class name.
+- Keep focus visible, labels explicit, and disabled states legible.
+
+Don't:
+
+- Add gradients, green accents, white-on-white controls, or decorative glow.
+- Use raw hex values or one-off pixel values in a new screen when a system token exists.
+- Change persisted keys, database table names, or environment variable names merely to change visible branding.

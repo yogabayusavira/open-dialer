@@ -1,30 +1,29 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-09T00:00:00Z",
-  "title": "Design System: Callboard",
+  "generatedAt": "2026-11-10T00:00:00Z",
+  "title": "Design System: Open Dialer v2",
   "extensions": {
-    "shadows": [
-      {"name": "dialog", "value": "0 18px 50px rgba(12, 26, 16, 0.25)", "purpose": "Lift the add-lead dialog above its backdrop."},
-      {"name": "login", "value": "0 18px 50px rgba(0, 0, 0, 0.28)", "purpose": "Lift the sign-in card."}
-    ],
-    "motion": [{"name": "spinner", "value": "spin 0.9s linear infinite", "purpose": "Indicate an ongoing request; animation stops when prefers-reduced-motion is reduce."}],
-    "breakpoints": [{"name": "queue", "value": "1120px"}, {"name": "compact", "value": "820px"}, {"name": "small", "value": "490px"}]
+    "shadows": [{"name": "dialog", "value": "0 18px 50px rgb(0 0 0 / 28%)", "purpose": "Lift a protected dialog above its backdrop."}],
+    "motion": [{"name": "spinner", "value": "spin 0.9s linear infinite", "purpose": "Show an active request; it stops under reduced-motion preference."}],
+    "breakpoints": [{"name": "compact", "value": "820px"}]
   },
   "components": [
-    {"name":"Primary button","kind":"button","refersTo":"button-primary","description":"Main action.","html":"<button class=\"ds-primary\">Add lead</button>","css":".ds-primary{border:0;border-radius:9px;min-height:43px;padding:0 16px;background:#122018;color:#fff;font:800 14px Inter,system-ui,sans-serif;cursor:pointer}.ds-primary:hover{background:#244333}.ds-primary:focus-visible{outline:3px solid #b7ed64;outline-offset:3px}.ds-primary:disabled{cursor:not-allowed;opacity:.55}"},
-    {"name":"Quiet button","kind":"button","description":"Secondary action.","html":"<button class=\"ds-quiet\">Do not call</button>","css":".ds-quiet{background:#f8f5ed;border:1px solid #cfcdbf;color:#254235;border-radius:9px;min-height:42px;padding:0 14px;font:14px Inter,system-ui,sans-serif;cursor:pointer}.ds-quiet:focus-visible{outline:3px solid #b7ed64;outline-offset:3px}"},
-    {"name":"Text input","kind":"input","description":"Labelled form input.","html":"<label class=\"ds-label\">Name<input class=\"ds-input\" placeholder=\"Name\"></label>","css":".ds-label{display:grid;gap:7px;color:#41604e;font:800 12px Inter,system-ui,sans-serif}.ds-input{height:43px;padding:0 12px;border:1px solid #babdb1;border-radius:7px;background:#fffdf8;color:#17251e;font:14px Inter,system-ui,sans-serif}.ds-input:focus-visible{outline:3px solid #b7ed64;outline-offset:3px}"},
-    {"name":"Active navigation","kind":"nav","description":"Selected workspace section.","html":"<nav class=\"ds-nav\"><button class=\"ds-nav-item\">Calling queue <b>3</b></button></nav>","css":".ds-nav{background:#122018;padding:12px;width:210px}.ds-nav-item{display:flex;align-items:center;justify-content:space-between;width:100%;border:0;border-radius:9px;background:#d9f99d;color:#122018;padding:12px 11px;font:800 14px Inter,system-ui,sans-serif;text-align:left}.ds-nav-item b{background:#122018;color:#d9f99d;border-radius:12px;padding:3px 7px;font-size:11px}.ds-nav-item:focus-visible{outline:3px solid #b7ed64;outline-offset:3px}"},
-    {"name":"Status","kind":"chip","refersTo":"status-quiet","description":"Text-labelled state.","html":"<span class=\"ds-status\">Window pending</span>","css":".ds-status{display:inline-flex;border-radius:99px;padding:5px 9px;background:#e8e8df;color:#536158;font:800 11px Inter,system-ui,sans-serif;letter-spacing:.02em;text-transform:uppercase}"},
-    {"name":"Selected queue item","kind":"custom","description":"Current route selection.","html":"<button class=\"ds-stop\"><span>09:30</span><span><b>Jordan Lee</b><small>Example company</small></span><span>›</span></button>","css":".ds-stop{display:grid;grid-template-columns:48px 1fr 17px;align-items:center;gap:9px;width:260px;text-align:left;border:0;border-left:3px solid #355b3d;background:#e6f5c7;color:#213a2d;padding:15px 14px;font:700 12px Inter,system-ui,sans-serif}.ds-stop b,.ds-stop small{display:block}.ds-stop b{font-size:14px}.ds-stop small{color:#688073;font-size:12px;font-weight:400;margin-top:3px}.ds-stop:focus-visible{outline:3px solid #b7ed64;outline-offset:3px}"}
+    {"name": "Primary button", "kind": "button", "refersTo": "button-primary", "description": "Single forward action in a work context.", "html": "<button class=\"ds-primary\">Save lead</button>", "css": ".ds-primary{min-height:40px;padding:0 16px;border:1px solid transparent;border-radius:8px;background:var(--color-accent,#4a0d72);color:var(--color-accent-text,#e4c8ff);font:800 12px Inter,system-ui,sans-serif;letter-spacing:.02em;cursor:pointer}.ds-primary:hover{background:var(--color-accent-hover,#5c0f8d)}.ds-primary:focus-visible{outline:2px solid var(--color-focus,#cda4ff);outline-offset:3px}.ds-primary:disabled{opacity:.55;cursor:not-allowed}"},
+    {"name": "Secondary button", "kind": "button", "refersTo": "button-secondary", "description": "Visible alternative action or grouped utility.", "html": "<button class=\"ds-secondary\">Cancel</button>", "css": ".ds-secondary{min-height:40px;padding:0 12px;border:1px solid var(--color-border,#30302d);border-radius:8px;background:var(--color-surface,#1c1c1a);color:var(--color-text,#f3f2ed);font:700 12px Inter,system-ui,sans-serif;cursor:pointer}.ds-secondary:hover{background:var(--color-surface-raised,#20201e);border-color:var(--color-border-strong,#3b3b37)}.ds-secondary:focus-visible{outline:2px solid var(--color-focus,#cda4ff);outline-offset:3px}"},
+    {"name": "Text input", "kind": "input", "refersTo": "input", "description": "Standard 40px field for filters and forms.", "html": "<label class=\"ds-label\">Lead name<input class=\"ds-input\" placeholder=\"Search leads\"></label>", "css": ".ds-label{display:grid;gap:8px;color:var(--color-text-muted,#aaa9a2);font:800 10px Inter,system-ui,sans-serif;letter-spacing:.06em;text-transform:uppercase}.ds-input{height:40px;padding:0 12px;border:1px solid var(--color-border,#30302d);border-radius:8px;background:var(--color-input,#181817);color:var(--color-text,#f3f2ed);font:14px Inter,system-ui,sans-serif}.ds-input::placeholder{color:var(--color-text-faint,#777770)}.ds-input:focus-visible{outline:2px solid var(--color-focus,#cda4ff);outline-offset:3px}"},
+    {"name": "Active navigation", "kind": "nav", "description": "Current workspace section.", "html": "<nav class=\"ds-nav\"><button class=\"ds-nav-item\">Calling queue <b>3</b></button></nav>", "css": ".ds-nav{width:210px;padding:12px;background:var(--color-sidebar,#151513)}.ds-nav-item{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:40px;padding:0 12px;border:0;border-radius:8px;background:var(--color-accent-subtle,#251436);color:var(--color-accent-text,#e4c8ff);font:700 12px Inter,system-ui,sans-serif;text-align:left}.ds-nav-item b{padding:3px 7px;border-radius:999px;background:var(--color-accent,#4a0d72);color:inherit;font-size:10px}.ds-nav-item:focus-visible{outline:2px solid var(--color-focus,#cda4ff);outline-offset:3px}"},
+    {"name": "Status chip", "kind": "chip", "description": "Compact named state; color never carries the meaning alone.", "html": "<span class=\"ds-status\">Follow up</span>", "css": ".ds-status{display:inline-flex;align-items:center;min-height:28px;padding:0 9px;border:1px solid #3b2573;border-radius:999px;background:var(--color-accent-subtle,#251436);color:var(--color-accent-text,#e4c8ff);font:800 10px Inter,system-ui,sans-serif;letter-spacing:.03em;text-transform:uppercase}"}
   ],
   "narrative": {
-    "northStar": "The route board",
-    "overview": "A practical working interface organized around the next call. Warm paper surfaces, dark forest navigation, fine rules, and a restrained lime selection make the current stop easy to find while guardrails remain alongside it.",
-    "keyCharacteristics": ["Dense, legible work areas with clear labels and dividers.", "Flat tonal panels and compact controls, with depth reserved for overlays.", "Status and compliance information expressed in words as well as color."],
-    "rules": [],
-    "dos": ["Do keep the current lead, next action, and calling constraints together.", "Do pair status color with explicit text.", "Do preserve visible keyboard focus and labelled controls."],
-    "donts": ["Don't present deferred calling, import, or follow-up capabilities as already available."]
+    "northStar": "The focused switchboard.",
+    "overview": "A dense, calm calling workspace built for scanning and follow-through. Neutral surfaces establish the work area while aubergine marks the selected or forward action.",
+    "keyCharacteristics": ["One sans-serif family and a five-step type scale.", "Neutral tonal surfaces with precise borders.", "A stable action vocabulary across every workspace."],
+    "rules": [
+      {"name": "The One Accent Rule", "description": "Do not introduce blue, green, or a second purple for normal actions.", "section": "Colors"},
+      {"name": "The Five-Step Type Rule", "description": "New interface work uses only 10, 12, 14, 20, or 32px text.", "section": "Typography"},
+      {"name": "The Variant Rule", "description": "New screens compose documented control roles before adding new visual treatments.", "section": "Components"}
+    ],
+    "dos": ["Use semantic variables from src/design-system.css.", "Reuse existing action roles.", "Keep focus visible and labels explicit."],
+    "donts": ["Do not add green accents or decorative gradients.", "Do not add raw color or size values where a token exists.", "Do not change persisted internal names for a visual rebrand."]
   }
 }
-

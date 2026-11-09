@@ -1,0 +1,143 @@
+/* Open Dialer v2 design system. New interface work must use these semantic tokens. */
+:root {
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  --color-canvas: #111110;
+  --color-sidebar: #151513;
+  --color-surface: #1c1c1a;
+  --color-surface-raised: #20201e;
+  --color-input: #181817;
+  --color-border: #30302d;
+  --color-border-strong: #3b3b37;
+  --color-text: #f3f2ed;
+  --color-text-muted: #aaa9a2;
+  --color-text-faint: #777770;
+  --color-accent: #4a0d72;
+  --color-accent-hover: #5c0f8d;
+  --color-accent-text: #e4c8ff;
+  --color-accent-subtle: #251436;
+  --color-accent-border: #3b2573;
+  --color-link: #cda4ff;
+  --color-danger: #f1aaa0;
+  --color-focus: #cda4ff;
+
+  --font-size-label: 10px;
+  --font-size-meta: 12px;
+  --font-size-body: 14px;
+  --font-size-title: 20px;
+  --font-size-page: 32px;
+  --line-height-tight: 1.2;
+  --line-height-body: 1.5;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  --radius-control: 8px;
+  --radius-surface: 12px;
+  --radius-pill: 999px;
+  --shadow-dialog: 0 18px 50px rgb(0 0 0 / 28%);
+}
+
+html { background: var(--color-canvas); }
+body, button, input, select, textarea { font-family: var(--font-sans); }
+body { color: var(--color-text); background: var(--color-canvas); }
+::selection { color: var(--color-text); background: var(--color-accent); }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 3px;
+}
+
+/* Shared controls: actions are primary, secondary, ghost, or icon-only. */
+.primary-button, .call-button {
+  min-height: 40px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  padding: 0 var(--space-4);
+  background: var(--color-accent);
+  color: var(--color-accent-text);
+  font-size: var(--font-size-meta);
+  font-weight: 800;
+  line-height: var(--line-height-tight);
+  letter-spacing: .02em;
+}
+.primary-button:hover:not(:disabled), .call-button:hover:not(:disabled) { background: var(--color-accent-hover); }
+.quiet-button, .outline-button, .calls-outline-button, .toolbar-button, .quick-tour-button {
+  min-height: 40px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 0 var(--space-3);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-meta);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
+}
+.quiet-button:hover:not(:disabled), .outline-button:hover:not(:disabled), .calls-outline-button:hover:not(:disabled), .toolbar-button:hover:not(:disabled), .quick-tour-button:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+.calls-export-button { color: var(--color-text-faint); }
+.icon-button, .close-button {
+  display: inline-grid;
+  width: 40px;
+  height: 40px;
+  min-height: 40px;
+  place-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-text);
+}
+.icon-button:hover:not(:disabled), .close-button:hover:not(:disabled) { background: var(--color-surface-raised); }
+
+input, select, textarea {
+  border-color: var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-input);
+  color: var(--color-text);
+  font-size: var(--font-size-body);
+}
+input::placeholder, textarea::placeholder { color: var(--color-text-faint); opacity: 1; }
+
+.brand { font-size: var(--font-size-title); }
+.brand-mark { background: var(--color-accent); color: var(--color-accent-text); }
+.sidebar { background: var(--color-sidebar); }
+.nav-item { color: var(--color-text-muted); border-radius: var(--radius-control); }
+.nav-item:hover { background: var(--color-surface-raised); color: var(--color-text); }
+.nav-item--active { background: var(--color-accent-subtle); color: var(--color-accent-text); }
+.nav-item b, .nav-item--active b { background: var(--color-accent); color: var(--color-accent-text); }
+.nav-item--active svg { color: var(--color-accent-text); }
+
+.lead-toolbar, .lead-list, .settings-card, .settings-panel, .calls-card, .tour-card, .modal-card {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+}
+.lead-list-table th, .panel-kicker, .date-line, .route-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-label);
+}
+.lead-list-table td, .prospect-button b, .contact-phone { color: var(--color-text); }
+.prospect-button small, .lead-list-table td > small, .empty-cell, .next-step { color: var(--color-text-muted); }
+.prospect-identity > i { background: var(--color-surface-raised); color: var(--color-text-muted); }
+.lead-status { border-color: var(--color-accent-border); background: var(--color-accent-subtle); color: var(--color-accent-text); }
+.lead-status svg { color: var(--color-link); }
+.lead-status.is-dnc { border-color: var(--color-border-strong); background: var(--color-surface-raised); color: var(--color-text-muted); }
+.lead-row-actions .convert-button { background: var(--color-accent); color: var(--color-accent-text); border-radius: var(--radius-control); }
+.lead-row-actions .convert-button:hover { background: var(--color-accent-hover); }
+.lead-row-actions .convert-button + button { background: var(--color-input); color: var(--color-text); border-radius: var(--radius-control); }
+
+.settings-tabs { border-bottom-color: var(--color-border); }
+.settings-tabs button, .settings-nav button { color: var(--color-text-muted); font-size: var(--font-size-meta); }
+.settings-tabs button.is-active { color: var(--color-text); border-bottom-color: var(--color-accent); }
+.settings-nav button:hover, .settings-nav button.is-active { background: var(--color-surface-raised); color: var(--color-text); }
+.settings-nav > span { color: var(--color-text-faint); font-size: var(--font-size-label); }
+
+@media (max-width: 820px) {
+  .primary-button, .call-button, .quiet-button, .outline-button, .calls-outline-button, .toolbar-button, .quick-tour-button { min-height: 44px; }
+}
