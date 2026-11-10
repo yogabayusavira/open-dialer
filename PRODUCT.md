@@ -33,7 +33,7 @@ Users connect a Twilio account by entering an Account SID and Auth Token on a se
 - Manual lead creation, lead stages, and do-not-call suppression are implemented. CSV import, call outcomes, editable notes, and follow-up scheduling are deliberate next slices, not represented as live controls in this build.
 - Do-not-call suppression, local calling-window checks, and audit events are MVP requirements.
 - Automatic/predictive dialing, recordings, transcription, SMS, AI coaching, billing, and analytics beyond the work queue are deliberately deferred.
-- Real outbound calling remains disabled until production voice webhooks and the required Twilio Voice configuration are supplied.
+- Outbound calls use a two-leg Twilio bridge: the saved operator number rings first, then a short-lived signed TwiML endpoint dials the lead using the selected caller ID.
 
 ## Evidence on Hand
 

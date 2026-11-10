@@ -9,14 +9,12 @@ import {
   CircleAlert,
   CircleDot,
   ClipboardList,
-  Database,
   FileUp,
   Filter,
   LoaderCircle,
   LockKeyhole,
   MoreHorizontal,
   Phone,
-  PhoneIncoming,
   PhoneCall,
   Plus,
   Search,
@@ -47,26 +45,42 @@ type Connection = {
   selectedNumber: string;
   selectedNumberLabel: string;
   connectedAt: string;
+  bridgeNumber?: string;
+};
+type Opportunity = {
+  id: string;
+  leadId: string;
+  name: string;
+  company: string;
+  contact: string;
+  value: number;
+  stage: "Qualification" | "Proposal" | "Negotiation" | "Closed Won" | "Closed Lost";
+  createdAt: string;
+};
+type CallRecord = {
+  id: string;
+  leadId: string;
+  outcome: string;
+  note: string;
+  at: string;
 };
 type State = {
   leads: Lead[];
   activity: { id: string; at: string; action: string; detail: string }[];
   connection: Connection | null;
+  opportunities: Opportunity[];
+  calls: CallRecord[];
+  dncNumbers: string[];
 };
 type NumberOption = { sid: string; number: string; label: string };
 type Session = { requiresAuth: boolean; authenticated: boolean };
-type Screen = "queue" | "calls" | "leads" | "followups" | "activity" | "settings";
-type SettingsArea = "calling" | "workspace" | "integrations" | "account";
+type Screen = "queue" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "settings";
+type SettingsArea = "calling" | "workspace" | "account";
 type SettingsPage =
   | "numbers"
-  | "outcomes"
-  | "voicemail"
   | "team"
   | "fields"
-  | "research"
-  | "crm"
   | "profile"
-  | "billing"
   | "privacy";
 
 class ApiError extends Error {
@@ -84,7 +98,7 @@ const nav = [
   { id: "calls", key: "calls", label: "Calls", icon: Phone },
   { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock },
   { id: "sequences", key: "activity", label: "Sequences", icon: ClipboardList },
-  { id: "pipeline", key: "activity", label: "Pipeline", icon: SlidersHorizontal },
+  { id: "pipeline", key: "pipeline", label: "Pipeline", icon: SlidersHorizontal },
 ] as const;
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -197,9 +211,14 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [showLeadForm, setShowLeadForm] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [dncOpen, setDncOpen] = useState(false);
+  const [convertLead, setConvertLead] = useState<Lead | null>(null);
+  const [outcomeLead, setOutcomeLead] = useState<Lead | null>(null);
   const [tourStep, setTourStep] = useState<number | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [lightMode, setLightMode] = useState(() => localStorage.getItem("open-dialer-theme") === "light");
 
   const refresh = async () => {
     try {
@@ -240,6 +259,10 @@ function App() {
         ),
       );
   }, []);
+  useEffect(() => {
+    document.documentElement.dataset.theme = lightMode ? "light" : "dark";
+    localStorage.setItem("open-dialer-theme", lightMode ? "light" : "dark");
+  }, [lightMode]);
   const selected = useMemo(
     () =>
       state?.leads.find((lead) => lead.id === selectedId) || state?.leads[0],
@@ -256,10 +279,12 @@ function App() {
 
   const prepareCall = async (lead: Lead) => {
     try {
-      await api("/api/calls/prepare", {
+      await api("/api/calls/start", {
         method: "POST",
         body: JSON.stringify({ leadId: lead.id }),
       });
+      await refresh();
+      setNotice(`Calling your bridge number now. Answer it to connect with ${lead.name}.`);
     } catch (error) {
       setNotice(
         error instanceof Error ? error.message : "Could not prepare the call.",
@@ -282,6 +307,14 @@ function App() {
       setNotice(
         error instanceof Error ? error.message : "Could not update the lead.",
       );
+    }
+  };
+  const updateOpportunity = async (id: string, body: Partial<Pick<Opportunity, "stage" | "value">>) => {
+    try {
+      await api(`/api/opportunities/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+      await refresh();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update the opportunity.");
     }
   };
 
@@ -335,15 +368,15 @@ function App() {
               {id === "tasks" && <b>{followUps.length}</b>}
             </button>
           ))}
-          <button className="nav-item" type="button" onClick={() => setNotice("Additional workspace tools are coming in a later release.")}>
+          <button className="nav-item" type="button" onClick={() => setScreen("activity")}>
             <MoreHorizontal size={18} />
             <span>More</span>
           </button>
         </nav>
         <div className="sidebar-footer">
-          <button className="nav-item sidebar-utility" type="button" onClick={() => setNotice("The dark workspace theme is active.")}>
+          <button className="nav-item sidebar-utility" type="button" onClick={() => setLightMode((current) => !current)}>
             <ShieldCheck size={18} />
-            <span>Light mode</span>
+            <span>{lightMode ? "Dark mode" : "Light mode"}</span>
           </button>
           <button className="nav-item sidebar-utility" type="button" onClick={() => setScreen("settings")}>
             <SlidersHorizontal size={18} />
@@ -406,31 +439,35 @@ function App() {
             selected={selected}
             onSelect={setSelectedId}
             onPrepare={prepareCall}
+            onRecord={(lead) => setOutcomeLead(lead)}
             onDnc={setDnc}
             onSettings={() => setScreen("settings")}
           />
         )}
         {screen === "calls" && (
           <CallHistory
+            calls={state.calls}
+            leads={state.leads}
             onStartDialing={() => setScreen("leads")}
-            onOpenDialer={() =>
-              setNotice("Manual dialing needs a configured Voice bridge before it can be used.")
-            }
+            onOpenDialer={() => {
+              setSelectedId(state.leads.find((lead) => !lead.dnc)?.id || null);
+              setScreen("queue");
+            }}
             onOpenPhoneNumbers={() => setScreen("settings")}
-            onUpgrade={() => setNotice("Billing and plan management has not been implemented yet.")}
+            onUpgrade={() => setScreen("settings")}
           />
         )}
         {screen === "leads" && (
           <LeadList
             leads={state.leads}
             selectedId={selected?.id || null}
-            onSelect={setSelectedId}
-            onDnc={setDnc}
             onOpen={(id) => {
               setSelectedId(id);
               setScreen("queue");
             }}
-            onNotice={setNotice}
+            onConvert={(lead) => setConvertLead(lead)}
+            onImport={() => setImportOpen(true)}
+            onDncList={() => setDncOpen(true)}
           />
         )}
         {screen === "followups" && (
@@ -443,6 +480,9 @@ function App() {
           />
         )}
         {screen === "activity" && <ActivityLog activity={state.activity} />}
+        {screen === "pipeline" && (
+          <Pipeline opportunities={state.opportunities} onUpdate={updateOpportunity} />
+        )}
         {screen === "settings" && (
           <Settings
             connection={state.connection}
@@ -461,6 +501,10 @@ function App() {
           }}
         />
       )}
+      {importOpen && <ImportLeads onClose={() => setImportOpen(false)} onSaved={async (message) => { setImportOpen(false); await refresh(); setNotice(message); }} />}
+      {dncOpen && <DncList onClose={() => setDncOpen(false)} onSaved={async (message) => { setDncOpen(false); await refresh(); setNotice(message); }} />}
+      {convertLead && <ConvertLead lead={convertLead} onClose={() => setConvertLead(null)} onSaved={async () => { setConvertLead(null); await refresh(); setScreen("pipeline"); setNotice(`${convertLead.name} is now an opportunity.`); }} />}
+      {outcomeLead && <CallOutcome lead={outcomeLead} onClose={() => setOutcomeLead(null)} onSaved={async () => { setOutcomeLead(null); await refresh(); }} />}
       {tourStep !== null && (
         <QuickTour
           step={tourStep}
@@ -482,11 +526,15 @@ function App() {
 }
 
 function CallHistory({
+  calls,
+  leads,
   onStartDialing,
   onOpenDialer,
   onOpenPhoneNumbers,
   onUpgrade,
 }: {
+  calls: CallRecord[];
+  leads: Lead[];
   onStartDialing: () => void;
   onOpenDialer: () => void;
   onOpenPhoneNumbers: () => void;
@@ -497,12 +545,24 @@ function CallHistory({
   const [range, setRange] = useState("Last 30 days");
   const [outcome, setOutcome] = useState("All outcomes");
   const isCallbacks = view === "callbacks";
-  const subtitle =
-    view === "conversations"
-      ? "0 calls where someone actually talked"
-      : view === "attempts"
-        ? "0 dial attempts"
-        : "Leads who called back the number you dialed them from";
+  const cutoff = range === "All time" ? 0 : Date.now() - ({ "Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90 }[range] || 30) * 86_400_000;
+  const entries = calls
+    .map((call) => ({ ...call, lead: leads.find((lead) => lead.id === call.leadId) }))
+    .filter((call) => call.lead && new Date(call.at).getTime() >= cutoff)
+    .filter((call) => view === "callbacks" ? call.outcome === "Callback" : view === "conversations" ? ["Interested", "Meeting booked", "Callback", "Maybe later", "Not interested"].includes(call.outcome) : true)
+    .filter((call) => outcome === "All outcomes" || call.outcome === outcome)
+    .filter((call) => [call.lead?.name, call.lead?.company, call.outcome, call.note].join(" ").toLowerCase().includes(query.toLowerCase()));
+  const exportCalls = () => {
+    const lines = [["Date", "Lead", "Company", "Phone", "Outcome", "Note"], ...entries.map((call) => [new Date(call.at).toLocaleString(), call.lead?.name || "", call.lead?.company || "", call.lead?.phone || "", call.outcome, call.note])];
+    const csv = lines.map((row) => row.map((item) => `"${String(item).replaceAll('"', '""')}"`).join(",")).join("\n");
+    const href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = "open-dialer-calls.csv";
+    anchor.click();
+    URL.revokeObjectURL(href);
+  };
+  const subtitle = view === "conversations" ? `${entries.length} recorded conversations` : view === "attempts" ? `${entries.length} recorded call attempts` : `${entries.length} callbacks`;
 
   return (
     <section className="calls-page" aria-labelledby="calls-heading">
@@ -518,18 +578,16 @@ function CallHistory({
           <button className="calls-outline-button" onClick={onOpenDialer}>
             <Phone size={15} /> Phone dialer
           </button>
-          <button className="calls-export-button" disabled>
+          <button className="calls-export-button" onClick={exportCalls} disabled={!entries.length}>
             Export
           </button>
         </div>
       </header>
 
-      <div className="calls-limit" aria-label="Monthly calling limit">
-        <strong>0 / 500 calls this month</strong>
-        <span>500 left on the free plan — resets on the 1st.</span>
-        <button type="button" onClick={onUpgrade}>
-          Upgrade for unlimited →
-        </button>
+      <div className="calls-limit" aria-label="Call history status">
+        <strong>{calls.length} calls recorded</strong>
+        <span>Every outcome is retained in this workspace and can be exported.</span>
+        <button type="button" onClick={onUpgrade}>Manage calling settings →</button>
       </div>
 
       <div className="calls-tabs" role="tablist" aria-label="Call history view">
@@ -587,24 +645,7 @@ function CallHistory({
         </div>
       )}
 
-      <div className="calls-empty">
-        {isCallbacks ? (
-          <>
-            <p>Callbacks are off. Turn them on and every lead who calls back the number you dialed them from shows up here.</p>
-            <button type="button" onClick={onOpenPhoneNumbers}>Turn on callbacks in Phone numbers →</button>
-          </>
-        ) : (
-          <>
-            <p>{view === "conversations" ? "No conversations in this range." : "No calls in this range."}</p>
-            <span>
-              {view === "conversations"
-                ? "Calls appear here once someone picks up. "
-                : "The CSV export includes timestamps, outcomes, notes, and transcripts. "}
-              <button type="button" onClick={onStartDialing}>Start dialing →</button>
-            </span>
-          </>
-        )}
-      </div>
+      {!entries.length ? <div className="calls-empty"><p>{isCallbacks ? "No callbacks are recorded yet." : "No calls match this view."}</p><span><button type="button" onClick={onStartDialing}>Open leads →</button> or <button type="button" onClick={onOpenPhoneNumbers}>review phone settings →</button></span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><b>{call.lead?.name}</b><small>{call.lead?.company} · {call.lead?.phone}</small></div><Status tone={call.outcome === "Do not call" ? "alert" : "good"}>{call.outcome}</Status><div><small>{new Date(call.at).toLocaleString()}</small>{call.note && <p>{call.note}</p>}</div></article>)}</div>}
     </section>
   );
 }
@@ -614,6 +655,7 @@ function Queue({
   selected,
   onSelect,
   onPrepare,
+  onRecord,
   onDnc,
   onSettings,
 }: {
@@ -621,6 +663,7 @@ function Queue({
   selected: Lead;
   onSelect: (id: string) => void;
   onPrepare: (lead: Lead) => void;
+  onRecord: (lead: Lead) => void;
   onDnc: (lead: Lead, value: boolean) => void;
   onSettings: () => void;
 }) {
@@ -712,8 +755,9 @@ function Queue({
               onClick={() => onPrepare(selected)}
               disabled={selected.dnc}
             >
-              <Phone size={19} /> Prepare call
+              <Phone size={19} /> Call lead
             </button>
+            <button className="quiet-button" onClick={() => onRecord(selected)}>Log outcome</button>
           </div>
           <p className="compliance-note">
             <LockKeyhole size={15} />{" "}
@@ -725,8 +769,7 @@ function Queue({
                 before calls can be prepared.
               </>
             )}{" "}
-            Calls remain disabled until the production Voice bridge is
-            configured.
+            Calls ring your saved operator number first, then connect the lead.
           </p>
         </article>
         <aside className="guardrail-panel">
@@ -762,7 +805,7 @@ function Queue({
             </li>
           </ul>
           <div className="guardrail-footer">
-            No recording or automated dialing in this release.
+            DNC, the selected number, and the calling bridge are checked before every call.
           </div>
         </aside>
       </section>
@@ -773,19 +816,21 @@ function Queue({
 function LeadList({
   leads,
   selectedId,
-  onSelect,
-  onDnc,
   onOpen,
-  onNotice,
+  onConvert,
+  onImport,
+  onDncList,
 }: {
   leads: Lead[];
   selectedId: string | null;
-  onSelect: (id: string) => void;
-  onDnc: (lead: Lead, value: boolean) => void;
   onOpen: (id: string) => void;
-  onNotice: (message: string) => void;
+  onConvert: (lead: Lead) => void;
+  onImport: () => void;
+  onDncList: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [sort, setSort] = useState<"newest" | "name">("newest");
   const [segment, setSegment] = useState<
     "all" | "to-call" | "try-again" | "follow-up" | "closed"
   >("all");
@@ -802,9 +847,9 @@ function LeadList({
     { key: "follow-up" as const, label: "Follow up", detail: "A scheduled next step", count: groups["follow-up"].length },
     { key: "closed" as const, label: "Closed", detail: "DNC or no longer active", count: groups.closed.length },
   ];
-  const visibleLeads = (segment === "all" ? leads : groups[segment]).filter((lead) =>
-    [lead.name, lead.company, lead.phone, lead.status].join(" ").toLowerCase().includes(query.trim().toLowerCase()),
-  );
+  const visibleLeads = (segment === "all" ? leads : groups[segment])
+    .filter((lead) => [lead.name, lead.company, lead.phone, lead.status].join(" ").toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((left, right) => sort === "name" ? left.name.localeCompare(right.name) : 0);
 
   return (
     <section className="lead-workspace">
@@ -842,20 +887,21 @@ function LeadList({
           />
         </label>
         <div className="lead-toolbar__actions">
-          <button className="toolbar-button" type="button" onClick={() => onNotice("Saved filters are the next implementation slice.")}>
+          <button className="toolbar-button" type="button" aria-expanded={filterOpen} onClick={() => setFilterOpen((open) => !open)}>
             <Filter size={16} /> Filters
           </button>
-          <button className="toolbar-button toolbar-button--select" type="button" onClick={() => onNotice("Sorting controls are coming in a later release.")}>
-            Newest first <ChevronRight size={15} />
+          <button className="toolbar-button toolbar-button--select" type="button" onClick={() => setSort((current) => current === "newest" ? "name" : "newest")}>
+            {sort === "newest" ? "Newest first" : "Name A–Z"} <ChevronRight size={15} />
           </button>
-          <button className="toolbar-button" type="button" onClick={() => onNotice("CSV import mapping is the next implementation slice. Add a lead manually for this build.")}>
+          <button className="toolbar-button" type="button" onClick={onImport}>
             <FileUp size={16} /> Import CSV
           </button>
-          <button className="toolbar-button" type="button" onClick={() => onNotice("DNC list upload is not configured in this release.")}>
+          <button className="toolbar-button" type="button" onClick={onDncList}>
             DNC list
           </button>
         </div>
       </div>
+      {filterOpen && <div className="lead-filter-menu" role="group" aria-label="Filter leads by status">{tabs.map((tab) => <button className={segment === tab.key ? "is-active" : ""} key={tab.key} type="button" onClick={() => { setSegment(tab.key); setFilterOpen(false); }}>{tab.label}</button>)}</div>}
 
       <div className="lead-table-wrap">
         <table className="lead-list-table">
@@ -931,7 +977,7 @@ function LeadList({
                   <button
                     type="button"
                     className="convert-button"
-                    onClick={() => onNotice("Opportunity conversion will be added with the Pipeline workspace.")}
+                    onClick={() => onConvert(lead)}
                   >
                     <CircleDot size={16} aria-hidden="true" /> Convert
                   </button>
@@ -985,6 +1031,51 @@ function FollowUps({
     </section>
   );
 }
+
+function Pipeline({ opportunities, onUpdate }: { opportunities: Opportunity[]; onUpdate: (id: string, body: Partial<Pick<Opportunity, "stage" | "value">>) => void }) {
+  const stages = ["Qualification", "Proposal", "Negotiation", "Closed Won", "Closed Lost"] as const;
+  const total = opportunities.reduce((sum, item) => sum + item.value, 0);
+  return <section className="pipeline-page">
+    <header className="pipeline-header"><div><h2>Sales Pipeline</h2><p>Track converted leads through the next commercial decision.</p></div><div><strong>${total.toLocaleString()}</strong><small>{opportunities.length} opportunities</small></div></header>
+    <div className="pipeline-board">{stages.map((stage) => { const items = opportunities.filter((item) => item.stage === stage); return <section className="pipeline-column" key={stage}><header><b>{stage}</b><span>{items.length} deals · ${items.reduce((sum, item) => sum + item.value, 0).toLocaleString()}</span></header>{items.length ? items.map((item) => <article className="opportunity-card" key={item.id}><b>{item.name}</b><small>{item.company} · {item.contact}</small><label>Value<input type="number" min="0" value={item.value} onChange={(event) => onUpdate(item.id, { value: Number(event.target.value) || 0 })} /></label><label>Stage<select value={item.stage} onChange={(event) => onUpdate(item.id, { stage: event.target.value as Opportunity["stage"] })}>{stages.map((option) => <option key={option}>{option}</option>)}</select></label></article>) : <p className="pipeline-empty">No opportunities</p>}</section>; })}</div>
+  </section>;
+}
+
+function ImportLeads({ onClose, onSaved }: { onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const file = new FormData(event.currentTarget).get("file");
+    if (!(file instanceof File)) return setError("Choose a CSV file first.");
+    setBusy(true); setError(null);
+    try { const result = await api<{ imported: number; skipped: number }>("/api/leads/import", { method: "POST", body: JSON.stringify({ csv: await file.text() }) }); await onSaved(`${result.imported} leads imported${result.skipped ? `; ${result.skipped} duplicates skipped` : ""}.`); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not import this CSV."); } finally { setBusy(false); }
+  };
+  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="import-leads-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="import-leads-title">Import leads</h2><p>Upload a CSV with <b>Name</b> and <b>Phone</b> columns. Company, Role, and Time zone are optional.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>CSV file<input name="file" type="file" accept=".csv,text/csv" required /></label><button className="primary-button" disabled={busy}>{busy ? "Importing…" : <><FileUp size={17} /> Import leads</>}</button></form></div>;
+}
+
+function DncList({ onClose, onSaved }: { onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+  const [numbers, setNumbers] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setError(null); try { const result = await api<{ suppressed: number; matched: number }>("/api/dnc", { method: "POST", body: JSON.stringify({ numbers: numbers.split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean) }) }); await onSaved(`${result.suppressed} numbers added to DNC; ${result.matched} existing leads suppressed.`); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not update the DNC list."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="dnc-list-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="dnc-list-title">Do-not-call list</h2><p>Paste one phone number per line. Matching leads are immediately suppressed.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Phone numbers<textarea value={numbers} onChange={(event) => setNumbers(event.target.value)} placeholder={"+15551234567\n+15557654321"} required /></label><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Suppress numbers"}</button></form></div>;
+}
+
+function ConvertLead({ lead, onClose, onSaved }: { lead: Lead; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/opportunities", { method: "POST", body: JSON.stringify({ leadId: lead.id, name: form.get("name"), value: form.get("value") }) }); await onSaved(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not convert this lead."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="convert-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="convert-title">Convert to opportunity</h2><p>{lead.name} at {lead.company} will move to Pipeline in Qualification.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Opportunity name<input name="name" defaultValue={`${lead.company} opportunity`} required /></label><label>Potential value<input name="value" type="number" min="0" defaultValue="0" required /></label><button className="primary-button" disabled={busy}>{busy ? "Converting…" : "Create opportunity"}</button></form></div>;
+}
+
+function CallOutcome({ lead, onClose, onSaved }: { lead: Lead; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt") }) }); await onSaved(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="outcome-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="outcome-title">Log call outcome</h2><p>Record the result for {lead.name}. This updates the lead and call history immediately.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Outcome<select name="outcome" defaultValue="Interested"><option>Interested</option><option>Meeting booked</option><option>Callback</option><option>Maybe later</option><option>No answer</option><option>Busy</option><option>Voicemail</option><option>Not interested</option><option>Wrong number</option><option>Do not call</option></select></label><label>Follow-up date and time <input name="followUpAt" type="datetime-local" /></label><label>Notes<textarea name="note" placeholder="What happened on this call?" /></label><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save outcome"}</button></form></div>;
+}
+
 function ActivityLog({ activity }: { activity: State["activity"] }) {
   return (
     <section className="activity-log">
@@ -1070,6 +1161,7 @@ function Settings({
   const [numbers, setNumbers] = useState<NumberOption[]>([]);
   const [selected, setSelected] = useState<NumberOption | null>(null);
   const [busy, setBusy] = useState(false);
+  const [bridgeNumber, setBridgeNumber] = useState(connection?.bridgeNumber || "");
   const [area, setArea] = useState<SettingsArea>("calling");
   const [page, setPage] = useState<SettingsPage>("numbers");
   const validate = async (event: FormEvent) => {
@@ -1131,6 +1223,19 @@ function Settings({
       );
     }
   };
+  const saveBridge = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      await api("/api/twilio/connection", { method: "PATCH", body: JSON.stringify({ bridgeNumber }) });
+      await onRefresh();
+      onNotice("Calling bridge saved. Calls will ring this number before connecting the lead.");
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Could not save the calling bridge.");
+    } finally {
+      setBusy(false);
+    }
+  };
   const selectPage = (nextArea: SettingsArea, nextPage: SettingsPage) => {
     setArea(nextArea);
     setPage(nextPage);
@@ -1138,25 +1243,20 @@ function Settings({
   const sections: Record<SettingsArea, { id: SettingsPage; label: string }[]> = {
     calling: [
       { id: "numbers", label: "Phone numbers" },
-      { id: "outcomes", label: "Call outcomes" },
-      { id: "voicemail", label: "Voicemail drop" },
     ],
     workspace: [
       { id: "team", label: "Team" },
       { id: "fields", label: "Custom fields" },
-      { id: "research", label: "AI research" },
     ],
-    integrations: [{ id: "crm", label: "CRM integrations" }],
     account: [
       { id: "profile", label: "Profile" },
-      { id: "billing", label: "Billing & plan" },
       { id: "privacy", label: "Privacy" },
     ],
   };
   return (
     <section className="settings-page">
       <div className="settings-tabs" role="tablist" aria-label="Settings sections">
-        {(["calling", "workspace", "integrations", "account"] as SettingsArea[]).map((item) => (
+        {(["calling", "workspace", "account"] as SettingsArea[]).map((item) => (
           <button key={item} type="button" role="tab" aria-selected={area === item} className={area === item ? "is-active" : ""} onClick={() => selectPage(item, sections[item][0].id)}>
             {item}
           </button>
@@ -1196,7 +1296,18 @@ function Settings({
                 <dt>Outbound number</dt>
                 <dd>{connection.selectedNumber}</dd>
               </div>
+              <div>
+                <dt>Operator bridge</dt>
+                <dd>{connection.bridgeNumber || "Not configured"}</dd>
+              </div>
             </dl>
+            <form className="bridge-form" onSubmit={saveBridge}>
+              <label>
+                Phone to ring before each call
+                <input value={bridgeNumber} onChange={(event) => setBridgeNumber(event.target.value)} placeholder="+15551234567" inputMode="tel" required />
+              </label>
+              <button className="primary-button" type="submit" disabled={busy}>Save calling bridge</button>
+            </form>
             <button className="quiet-button" onClick={remove}>
               Remove connection
             </button>
@@ -1291,11 +1402,7 @@ function Settings({
             <Check /> Set <code>CALLBOARD_ENCRYPTION_KEY</code> in Dokploy
           </span>
           <span>
-            <Check /> Mount persistent storage for <code>/app/data</code>
-          </span>
-          <span>
-            <Check /> Configure Twilio Voice webhooks before enabling outbound
-            calls
+            <Check /> Save the phone number that should ring before each outbound call
           </span>
           <span>
             <Check /> Add application authentication before inviting other
@@ -1322,41 +1429,22 @@ function SettingsPanel({
   connection: Connection | null;
   onNotice: (message: string) => void;
 }) {
-  const [outcomes, setOutcomes] = useState([
-    "Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call",
-  ]);
   const [teamName, setTeamName] = useState(() => localStorage.getItem("callboard-team-name") || "");
   const [fieldName, setFieldName] = useState("");
   const [fields, setFields] = useState<string[]>(() => JSON.parse(localStorage.getItem("callboard-lead-fields") || "[]"));
-  const [researchEnabled, setResearchEnabled] = useState(localStorage.getItem("callboard-research") === "true");
   const [profile, setProfile] = useState(() => ({
     firstName: localStorage.getItem("callboard-first-name") || "",
     company: localStorage.getItem("callboard-company") || "",
     phone: localStorage.getItem("callboard-phone") || "",
   }));
-  if (page === "outcomes") {
-    return <section className="settings-panel"><span className="panel-kicker">Calling</span><h2>Call outcomes</h2><p>Choose which outcomes appear after a call. These preferences only shape the workspace; they do not place or automate calls.</p><div className="outcome-list">{outcomes.map((outcome) => <label key={outcome}><input type="checkbox" checked onChange={() => setOutcomes((current) => current.filter((item) => item !== outcome))} />{outcome}</label>)}</div><button className="quiet-button" onClick={() => setOutcomes(["Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call"])}>Restore defaults</button></section>;
-  }
-  if (page === "voicemail") {
-    return <section className="settings-panel"><span className="panel-kicker">Calling</span><h2>Voicemail drop</h2><p>There is no recording configured. Add a compliant audio upload flow and Twilio Voice webhook before enabling voicemail drop.</p><div className="settings-callout"><PhoneIncoming size={20} /><span>This area is intentionally disabled until the calling bridge is production-ready.</span></div></section>;
-  }
   if (page === "team") {
     return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Team</h2><p>Name your workspace now. Member invitations and role management stay off until multi-user authentication is enabled.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); localStorage.setItem("callboard-team-name", teamName); onNotice("Workspace name saved in this browser."); }}><label>Workspace name<input value={teamName} onChange={(event) => setTeamName(event.target.value)} placeholder="Your company or team" /></label><button className="primary-button" type="submit">Save workspace</button></form></section>;
   }
   if (page === "fields") {
     return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Custom fields</h2><p>Capture the fields your team actually needs on every lead.</p><form className="inline-form" onSubmit={(event) => { event.preventDefault(); const value = fieldName.trim(); if (!value || fields.includes(value)) return; const next = [...fields, value]; setFields(next); localStorage.setItem("callboard-lead-fields", JSON.stringify(next)); setFieldName(""); }}><input value={fieldName} onChange={(event) => setFieldName(event.target.value)} placeholder="e.g. Territory" /><button className="primary-button" type="submit">Add field</button></form><div className="field-pills">{fields.length ? fields.map((field) => <button key={field} type="button" onClick={() => { const next = fields.filter((item) => item !== field); setFields(next); localStorage.setItem("callboard-lead-fields", JSON.stringify(next)); }}>{field} <X size={13} /></button>) : <span>No custom fields yet.</span>}</div></section>;
   }
-  if (page === "research") {
-    return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>AI research</h2><p>Keep enrichment off until you connect a provider and decide which lead data may leave Open Dialer.</p><label className="toggle-row"><span><b>Research workspace</b><small>Store this preference locally; no enrichment runs from this setting.</small></span><input type="checkbox" checked={researchEnabled} onChange={(event) => { setResearchEnabled(event.target.checked); localStorage.setItem("callboard-research", String(event.target.checked)); }} /></label></section>;
-  }
-  if (page === "crm") {
-    return <section className="settings-panel"><span className="panel-kicker">Integrations</span><h2>CRM integrations</h2><p>Keep your CRM current after calls without copying notes by hand.</p><div className="integration-card"><Database size={22} /><div><b>CRM sync</b><small>Not connected. The first integration should use an explicit OAuth connection and a one-way activity sync.</small></div><Status tone="quiet">Not connected</Status></div></section>;
-  }
   if (page === "profile") {
     return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Profile</h2><p>Your personal and company details for this Open Dialer v2 workspace.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); localStorage.setItem("callboard-first-name", profile.firstName); localStorage.setItem("callboard-company", profile.company); localStorage.setItem("callboard-phone", profile.phone); onNotice("Profile saved in this browser."); }}><label>First name<input value={profile.firstName} onChange={(event) => setProfile({ ...profile, firstName: event.target.value })} /></label><label>Business phone<input value={profile.phone} onChange={(event) => setProfile({ ...profile, phone: event.target.value })} /></label><label>Company<input value={profile.company} onChange={(event) => setProfile({ ...profile, company: event.target.value })} /></label><button className="primary-button" type="submit">Save profile</button></form></section>;
-  }
-  if (page === "billing") {
-    return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Billing &amp; plan</h2><p>Open Dialer does not process payments. Your carrier usage is billed by Twilio; deployment and database costs are managed in Dokploy.</p><div className="settings-callout"><ShieldCheck size={20} /><span>{connection ? "A Twilio line is connected. Review carrier usage in your Twilio account." : "No Twilio line is connected yet."}</span></div></section>;
   }
   return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Privacy</h2><p>Telephony credentials are encrypted server-side. This browser stores only non-sensitive workspace preferences such as your profile and custom field names.</p><div className="settings-callout"><ShieldCheck size={20} /><span>Never enter Twilio credentials into a third-party integration field.</span></div></section>;
 }

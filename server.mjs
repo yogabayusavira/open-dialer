@@ -1,5 +1,6 @@
 import {
   createCipheriv,
+  createDecipheriv,
   createHash,
   createHmac,
   randomBytes,
@@ -32,6 +33,9 @@ const loginWindowMs = 15 * 60 * 1000;
 const loginLimit = 5;
 const defaultState = {
   connection: null,
+  opportunities: [],
+  calls: [],
+  dncNumbers: [],
   leads: [
     {
       id: "lead_1",
@@ -136,6 +140,11 @@ function normalizeState(stored) {
     activity: Array.isArray(stored.activity)
       ? stored.activity
       : structuredClone(defaultState.activity),
+    opportunities: Array.isArray(stored.opportunities)
+      ? stored.opportunities
+      : [],
+    calls: Array.isArray(stored.calls) ? stored.calls : [],
+    dncNumbers: Array.isArray(stored.dncNumbers) ? stored.dncNumbers : [],
     connection: stored.connection || null,
   };
 }
@@ -188,6 +197,77 @@ function safeState(state) {
     state.connection || {};
   return { ...state, connection: state.connection ? connection : null };
 }
+function activity(state, action, detail) {
+  state.activity.unshift({
+    id: `event_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    at: new Intl.DateTimeFormat("en", {
+      month: "short",
+      day: "2-digit",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date()),
+    action,
+    detail,
+  });
+  state.activity = state.activity.slice(0, 500);
+}
+function phoneKey(value) {
+  return String(value || "").replace(/\D/g, "").slice(-15);
+}
+function parseCsvRows(source) {
+  const rows = [];
+  let cell = "";
+  let row = [];
+  let quoted = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '"') {
+      if (quoted && source[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else quoted = !quoted;
+    } else if (character === "," && !quoted) {
+      row.push(cell.trim());
+      cell = "";
+    } else if ((character === "\n" || character === "\r") && !quoted) {
+      if (character === "\r" && source[index + 1] === "\n") index += 1;
+      row.push(cell.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      cell = "";
+    } else cell += character;
+  }
+  row.push(cell.trim());
+  if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+function csvLeadRows(csv) {
+  if (typeof csv !== "string" || csv.length > 750_000)
+    throw new Error("Upload a CSV smaller than 750 KB.");
+  const rows = parseCsvRows(csv);
+  if (rows.length < 2) throw new Error("The CSV needs a header and at least one lead.");
+  const header = rows.shift().map((item) => item.toLowerCase().replace(/[^a-z]/g, ""));
+  const field = (...names) => names.map((name) => header.indexOf(name)).find((index) => index >= 0);
+  const nameIndex = field("name", "fullname", "contact");
+  const phoneIndex = field("phone", "phonenumber", "mobile", "telephone");
+  if (nameIndex === undefined || phoneIndex === undefined)
+    throw new Error("The CSV needs Name and Phone columns.");
+  const companyIndex = field("company", "account", "organization");
+  const roleIndex = field("role", "title", "jobtitle");
+  const timezoneIndex = field("timezone", "timezoneid");
+  return rows.slice(0, 1000).flatMap((row) => {
+    const name = row[nameIndex]?.trim();
+    const phone = row[phoneIndex]?.trim();
+    if (!name || !phone) return [];
+    return [{
+      name,
+      phone,
+      company: companyIndex === undefined ? "Unassigned" : row[companyIndex]?.trim() || "Unassigned",
+      role: roleIndex === undefined ? "Contact" : row[roleIndex]?.trim() || "Contact",
+      timezone: timezoneIndex === undefined ? "Unknown" : row[timezoneIndex]?.trim() || "Unknown",
+    }];
+  });
+}
 function encryptionKey() {
   const secret = process.env.CALLBOARD_ENCRYPTION_KEY;
   if (!secret || secret.length < 24)
@@ -208,6 +288,42 @@ function seal(value) {
     iv: iv.toString("base64"),
     tag: cipher.getAuthTag().toString("base64"),
   };
+}
+function unseal(connection) {
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    encryptionKey(),
+    Buffer.from(connection.iv, "base64"),
+  );
+  decipher.setAuthTag(Buffer.from(connection.tag, "base64"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(connection.tokenCiphertext, "base64")),
+    decipher.final(),
+  ]).toString("utf8");
+}
+function publicOrigin(req) {
+  const configured = process.env.OPEN_DIALER_PUBLIC_URL?.trim().replace(/\/$/, "");
+  if (configured) return configured;
+  const protocol = req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+  return `${protocol}://${req.headers.host}`;
+}
+function voiceToken(leadId, expiresAt) {
+  const payload = `${leadId}.${expiresAt}`;
+  return `${payload}.${createHmac("sha256", encryptionKey()).update(payload).digest("base64url")}`;
+}
+function validVoiceToken(token, leadId) {
+  const [tokenLeadId, expiresAt, signature] = String(token || "").split(".");
+  if (tokenLeadId !== leadId || !expiresAt || Number(expiresAt) < Date.now() || Number(expiresAt) > Date.now() + 11 * 60 * 1000 || !signature) return false;
+  const payload = `${tokenLeadId}.${expiresAt}`;
+  const expected = createHmac("sha256", encryptionKey()).update(payload).digest("base64url");
+  return safeEqual(signature, expected);
+}
+function escapeXml(value) {
+  return String(value).replace(/[<>&'\"]/g, (character) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" })[character]);
+}
+function twiml(res, source) {
+  res.writeHead(200, { "content-type": "text/xml; charset=utf-8", "cache-control": "no-store" });
+  res.end(source);
 }
 function json(res, status, payload) {
   res.writeHead(status, {
@@ -358,6 +474,15 @@ createServer(async (req, res) => {
       req.url || "/",
       `http://${req.headers.host || "localhost"}`,
     );
+    if (url.pathname === "/api/twilio/voice/connect" && req.method === "GET") {
+      const leadId = url.searchParams.get("leadId");
+      const token = url.searchParams.get("token");
+      const state = await readState();
+      const lead = state.leads.find((item) => item.id === leadId);
+      if (!lead || lead.dnc || !validVoiceToken(token, lead.id))
+        return twiml(res, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Hangup/></Response>");
+      return twiml(res, `<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId="${escapeXml(state.connection?.selectedNumber || "")}">${escapeXml(lead.phone)}</Dial></Response>`);
+    }
     if (url.pathname === "/api/session" && req.method === "GET")
       return json(res, 200, {
         requiresAuth: Boolean(configuredAdminPassword()),
@@ -429,6 +554,67 @@ createServer(async (req, res) => {
       await writeState(state);
       return json(res, 201, lead);
     }
+    if (url.pathname === "/api/leads/import" && req.method === "POST") {
+      const { csv } = await getBody(req);
+      const imported = csvLeadRows(csv);
+      if (!imported.length) return json(res, 400, { error: "No usable leads were found in that CSV." });
+      const state = await readState();
+      const known = new Set(state.leads.map((lead) => phoneKey(lead.phone)));
+      const created = imported.flatMap((candidate, index) => {
+        const key = phoneKey(candidate.phone);
+        if (!key || known.has(key)) return [];
+        known.add(key);
+        const dnc = state.dncNumbers.includes(key);
+        return [{
+          id: `lead_${Date.now()}_${index}`,
+          ...candidate,
+          status: dnc ? "Paused" : "Ready",
+          dnc,
+          note: dnc ? "Do not call: matched the workspace suppression list." : "Imported from CSV.",
+          due: dnc ? "Suppressed" : "Unscheduled",
+        }];
+      });
+      if (!created.length) return json(res, 409, { error: "Every row already exists in this workspace." });
+      state.leads.unshift(...created);
+      activity(state, "Leads imported", `${created.length} leads added from CSV`);
+      await writeState(state);
+      return json(res, 201, { imported: created.length, skipped: imported.length - created.length });
+    }
+    if (url.pathname === "/api/dnc" && req.method === "POST") {
+      const { numbers } = await getBody(req);
+      if (!Array.isArray(numbers) || numbers.length === 0)
+        return json(res, 400, { error: "Add at least one phone number to suppress." });
+      const state = await readState();
+      const additions = [...new Set(numbers.map(phoneKey).filter((number) => number.length >= 7))];
+      if (!additions.length) return json(res, 400, { error: "No valid phone numbers were found." });
+      state.dncNumbers = [...new Set([...state.dncNumbers, ...additions])];
+      let matched = 0;
+      for (const lead of state.leads) {
+        if (!additions.includes(phoneKey(lead.phone))) continue;
+        lead.dnc = true;
+        lead.status = "Paused";
+        lead.due = "Suppressed";
+        lead.note = "Do not call: matched the workspace suppression list.";
+        matched += 1;
+      }
+      activity(state, "DNC list updated", `${additions.length} numbers suppressed; ${matched} existing leads updated`);
+      await writeState(state);
+      return json(res, 200, { suppressed: additions.length, matched });
+    }
+    if (url.pathname.match(/^\/api\/dnc\/[^/]+$/) && req.method === "DELETE") {
+      const key = phoneKey(decodeURIComponent(url.pathname.split("/").pop()));
+      const state = await readState();
+      state.dncNumbers = state.dncNumbers.filter((number) => number !== key);
+      for (const lead of state.leads) {
+        if (phoneKey(lead.phone) !== key) continue;
+        lead.dnc = false;
+        lead.status = "Ready";
+        lead.due = "Unscheduled";
+      }
+      activity(state, "DNC suppression removed", "A number was allowed again");
+      await writeState(state);
+      return json(res, 204, {});
+    }
     if (url.pathname.match(/^\/api\/leads\/[^/]+$/) && req.method === "PATCH") {
       const body = await getBody(req);
       const state = await readState();
@@ -442,14 +628,78 @@ createServer(async (req, res) => {
         lead.note = body.dnc ? "Do not call: set from Open Dialer." : lead.note;
       }
       if (typeof body.status === "string") lead.status = body.status;
-      state.activity.unshift({
-        id: `event_${Date.now()}`,
-        at: "Just now",
-        action: lead.dnc ? "DNC suppression" : "Lead updated",
-        detail: `${lead.name} · ${lead.company}`,
-      });
+      activity(state, lead.dnc ? "DNC suppression" : "Lead updated", `${lead.name} · ${lead.company}`);
       await writeState(state);
       return json(res, 200, lead);
+    }
+    if (url.pathname === "/api/opportunities" && req.method === "POST") {
+      const { leadId, name, value } = await getBody(req);
+      const state = await readState();
+      const lead = state.leads.find((item) => item.id === leadId);
+      if (!lead) return json(res, 404, { error: "Lead not found." });
+      const existing = state.opportunities.find((item) => item.leadId === lead.id);
+      if (existing) return json(res, 409, { error: "This lead is already an opportunity." });
+      const amount = Number(value || 0);
+      if (!Number.isFinite(amount) || amount < 0)
+        return json(res, 400, { error: "Opportunity value must be a positive number." });
+      const opportunity = {
+        id: `opp_${Date.now()}`,
+        leadId: lead.id,
+        name: String(name || `${lead.company} opportunity`).trim().slice(0, 120) || `${lead.company} opportunity`,
+        company: lead.company,
+        contact: lead.name,
+        value: amount,
+        stage: "Qualification",
+        createdAt: new Date().toISOString(),
+      };
+      state.opportunities.unshift(opportunity);
+      lead.status = "Converted";
+      lead.due = "Converted";
+      activity(state, "Lead converted", `${lead.name} → ${opportunity.name}`);
+      await writeState(state);
+      return json(res, 201, opportunity);
+    }
+    if (url.pathname.match(/^\/api\/opportunities\/[^/]+$/) && req.method === "PATCH") {
+      const body = await getBody(req);
+      const state = await readState();
+      const opportunity = state.opportunities.find((item) => item.id === url.pathname.split("/").pop());
+      if (!opportunity) return json(res, 404, { error: "Opportunity not found." });
+      const stages = ["Qualification", "Proposal", "Negotiation", "Closed Won", "Closed Lost"];
+      if (typeof body.stage === "string" && stages.includes(body.stage)) opportunity.stage = body.stage;
+      if (body.value !== undefined) {
+        const amount = Number(body.value);
+        if (!Number.isFinite(amount) || amount < 0) return json(res, 400, { error: "Opportunity value must be a positive number." });
+        opportunity.value = amount;
+      }
+      activity(state, "Opportunity updated", `${opportunity.name} · ${opportunity.stage}`);
+      await writeState(state);
+      return json(res, 200, opportunity);
+    }
+    if (url.pathname === "/api/calls/record" && req.method === "POST") {
+      const { leadId, outcome, note, followUpAt } = await getBody(req);
+      const state = await readState();
+      const lead = state.leads.find((item) => item.id === leadId);
+      if (!lead) return json(res, 404, { error: "Lead not found." });
+      const outcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call"];
+      if (!outcomes.includes(outcome)) return json(res, 400, { error: "Choose a valid call outcome." });
+      const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString() };
+      state.calls.unshift(call);
+      if (outcome === "Do not call") {
+        lead.dnc = true;
+        lead.status = "Paused";
+        lead.due = "Suppressed";
+        state.dncNumbers = [...new Set([...state.dncNumbers, phoneKey(lead.phone)])];
+      } else if (["Callback", "Interested", "Meeting booked", "Maybe later"].includes(outcome)) {
+        lead.status = "Follow-up";
+        lead.due = typeof followUpAt === "string" && followUpAt ? followUpAt : "Follow up";
+      } else if (["Not interested", "Wrong number"].includes(outcome)) {
+        lead.status = "Closed";
+        lead.due = "Closed";
+      } else lead.status = "Try again";
+      if (call.note) lead.note = call.note;
+      activity(state, "Call outcome recorded", `${lead.name} · ${outcome}`);
+      await writeState(state);
+      return json(res, 201, call);
     }
     if (url.pathname === "/api/twilio/validate" && req.method === "POST") {
       const { accountSid, authToken } = await getBody(req);
@@ -500,24 +750,49 @@ createServer(async (req, res) => {
       await writeState(state);
       return json(res, 204, {});
     }
-    if (url.pathname === "/api/calls/prepare" && req.method === "POST") {
+    if (url.pathname === "/api/twilio/connection" && req.method === "PATCH") {
+      const { bridgeNumber } = await getBody(req);
+      const normalized = String(bridgeNumber || "").trim();
+      if (!/^\+?[1-9]\d{7,14}$/.test(normalized.replace(/[\s()-]/g, "")))
+        return json(res, 400, { error: "Enter the operator phone number in international format, for example +15551234567." });
+      const state = await readState();
+      if (!state.connection) return json(res, 409, { error: "Connect Twilio before setting the calling bridge." });
+      state.connection.bridgeNumber = normalized;
+      activity(state, "Calling bridge configured", `Operator bridge ${normalized.slice(0, 4)}••••`);
+      await writeState(state);
+      return json(res, 200, { connection: safeState(state).connection });
+    }
+    if (url.pathname === "/api/calls/start" && req.method === "POST") {
       const { leadId } = await getBody(req);
       const state = await readState();
       const lead = state.leads.find((item) => item.id === leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
-      if (lead.dnc)
-        return json(res, 409, {
-          error:
-            "This contact is suppressed. Remove the DNC flag before preparing a call.",
-        });
-      if (!state.connection)
-        return json(res, 409, {
-          error: "Connect Twilio and select a number before preparing a call.",
-        });
-      return json(res, 409, {
-        error:
-          "Phone bridge setup is still required. Configure Twilio Voice webhooks before outbound calls can start.",
+      if (lead.dnc) return json(res, 409, { error: "This contact is suppressed and cannot be called." });
+      if (!state.connection?.bridgeNumber)
+        return json(res, 409, { error: "Save the operator phone number in Settings before starting a call." });
+      const token = unseal(state.connection);
+      const expiresAt = Date.now() + 10 * 60 * 1000;
+      const voiceUrl = new URL("/api/twilio/voice/connect", publicOrigin(req));
+      voiceUrl.searchParams.set("leadId", lead.id);
+      voiceUrl.searchParams.set("token", voiceToken(lead.id, expiresAt));
+      const auth = Buffer.from(`${state.connection.accountSid}:${token}`).toString("base64");
+      const body = new URLSearchParams({
+        To: state.connection.bridgeNumber,
+        From: state.connection.selectedNumber,
+        Url: voiceUrl.toString(),
+        Method: "GET",
       });
+      const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${state.connection.accountSid}/Calls.json`, {
+        method: "POST",
+        headers: { authorization: `Basic ${auth}`, "content-type": "application/x-www-form-urlencoded" },
+        body,
+      });
+      if (!response.ok) return json(res, 502, { error: "Twilio could not start the calling bridge. Check the selected number and operator phone number." });
+      const remote = await response.json();
+      state.calls.unshift({ id: `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling bridge started.", at: new Date().toISOString(), sid: remote.sid });
+      activity(state, "Call bridge started", `${lead.name} · answer your bridge call to connect`);
+      await writeState(state);
+      return json(res, 201, { sid: remote.sid });
     }
     const requested =
       url.pathname === "/" ? "index.html" : url.pathname.replace(/^\//, "");
