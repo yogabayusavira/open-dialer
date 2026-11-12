@@ -302,7 +302,7 @@ function unseal(connection) {
   ]).toString("utf8");
 }
 function publicOrigin(req) {
-  const configured = process.env.OPEN_DIALER_PUBLIC_URL?.trim().replace(/\/$/, "");
+  const configured = process.env.CALLBOARD_PUBLIC_URL?.trim().replace(/\/$/, "");
   if (configured) return configured;
   const protocol = req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
   return `${protocol}://${req.headers.host}`;
@@ -502,7 +502,7 @@ createServer(async (req, res) => {
       const body = await getBody(req);
       if (!safeEqual(body.password || "", password)) {
         recordFailedLogin(req);
-        return json(res, 401, { error: "Incorrect Open Dialer password." });
+        return json(res, 401, { error: "Incorrect Callboard password." });
       }
       clearFailedLogins(req);
       setSession(res, body.remember === true);
@@ -625,7 +625,7 @@ createServer(async (req, res) => {
       if (typeof body.dnc === "boolean") {
         lead.dnc = body.dnc;
         lead.status = body.dnc ? "Paused" : "Ready";
-        lead.note = body.dnc ? "Do not call: set from Open Dialer." : lead.note;
+        lead.note = body.dnc ? "Do not call: set from Callboard." : lead.note;
       }
       if (typeof body.status === "string") lead.status = body.status;
       activity(state, lead.dnc ? "DNC suppression" : "Lead updated", `${lead.name} · ${lead.company}`);
@@ -815,4 +815,4 @@ createServer(async (req, res) => {
         error instanceof Error ? error.message : "Unexpected server error.",
     });
   }
-}).listen(port, "0.0.0.0", () => console.log(`Open Dialer v2 listening on ${port}`));
+}).listen(port, "0.0.0.0", () => console.log(`Callboard listening on ${port}`));

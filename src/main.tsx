@@ -166,7 +166,7 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
       <form className="login-card" onSubmit={submit}>
         <div className="brand">
           <span className="brand-mark">C</span>
-          <span>Open Dialer v2</span>
+          <span>Callboard</span>
         </div>
         <h1>Operator sign-in</h1>
         <p>
@@ -218,13 +218,13 @@ function App() {
   const [tourStep, setTourStep] = useState<number | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [lightMode, setLightMode] = useState(() => localStorage.getItem("open-dialer-theme") === "light");
+  const [lightMode, setLightMode] = useState(() => localStorage.getItem("callboard-theme") === "light");
 
   const refresh = async () => {
     try {
       const next = await api<State>("/api/state");
       if (!Array.isArray(next.leads) || !Array.isArray(next.activity)) {
-        throw new Error("The Open Dialer API is unavailable. Check that the service is running with node server.mjs.");
+        throw new Error("The Callboard API is unavailable. Check that the service is running with node server.mjs.");
       }
       setState(next);
       setLoadError(null);
@@ -261,7 +261,7 @@ function App() {
   }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = lightMode ? "light" : "dark";
-    localStorage.setItem("open-dialer-theme", lightMode ? "light" : "dark");
+    localStorage.setItem("callboard-theme", lightMode ? "light" : "dark");
   }, [lightMode]);
   const selected = useMemo(
     () =>
@@ -340,7 +340,7 @@ function App() {
   if (!state)
     return (
       <main className="loading">
-        <LoaderCircle className="spin" size={28} /> Loading Open Dialer v2…
+        <LoaderCircle className="spin" size={28} /> Loading Callboard…
       </main>
     );
   return (
@@ -348,7 +348,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">C</span>
-          <span>Open Dialer v2</span>
+          <span>Callboard</span>
         </div>
         <div className="workspace-label">Workspace</div>
         <nav aria-label="Workspace navigation">
@@ -385,7 +385,7 @@ function App() {
           <button className="account-summary" type="button" onClick={() => setScreen("settings")}>
             <span className="account-summary__avatar">C</span>
             <span>
-              <b>Open Dialer v2 workspace</b>
+              <b>Callboard workspace</b>
               <small>Account &amp; billing</small>
             </span>
             <ChevronRight size={15} />
@@ -558,7 +558,7 @@ function CallHistory({
     const href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = href;
-    anchor.download = "open-dialer-calls.csv";
+    anchor.download = "callboard-calls.csv";
     anchor.click();
     URL.revokeObjectURL(href);
   };
@@ -1277,7 +1277,7 @@ function Settings({
           <span className="panel-kicker">Telephony</span>
           <h2>Your Twilio connection</h2>
           <p>
-            Credentials travel directly to the Open Dialer server for validation.
+            Credentials travel directly to the Callboard server for validation.
             The Auth Token is never returned to the browser and is encrypted
             before it is stored.
           </p>
@@ -1350,7 +1350,7 @@ function Settings({
         <span className="panel-kicker">Outbound line</span>
         <h2>Select an existing number</h2>
         <p>
-          Open Dialer only lists numbers already owned by the connected Twilio
+          Callboard only lists numbers already owned by the connected Twilio
           account. It never purchases numbers.
         </p>
         {numbers.length > 0 ? (
@@ -1444,7 +1444,7 @@ function SettingsPanel({
     return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Custom fields</h2><p>Capture the fields your team actually needs on every lead.</p><form className="inline-form" onSubmit={(event) => { event.preventDefault(); const value = fieldName.trim(); if (!value || fields.includes(value)) return; const next = [...fields, value]; setFields(next); localStorage.setItem("callboard-lead-fields", JSON.stringify(next)); setFieldName(""); }}><input value={fieldName} onChange={(event) => setFieldName(event.target.value)} placeholder="e.g. Territory" /><button className="primary-button" type="submit">Add field</button></form><div className="field-pills">{fields.length ? fields.map((field) => <button key={field} type="button" onClick={() => { const next = fields.filter((item) => item !== field); setFields(next); localStorage.setItem("callboard-lead-fields", JSON.stringify(next)); }}>{field} <X size={13} /></button>) : <span>No custom fields yet.</span>}</div></section>;
   }
   if (page === "profile") {
-    return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Profile</h2><p>Your personal and company details for this Open Dialer v2 workspace.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); localStorage.setItem("callboard-first-name", profile.firstName); localStorage.setItem("callboard-company", profile.company); localStorage.setItem("callboard-phone", profile.phone); onNotice("Profile saved in this browser."); }}><label>First name<input value={profile.firstName} onChange={(event) => setProfile({ ...profile, firstName: event.target.value })} /></label><label>Business phone<input value={profile.phone} onChange={(event) => setProfile({ ...profile, phone: event.target.value })} /></label><label>Company<input value={profile.company} onChange={(event) => setProfile({ ...profile, company: event.target.value })} /></label><button className="primary-button" type="submit">Save profile</button></form></section>;
+    return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Profile</h2><p>Your personal and company details for this Callboard workspace.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); localStorage.setItem("callboard-first-name", profile.firstName); localStorage.setItem("callboard-company", profile.company); localStorage.setItem("callboard-phone", profile.phone); onNotice("Profile saved in this browser."); }}><label>First name<input value={profile.firstName} onChange={(event) => setProfile({ ...profile, firstName: event.target.value })} /></label><label>Business phone<input value={profile.phone} onChange={(event) => setProfile({ ...profile, phone: event.target.value })} /></label><label>Company<input value={profile.company} onChange={(event) => setProfile({ ...profile, company: event.target.value })} /></label><button className="primary-button" type="submit">Save profile</button></form></section>;
   }
   return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Privacy</h2><p>Telephony credentials are encrypted server-side. This browser stores only non-sensitive workspace preferences such as your profile and custom field names.</p><div className="settings-callout"><ShieldCheck size={20} /><span>Never enter Twilio credentials into a third-party integration field.</span></div></section>;
 }
