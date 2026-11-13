@@ -214,58 +214,35 @@ function activity(state, action, detail) {
 function phoneKey(value) {
   return String(value || "").replace(/\D/g, "").slice(-15);
 }
-function parseCsvRows(source) {
-  const rows = [];
-  let cell = "";
-  let row = [];
-  let quoted = false;
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index];
-    if (character === '"') {
-      if (quoted && source[index + 1] === '"') {
-        cell += '"';
-        index += 1;
-      } else quoted = !quoted;
-    } else if (character === "," && !quoted) {
-      row.push(cell.trim());
-      cell = "";
-    } else if ((character === "\n" || character === "\r") && !quoted) {
-      if (character === "\r" && source[index + 1] === "\n") index += 1;
-      row.push(cell.trim());
-      if (row.some(Boolean)) rows.push(row);
-      row = [];
-      cell = "";
-    } else cell += character;
-  }
-  row.push(cell.trim());
-  if (row.some(Boolean)) rows.push(row);
-  return rows;
+function leadLabel(lead) {
+  return lead.name || (lead.company && lead.company !== "Unassigned" ? lead.company : "") || lead.phone;
 }
-function csvLeadRows(csv) {
-  if (typeof csv !== "string" || csv.length > 750_000)
-    throw new Error("Upload a CSV smaller than 750 KB.");
-  const rows = parseCsvRows(csv);
-  if (rows.length < 2) throw new Error("The CSV needs a header and at least one lead.");
-  const header = rows.shift().map((item) => item.toLowerCase().replace(/[^a-z]/g, ""));
-  const field = (...names) => names.map((name) => header.indexOf(name)).find((index) => index >= 0);
-  const nameIndex = field("name", "fullname", "contact");
-  const phoneIndex = field("phone", "phonenumber", "mobile", "telephone");
-  if (nameIndex === undefined || phoneIndex === undefined)
-    throw new Error("The CSV needs Name and Phone columns.");
-  const companyIndex = field("company", "account", "organization");
-  const roleIndex = field("role", "title", "jobtitle");
-  const timezoneIndex = field("timezone", "timezoneid");
-  return rows.slice(0, 1000).flatMap((row) => {
-    const name = row[nameIndex]?.trim();
-    const phone = row[phoneIndex]?.trim();
-    if (!name || !phone) return [];
-    return [{
-      name,
-      phone,
-      company: companyIndex === undefined ? "Unassigned" : row[companyIndex]?.trim() || "Unassigned",
-      role: roleIndex === undefined ? "Contact" : row[roleIndex]?.trim() || "Contact",
-      timezone: timezoneIndex === undefined ? "Unknown" : row[timezoneIndex]?.trim() || "Unknown",
-    }];
+const leadStatuses = ["Ready", "Try again", "Follow-up", "Closed", "Converted", "Paused"];
+function cleanText(value, max = 500) {
+  return typeof value === "string" ? value.trim().slice(0, max) : "";
+}
+function importedLeadRows(rows) {
+  if (!Array.isArray(rows) || rows.length === 0)
+    throw new Error("The import has no rows. Choose a CSV and map a Phone column.");
+  if (rows.length > 5000)
+    throw new Error("Import at most 5,000 leads at a time. Split the CSV and import it in parts.");
+  return rows.map((row) => {
+    const details = {};
+    if (row?.details && typeof row.details === "object" && !Array.isArray(row.details))
+      for (const [key, value] of Object.entries(row.details).slice(0, 40)) {
+        const label = cleanText(key, 60);
+        const text = cleanText(value);
+        if (label && text) details[label] = text;
+      }
+    return {
+      name: cleanText(row?.name, 120),
+      phone: cleanText(row?.phone, 40),
+      company: cleanText(row?.company, 160) || "Unassigned",
+      role: cleanText(row?.role, 120) || "Contact",
+      timezone: cleanText(row?.timezone, 60) || "Unknown",
+      note: cleanText(row?.note, 1000),
+      details,
+    };
   });
 }
 function encryptionKey() {
@@ -335,11 +312,17 @@ function json(res, status, payload) {
 function getBody(req) {
   return new Promise((resolve, reject) => {
     let raw = "";
+    let tooLarge = false;
     req.on("data", (chunk) => {
+      if (tooLarge) return;
       raw += chunk;
-      if (raw.length > 1_000_000) req.destroy();
+      if (raw.length > 5_000_000) {
+        tooLarge = true;
+        raw = "";
+      }
     });
     req.on("end", () => {
+      if (tooLarge) return reject(new Error("That upload is too large. Split it into smaller files."));
       try {
         resolve(raw ? JSON.parse(raw) : {});
       } catch {
@@ -527,14 +510,14 @@ createServer(async (req, res) => {
       return json(res, 200, safeState(await readState()));
     if (url.pathname === "/api/leads" && req.method === "POST") {
       const body = await getBody(req);
-      if (!body.name?.trim() || !body.phone?.trim())
+      if (!phoneKey(body.phone))
         return json(res, 400, {
-          error: "A lead needs a name and phone number.",
+          error: "A lead needs a phone number.",
         });
       const state = await readState();
       const lead = {
-        id: `lead_${Date.now()}`,
-        name: body.name.trim(),
+        id: `lead_${Date.now()}_${randomBytes(3).toString("hex")}`,
+        name: body.name?.trim() || "",
         company: body.company?.trim() || "Unassigned",
         role: body.role?.trim() || "Contact",
         phone: body.phone.trim(),
@@ -549,20 +532,28 @@ createServer(async (req, res) => {
         id: `event_${Date.now()}`,
         at: "Just now",
         action: "Lead added",
-        detail: `${lead.name} · ${lead.company}`,
+        detail: `${leadLabel(lead)} · ${lead.company}`,
       });
       await writeState(state);
       return json(res, 201, lead);
     }
     if (url.pathname === "/api/leads/import" && req.method === "POST") {
-      const { csv } = await getBody(req);
-      const imported = csvLeadRows(csv);
-      if (!imported.length) return json(res, 400, { error: "No usable leads were found in that CSV." });
+      const { leads } = await getBody(req);
+      const imported = importedLeadRows(leads);
       const state = await readState();
       const known = new Set(state.leads.map((lead) => phoneKey(lead.phone)));
+      let duplicates = 0;
+      let invalid = 0;
       const created = imported.flatMap((candidate, index) => {
         const key = phoneKey(candidate.phone);
-        if (!key || known.has(key)) return [];
+        if (key.length < 7) {
+          invalid += 1;
+          return [];
+        }
+        if (known.has(key)) {
+          duplicates += 1;
+          return [];
+        }
         known.add(key);
         const dnc = state.dncNumbers.includes(key);
         return [{
@@ -570,15 +561,22 @@ createServer(async (req, res) => {
           ...candidate,
           status: dnc ? "Paused" : "Ready",
           dnc,
-          note: dnc ? "Do not call: matched the workspace suppression list." : "Imported from CSV.",
+          note: dnc ? "Do not call: matched the workspace suppression list." : candidate.note || "Imported from CSV.",
           due: dnc ? "Suppressed" : "Unscheduled",
         }];
       });
-      if (!created.length) return json(res, 409, { error: "Every row already exists in this workspace." });
+      if (!created.length)
+        return json(res, 409, {
+          error: invalid === imported.length
+            ? "None of the rows had a usable phone number. Check that the right column is mapped to Phone."
+            : "Every row with a phone number is already in this workspace.",
+          duplicates,
+          invalid,
+        });
       state.leads.unshift(...created);
       activity(state, "Leads imported", `${created.length} leads added from CSV`);
       await writeState(state);
-      return json(res, 201, { imported: created.length, skipped: imported.length - created.length });
+      return json(res, 201, { imported: created.length, duplicates, invalid });
     }
     if (url.pathname === "/api/dnc" && req.method === "POST") {
       const { numbers } = await getBody(req);
@@ -615,6 +613,18 @@ createServer(async (req, res) => {
       await writeState(state);
       return json(res, 204, {});
     }
+    if (url.pathname === "/api/leads/delete" && req.method === "POST") {
+      const { ids } = await getBody(req);
+      if (!Array.isArray(ids) || !ids.length) return json(res, 400, { error: "Choose at least one lead to delete." });
+      const remove = new Set(ids.map(String));
+      const state = await readState();
+      const before = state.leads.length;
+      state.leads = state.leads.filter((lead) => !remove.has(lead.id));
+      const deleted = before - state.leads.length;
+      activity(state, "Leads deleted", `${deleted} lead${deleted === 1 ? "" : "s"} removed`);
+      await writeState(state);
+      return json(res, 200, { deleted });
+    }
     if (url.pathname.match(/^\/api\/leads\/[^/]+$/) && req.method === "PATCH") {
       const body = await getBody(req);
       const state = await readState();
@@ -622,15 +632,44 @@ createServer(async (req, res) => {
         (item) => item.id === url.pathname.split("/").pop(),
       );
       if (!lead) return json(res, 404, { error: "Lead not found." });
+      if (typeof body.phone === "string") {
+        const key = phoneKey(body.phone);
+        if (key.length < 7) return json(res, 400, { error: "Enter a phone number with at least 7 digits." });
+        if (state.leads.some((item) => item.id !== lead.id && phoneKey(item.phone) === key))
+          return json(res, 409, { error: "Another lead already uses that phone number." });
+        lead.phone = cleanText(body.phone, 40);
+        if (state.dncNumbers.includes(key)) body.dnc = true;
+      }
+      if (typeof body.name === "string") lead.name = cleanText(body.name, 120);
+      if (typeof body.company === "string") lead.company = cleanText(body.company, 160) || "Unassigned";
+      if (typeof body.role === "string") lead.role = cleanText(body.role, 120) || "Contact";
+      if (typeof body.timezone === "string") lead.timezone = cleanText(body.timezone, 60) || "Unknown";
+      if (typeof body.note === "string") lead.note = cleanText(body.note, 1000);
       if (typeof body.dnc === "boolean") {
         lead.dnc = body.dnc;
         lead.status = body.dnc ? "Paused" : "Ready";
-        lead.note = body.dnc ? "Do not call: set from Callboard." : lead.note;
+        lead.due = body.dnc ? "Suppressed" : "Unscheduled";
+        if (body.dnc) lead.note = "Do not call: set from Callboard.";
       }
-      if (typeof body.status === "string") lead.status = body.status;
-      activity(state, lead.dnc ? "DNC suppression" : "Lead updated", `${lead.name} · ${lead.company}`);
+      if (typeof body.status === "string") {
+        if (!leadStatuses.includes(body.status)) return json(res, 400, { error: "Choose a valid status." });
+        lead.status = body.status;
+        if (body.status !== "Follow-up" && lead.due !== "Suppressed") lead.due = body.status === "Closed" ? "Closed" : "Unscheduled";
+      }
+      if (typeof body.due === "string") lead.due = cleanText(body.due, 40) || "Unscheduled";
+      activity(state, lead.dnc ? "DNC suppression" : "Lead updated", `${leadLabel(lead)} · ${lead.company}`);
       await writeState(state);
       return json(res, 200, lead);
+    }
+    if (url.pathname.match(/^\/api\/leads\/[^/]+$/) && req.method === "DELETE") {
+      const state = await readState();
+      const id = url.pathname.split("/").pop();
+      const lead = state.leads.find((item) => item.id === id);
+      if (!lead) return json(res, 404, { error: "Lead not found." });
+      state.leads = state.leads.filter((item) => item.id !== id);
+      activity(state, "Lead deleted", `${leadLabel(lead)} · ${lead.company}`);
+      await writeState(state);
+      return json(res, 204, {});
     }
     if (url.pathname === "/api/opportunities" && req.method === "POST") {
       const { leadId, name, value } = await getBody(req);
@@ -647,7 +686,7 @@ createServer(async (req, res) => {
         leadId: lead.id,
         name: String(name || `${lead.company} opportunity`).trim().slice(0, 120) || `${lead.company} opportunity`,
         company: lead.company,
-        contact: lead.name,
+        contact: lead.name || "",
         value: amount,
         stage: "Qualification",
         createdAt: new Date().toISOString(),
@@ -655,7 +694,7 @@ createServer(async (req, res) => {
       state.opportunities.unshift(opportunity);
       lead.status = "Converted";
       lead.due = "Converted";
-      activity(state, "Lead converted", `${lead.name} → ${opportunity.name}`);
+      activity(state, "Lead converted", `${leadLabel(lead)} → ${opportunity.name}`);
       await writeState(state);
       return json(res, 201, opportunity);
     }
@@ -697,7 +736,7 @@ createServer(async (req, res) => {
         lead.due = "Closed";
       } else lead.status = "Try again";
       if (call.note) lead.note = call.note;
-      activity(state, "Call outcome recorded", `${lead.name} · ${outcome}`);
+      activity(state, "Call outcome recorded", `${leadLabel(lead)} · ${outcome}`);
       await writeState(state);
       return json(res, 201, call);
     }
@@ -790,7 +829,7 @@ createServer(async (req, res) => {
       if (!response.ok) return json(res, 502, { error: "Twilio could not start the calling bridge. Check the selected number and operator phone number." });
       const remote = await response.json();
       state.calls.unshift({ id: `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling bridge started.", at: new Date().toISOString(), sid: remote.sid });
-      activity(state, "Call bridge started", `${lead.name} · answer your bridge call to connect`);
+      activity(state, "Call bridge started", `${leadLabel(lead)} · answer your bridge call to connect`);
       await writeState(state);
       return json(res, 201, { sid: remote.sid });
     }

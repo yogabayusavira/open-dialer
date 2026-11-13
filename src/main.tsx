@@ -39,6 +39,7 @@ type Lead = {
   dnc: boolean;
   note: string;
   due: string;
+  details?: Record<string, string>;
 };
 type Connection = {
   accountSid: string;
@@ -139,6 +140,37 @@ function localTime(timezone: string) {
   }
 }
 
+function leadLabel(lead: Lead) {
+  return lead.name || (lead.company && lead.company !== "Unassigned" ? lead.company : "") || lead.phone;
+}
+
+function leadSubtitle(lead: Lead) {
+  const role = lead.role && lead.role !== "Contact" ? lead.role : "";
+  if (lead.name) return [role, lead.company !== "Unassigned" ? lead.company : ""].filter(Boolean).join(" · ") || "No company";
+  return role || "Main line · no contact name yet";
+}
+
+const leadStatuses = ["Ready", "Try again", "Follow-up", "Closed"] as const;
+
+function inQueue(lead: Lead) {
+  return !lead.dnc && !["Closed", "Converted"].includes(lead.status);
+}
+
+function exportLeads(leads: Lead[], fileName: string) {
+  const detailKeys = [...new Set(leads.flatMap((lead) => Object.keys(lead.details || {})))];
+  const lines = [
+    ["Name", "Company", "Role", "Phone", "Time zone", "Status", "Next step", "Do not call", "Note", ...detailKeys],
+    ...leads.map((lead) => [lead.name, lead.company === "Unassigned" ? "" : lead.company, lead.role === "Contact" ? "" : lead.role, lead.phone, lead.timezone === "Unknown" ? "" : lead.timezone, lead.status, lead.due, lead.dnc ? "yes" : "no", lead.note, ...detailKeys.map((key) => lead.details?.[key] || "")]),
+  ];
+  const csv = lines.map((row) => row.map((item) => `"${String(item ?? "").replaceAll('"', '""')}"`).join(",")).join("\n");
+  const href = URL.createObjectURL(new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(href);
+}
+
 function Login({ onSignedIn }: { onSignedIn: () => void }) {
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(false);
@@ -215,6 +247,7 @@ function App() {
   const [dncOpen, setDncOpen] = useState(false);
   const [convertLead, setConvertLead] = useState<Lead | null>(null);
   const [outcomeLead, setOutcomeLead] = useState<Lead | null>(null);
+  const [editLead, setEditLead] = useState<Lead | null>(null);
   const [tourStep, setTourStep] = useState<number | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -284,7 +317,7 @@ function App() {
         body: JSON.stringify({ leadId: lead.id }),
       });
       await refresh();
-      setNotice(`Calling your bridge number now. Answer it to connect with ${lead.name}.`);
+      setNotice(`Calling your bridge number now. Answer it to connect with ${leadLabel(lead)}.`);
     } catch (error) {
       setNotice(
         error instanceof Error ? error.message : "Could not prepare the call.",
@@ -300,13 +333,31 @@ function App() {
       await refresh();
       setNotice(
         dnc
-          ? `${lead.name} is now suppressed from calling.`
-          : `${lead.name} is active again.`,
+          ? `${leadLabel(lead)} is now suppressed from calling.`
+          : `${leadLabel(lead)} is active again.`,
       );
     } catch (error) {
       setNotice(
         error instanceof Error ? error.message : "Could not update the lead.",
       );
+    }
+  };
+  const setStatus = async (lead: Lead, status: string) => {
+    try {
+      await api(`/api/leads/${lead.id}`, { method: "PATCH", body: JSON.stringify({ status }) });
+      await refresh();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not change the status.");
+    }
+  };
+  const deleteLeads = async (ids: string[]) => {
+    try {
+      const result = await api<{ deleted: number }>("/api/leads/delete", { method: "POST", body: JSON.stringify({ ids }) });
+      if (selectedId && ids.includes(selectedId)) setSelectedId(null);
+      await refresh();
+      setNotice(`${result.deleted} lead${result.deleted === 1 ? "" : "s"} deleted.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not delete those leads.");
     }
   };
   const updateOpportunity = async (id: string, body: Partial<Pick<Opportunity, "stage" | "value">>) => {
@@ -441,6 +492,8 @@ function App() {
             onPrepare={prepareCall}
             onRecord={(lead) => setOutcomeLead(lead)}
             onDnc={setDnc}
+            onEdit={setEditLead}
+            onStatus={setStatus}
             onSettings={() => setScreen("settings")}
           />
         )}
@@ -460,7 +513,10 @@ function App() {
         {screen === "leads" && (
           <LeadList
             leads={state.leads}
+            calls={state.calls}
             selectedId={selected?.id || null}
+            onEdit={setEditLead}
+            onDelete={deleteLeads}
             onOpen={(id) => {
               setSelectedId(id);
               setScreen("queue");
@@ -503,8 +559,17 @@ function App() {
       )}
       {importOpen && <ImportLeads onClose={() => setImportOpen(false)} onSaved={async (message) => { setImportOpen(false); await refresh(); setNotice(message); }} />}
       {dncOpen && <DncList onClose={() => setDncOpen(false)} onSaved={async (message) => { setDncOpen(false); await refresh(); setNotice(message); }} />}
-      {convertLead && <ConvertLead lead={convertLead} onClose={() => setConvertLead(null)} onSaved={async () => { setConvertLead(null); await refresh(); setScreen("pipeline"); setNotice(`${convertLead.name} is now an opportunity.`); }} />}
-      {outcomeLead && <CallOutcome lead={outcomeLead} onClose={() => setOutcomeLead(null)} onSaved={async () => { setOutcomeLead(null); await refresh(); }} />}
+      {convertLead && <ConvertLead lead={convertLead} onClose={() => setConvertLead(null)} onSaved={async () => { setConvertLead(null); await refresh(); setScreen("pipeline"); setNotice(`${leadLabel(convertLead)} is now an opportunity.`); }} />}
+      {outcomeLead && <CallOutcome lead={outcomeLead} onClose={() => setOutcomeLead(null)} onSaved={async (outcome) => {
+        const queue = state.leads.filter(inQueue);
+        const position = queue.findIndex((lead) => lead.id === outcomeLead.id);
+        const next = queue.slice(position + 1).find((lead) => lead.id !== outcomeLead.id) || queue.find((lead) => lead.id !== outcomeLead.id);
+        setOutcomeLead(null);
+        await refresh();
+        if (next) setSelectedId(next.id);
+        setNotice(`${outcome} saved for ${leadLabel(outcomeLead)}.${next ? ` Next up: ${leadLabel(next)}.` : ""}`);
+      }} />}
+      {editLead && <LeadForm lead={editLead} onClose={() => setEditLead(null)} onSaved={async () => { setEditLead(null); await refresh(); setNotice("Lead updated."); }} onDeleted={async () => { const name = leadLabel(editLead); setEditLead(null); if (selectedId === editLead.id) setSelectedId(null); await refresh(); setNotice(`${name} deleted.`); }} />}
       {tourStep !== null && (
         <QuickTour
           step={tourStep}
@@ -551,9 +616,9 @@ function CallHistory({
     .filter((call) => call.lead && new Date(call.at).getTime() >= cutoff)
     .filter((call) => view === "callbacks" ? call.outcome === "Callback" : view === "conversations" ? ["Interested", "Meeting booked", "Callback", "Maybe later", "Not interested"].includes(call.outcome) : true)
     .filter((call) => outcome === "All outcomes" || call.outcome === outcome)
-    .filter((call) => [call.lead?.name, call.lead?.company, call.outcome, call.note].join(" ").toLowerCase().includes(query.toLowerCase()));
+    .filter((call) => [call.lead?.name, call.lead?.company, call.lead?.phone, call.outcome, call.note].join(" ").toLowerCase().includes(query.toLowerCase()));
   const exportCalls = () => {
-    const lines = [["Date", "Lead", "Company", "Phone", "Outcome", "Note"], ...entries.map((call) => [new Date(call.at).toLocaleString(), call.lead?.name || "", call.lead?.company || "", call.lead?.phone || "", call.outcome, call.note])];
+    const lines = [["Date", "Lead", "Company", "Phone", "Outcome", "Note"], ...entries.map((call) => [new Date(call.at).toLocaleString(), call.lead ? leadLabel(call.lead) : "", call.lead?.company || "", call.lead?.phone || "", call.outcome, call.note])];
     const csv = lines.map((row) => row.map((item) => `"${String(item).replaceAll('"', '""')}"`).join(",")).join("\n");
     const href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");
@@ -645,7 +710,7 @@ function CallHistory({
         </div>
       )}
 
-      {!entries.length ? <div className="calls-empty"><p>{isCallbacks ? "No callbacks are recorded yet." : "No calls match this view."}</p><span><button type="button" onClick={onStartDialing}>Open leads →</button> or <button type="button" onClick={onOpenPhoneNumbers}>review phone settings →</button></span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><b>{call.lead?.name}</b><small>{call.lead?.company} · {call.lead?.phone}</small></div><Status tone={call.outcome === "Do not call" ? "alert" : "good"}>{call.outcome}</Status><div><small>{new Date(call.at).toLocaleString()}</small>{call.note && <p>{call.note}</p>}</div></article>)}</div>}
+      {!entries.length ? <div className="calls-empty"><p>{isCallbacks ? "No callbacks are recorded yet." : "No calls match this view."}</p><span><button type="button" onClick={onStartDialing}>Open leads →</button> or <button type="button" onClick={onOpenPhoneNumbers}>review phone settings →</button></span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><b>{call.lead && leadLabel(call.lead)}</b><small>{call.lead?.company} · {call.lead?.phone}</small></div><Status tone={call.outcome === "Do not call" ? "alert" : "good"}>{call.outcome}</Status><div><small>{new Date(call.at).toLocaleString()}</small>{call.note && <p>{call.note}</p>}</div></article>)}</div>}
     </section>
   );
 }
@@ -657,6 +722,8 @@ function Queue({
   onPrepare,
   onRecord,
   onDnc,
+  onEdit,
+  onStatus,
   onSettings,
 }: {
   state: State;
@@ -665,9 +732,11 @@ function Queue({
   onPrepare: (lead: Lead) => void;
   onRecord: (lead: Lead) => void;
   onDnc: (lead: Lead, value: boolean) => void;
+  onEdit: (lead: Lead) => void;
+  onStatus: (lead: Lead, status: string) => void;
   onSettings: () => void;
 }) {
-  const upcoming = state.leads.filter((lead) => !lead.dnc);
+  const upcoming = state.leads.filter(inQueue);
   return (
     <div className="queue-page">
       <section className="route-header">
@@ -701,8 +770,8 @@ function Queue({
             >
               <span className="lead-time">{lead.due}</span>
               <span>
-                <b>{lead.name}</b>
-                <small>{lead.company}</small>
+                <b>{leadLabel(lead)}</b>
+                <small>{leadSubtitle(lead)}</small>
               </span>
               <ChevronRight size={17} />
             </button>
@@ -717,33 +786,46 @@ function Queue({
           </div>
           <div className="lead-heading">
             <div>
-              <h2>{selected.name}</h2>
-              <p>
-                {selected.role} · {selected.company}
-              </p>
+              <h2>{leadLabel(selected)}</h2>
+              <p>{leadSubtitle(selected)}</p>
             </div>
-            <button
-              className="quiet-button"
-              onClick={() => onDnc(selected, !selected.dnc)}
-            >
-              {selected.dnc ? "Restore calling" : "Do not call"}
-            </button>
+            <div className="lead-heading__actions">
+              <button className="quiet-button" onClick={() => onEdit(selected)}>
+                Edit
+              </button>
+              <button
+                className="quiet-button"
+                onClick={() => onDnc(selected, !selected.dnc)}
+              >
+                {selected.dnc ? "Restore calling" : "Do not call"}
+              </button>
+            </div>
           </div>
           <dl className="facts">
             <div>
               <dt>Phone</dt>
-              <dd>{selected.phone}</dd>
+              <dd><a href={`tel:${selected.phone.replace(/[^\d+]/g, "")}`}>{selected.phone}</a></dd>
             </div>
             <div>
               <dt>Local time zone</dt>
               <dd>
-                {selected.timezone.replace("America/", "").replace("_", " ")}
+                {selected.timezone && selected.timezone !== "Unknown" ? selected.timezone.replace("America/", "").replace("_", " ") : "Not set"}
               </dd>
             </div>
             <div>
               <dt>Stage</dt>
-              <dd>{selected.status}</dd>
+              <dd>
+                <select className="status-select" value={selected.status} disabled={selected.dnc} onChange={(event) => onStatus(selected, event.target.value)} aria-label="Lead status">
+                  {[...new Set([...leadStatuses, selected.status])].map((status) => <option key={status}>{status}</option>)}
+                </select>
+              </dd>
             </div>
+            {Object.entries(selected.details || {}).map(([label, value]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{value}</dd>
+              </div>
+            ))}
           </dl>
           <div className="call-objective">
             <span>Call objective</span>
@@ -755,7 +837,7 @@ function Queue({
               onClick={() => onPrepare(selected)}
               disabled={selected.dnc}
             >
-              <Phone size={19} /> Call lead
+              <Phone size={19} /> {state.connection ? "Call lead" : "Call via Twilio"}
             </button>
             <button className="quiet-button" onClick={() => onRecord(selected)}>Log outcome</button>
           </div>
@@ -820,8 +902,14 @@ function LeadList({
   onConvert,
   onImport,
   onDncList,
+  calls,
+  onEdit,
+  onDelete,
 }: {
   leads: Lead[];
+  calls: CallRecord[];
+  onEdit: (lead: Lead) => void;
+  onDelete: (ids: string[]) => Promise<void>;
   selectedId: string | null;
   onOpen: (id: string) => void;
   onConvert: (lead: Lead) => void;
@@ -829,6 +917,7 @@ function LeadList({
   onDncList: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const [checked, setChecked] = useState<Set<string>>(new Set());
   const [filterOpen, setFilterOpen] = useState(false);
   const [sort, setSort] = useState<"newest" | "name">("newest");
   const [segment, setSegment] = useState<
@@ -848,8 +937,18 @@ function LeadList({
     { key: "closed" as const, label: "Closed", detail: "DNC or no longer active", count: groups.closed.length },
   ];
   const visibleLeads = (segment === "all" ? leads : groups[segment])
-    .filter((lead) => [lead.name, lead.company, lead.phone, lead.status].join(" ").toLowerCase().includes(query.trim().toLowerCase()))
-    .sort((left, right) => sort === "name" ? left.name.localeCompare(right.name) : 0);
+    .filter((lead) => [lead.name, lead.company, lead.role, lead.phone, lead.status, lead.note, ...Object.values(lead.details || {})].join(" ").toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((left, right) => sort === "name" ? leadLabel(left).localeCompare(leadLabel(right)) : 0);
+  const lastCall = new Map<string, CallRecord>();
+  for (const call of calls) if (!lastCall.has(call.leadId)) lastCall.set(call.leadId, call);
+  const picked = visibleLeads.filter((lead) => checked.has(lead.id));
+  const allPicked = visibleLeads.length > 0 && picked.length === visibleLeads.length;
+  const toggle = (id: string) => setChecked((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const removePicked = async () => {
+    if (!window.confirm(`Delete ${picked.length} lead${picked.length === 1 ? "" : "s"}? This cannot be undone.`)) return;
+    await onDelete(picked.map((lead) => lead.id));
+    setChecked(new Set());
+  };
 
   return (
     <section className="lead-workspace">
@@ -896,11 +995,22 @@ function LeadList({
           <button className="toolbar-button" type="button" onClick={onImport}>
             <FileUp size={16} /> Import CSV
           </button>
+          <button className="toolbar-button" type="button" onClick={() => exportLeads(visibleLeads, "callboard-leads.csv")} disabled={!visibleLeads.length}>
+            Export
+          </button>
           <button className="toolbar-button" type="button" onClick={onDncList}>
             DNC list
           </button>
         </div>
       </div>
+      {picked.length > 0 && (
+        <div className="lead-bulk-bar" role="region" aria-label="Selected leads">
+          <b>{picked.length} selected</b>
+          <button type="button" className="toolbar-button" onClick={() => exportLeads(picked, "callboard-selected-leads.csv")}>Export selected</button>
+          <button type="button" className="toolbar-button danger-button" onClick={() => void removePicked()}>Delete selected</button>
+          <button type="button" className="toolbar-button" onClick={() => setChecked(new Set())}>Clear</button>
+        </div>
+      )}
       {filterOpen && <div className="lead-filter-menu" role="group" aria-label="Filter leads by status">{tabs.map((tab) => <button className={segment === tab.key ? "is-active" : ""} key={tab.key} type="button" onClick={() => { setSegment(tab.key); setFilterOpen(false); }}>{tab.label}</button>)}</div>}
 
       <div className="lead-table-wrap">
@@ -917,7 +1027,7 @@ function LeadList({
           </colgroup>
           <thead>
             <tr>
-              <th scope="col"><span className="sr-only">Select</span></th>
+              <th scope="col"><input type="checkbox" aria-label="Select all visible leads" checked={allPicked} onChange={() => setChecked(allPicked ? new Set() : new Set(visibleLeads.map((lead) => lead.id)))} /></th>
               <th scope="col">Prospect</th>
               <th scope="col">Contact</th>
               <th scope="col">Status</th>
@@ -929,32 +1039,25 @@ function LeadList({
           </thead>
           <tbody>
             {visibleLeads.map((lead) => {
-              const initials = lead.name
+              const initials = leadLabel(lead)
                 .split(" ")
                 .map((part) => part[0])
                 .join("")
                 .slice(0, 2)
                 .toUpperCase();
-              const tag = lead.dnc
-                ? "do not call"
-                : lead.status === "Follow-up"
-                  ? "needs follow up"
-                  : "no status";
-              const statusLabel = lead.dnc
-                ? "DNC"
-                : lead.status === "Follow-up"
-                  ? "FOLLOW UP"
-                  : "NEW";
+              const tag = lead.dnc ? "do not call" : lead.due && !["Unscheduled", "Closed", "Converted"].includes(lead.due) ? `next: ${lead.due.replace("T", " ")}` : lead.status.toLowerCase();
+              const statusLabel = lead.dnc ? "DNC" : lead.status.toUpperCase();
+              const latest = lastCall.get(lead.id);
               return (
                 <tr className={lead.id === selectedId ? "is-current" : undefined} key={lead.id}>
-                <td><input type="checkbox" aria-label={`Select ${lead.name}`} /></td>
+                <td><input type="checkbox" aria-label={`Select ${leadLabel(lead)}`} checked={checked.has(lead.id)} onChange={() => toggle(lead.id)} /></td>
                 <td>
                   <button className="prospect-button" type="button" onClick={() => onOpen(lead.id)}>
                     <span className="prospect-identity">
                       <i aria-hidden="true">{initials}</i>
                       <span>
-                        <b>{lead.name}</b>
-                        <small>{lead.company}</small>
+                        <b>{leadLabel(lead)}</b>
+                        <small>{leadSubtitle(lead)}</small>
                         <em>{tag}</em>
                       </span>
                     </span>
@@ -962,7 +1065,7 @@ function LeadList({
                 </td>
                 <td>
                   <span className="contact-phone">{lead.phone}</span>
-                  <small>{localTime(lead.timezone)} local</small>
+                  <small>{lead.timezone && lead.timezone !== "Unknown" ? `${localTime(lead.timezone)} local` : "Time zone not set"}</small>
                 </td>
                 <td>
                   <span className={lead.dnc ? "lead-status is-dnc" : "lead-status"}>
@@ -970,7 +1073,7 @@ function LeadList({
                     {statusLabel}
                   </span>
                 </td>
-                <td><span className="next-step">{lead.dnc ? "—" : "Not yet"}</span></td>
+                <td><span className="next-step">{latest ? <>{latest.outcome}<small>{new Date(latest.at).toLocaleDateString()}</small></> : "Not yet"}</span></td>
                 <td><span className="empty-cell">—</span></td>
                 <td><span className="empty-cell">—</span></td>
                 <td className="lead-row-actions">
@@ -981,6 +1084,7 @@ function LeadList({
                   >
                     <CircleDot size={16} aria-hidden="true" /> Convert
                   </button>
+                  <button type="button" onClick={() => onEdit(lead)}>Edit</button>
                   <button type="button" onClick={() => onOpen(lead.id)}>View</button>
                 </td>
                 </tr>
@@ -1020,9 +1124,9 @@ function FollowUps({
         <button key={lead.id} onClick={() => onSelect(lead.id)}>
           <span className="followup-time">{lead.due}</span>
           <span>
-            <b>{lead.name}</b>
+            <b>{leadLabel(lead)}</b>
             <small>
-              {lead.company} · {lead.note}
+              {leadSubtitle(lead)} · {lead.note}
             </small>
           </span>
           <ChevronRight size={18} />
@@ -1041,17 +1145,179 @@ function Pipeline({ opportunities, onUpdate }: { opportunities: Opportunity[]; o
   </section>;
 }
 
+type ImportTarget = "phone" | "name" | "company" | "role" | "timezone" | "note";
+const importTargets: { key: ImportTarget; label: string; hint: string; guesses: string[] }[] = [
+  { key: "phone", label: "Phone", hint: "Required", guesses: ["phone", "phonenumber", "mainphone", "directphone", "telephone", "tel", "mobile", "cell", "number"] },
+  { key: "name", label: "Contact name", hint: "Optional. Leave blank for front desks and gatekeepers", guesses: ["name", "fullname", "contact", "contactname", "person", "firstname"] },
+  { key: "company", label: "Company / organization", hint: "Optional", guesses: ["company", "companyname", "organization", "organisation", "account", "accountname", "business", "district", "school", "agency"] },
+  { key: "role", label: "Role or title", hint: "Optional", guesses: ["role", "title", "jobtitle", "position"] },
+  { key: "timezone", label: "Time zone", hint: "Optional", guesses: ["timezone", "tz", "timezoneid"] },
+  { key: "note", label: "Notes", hint: "Optional. Becomes the lead note", guesses: ["notes", "note", "comments", "comment", "description"] },
+];
+
+function parseCsv(source: string) {
+  const text = source.replace(/^﻿/, "");
+  const firstLine = text.split(/\r?\n/, 1)[0] || "";
+  const delimiter = [",", ";", "\t"].reduce((best, candidate) => (firstLine.split(candidate).length > firstLine.split(best).length ? candidate : best), ",");
+  const rows: string[][] = [];
+  let cell = "";
+  let row: string[] = [];
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '"') {
+      if (quoted && text[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else quoted = !quoted;
+    } else if (character === delimiter && !quoted) {
+      row.push(cell.trim());
+      cell = "";
+    } else if ((character === "\n" || character === "\r") && !quoted) {
+      if (character === "\r" && text[index + 1] === "\n") index += 1;
+      row.push(cell.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      cell = "";
+    } else cell += character;
+  }
+  row.push(cell.trim());
+  if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+
+function guessMapping(headers: string[], rows: string[][]) {
+  const sample = rows.slice(0, 25);
+  const words = headers.map((header) => header.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const looksLikePhone = (value = "") => value.replace(/\D/g, "").length >= 7 && /^[\d\s()+.extEXT-]+$/.test(value);
+  const share = (index: number, test: (value: string) => boolean) => {
+    const values = sample.map((row) => row[index] || "").filter(Boolean);
+    return values.length ? values.filter(test).length / values.length : 0;
+  };
+  const fits = (target: ImportTarget, index: number) =>
+    target === "phone" ? share(index, looksLikePhone) >= 0.5 : ["name", "company", "role"].includes(target) ? share(index, (value) => /[a-z]{2}/i.test(value)) >= 0.5 : true;
+  const matches = (target: (typeof importTargets)[number], index: number) => {
+    const parts = words[index];
+    if (target.guesses.includes(parts.join(""))) return true;
+    if (parts.some((part) => ["id", "date", "count", "at", "on", "by"].includes(part))) return false;
+    return parts.some((part, position) => target.guesses.includes(part) || target.guesses.includes(part + (parts[position + 1] || "")));
+  };
+  const used = new Set<number>();
+  const mapping = {} as Record<ImportTarget, number | null>;
+  for (const target of importTargets) {
+    const found = headers.findIndex((_, index) => !used.has(index) && matches(target, index) && fits(target.key, index));
+    mapping[target.key] = found >= 0 ? found : null;
+    if (found >= 0) used.add(found);
+  }
+  if (mapping.phone === null) {
+    const phoneLike = headers.findIndex((_, index) => !used.has(index) && share(index, looksLikePhone) >= 0.6);
+    if (phoneLike >= 0) {
+      mapping.phone = phoneLike;
+      used.add(phoneLike);
+    }
+  }
+  if (mapping.company === null && mapping.name === null) {
+    const textColumn = headers.findIndex((_, index) => !used.has(index) && share(index, (value) => /[a-z]{3}/i.test(value) && value.length > 3) >= 0.8 && new Set(sample.map((row) => row[index])).size > Math.min(5, sample.length / 2));
+    if (textColumn >= 0) mapping.company = textColumn;
+  }
+  return mapping;
+}
+
 function ImportLeads({ onClose, onSaved }: { onClose: () => void; onSaved: (message: string) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [rows, setRows] = useState<string[][]>([]);
+  const [mapping, setMapping] = useState<Record<ImportTarget, number | null> | null>(null);
+  const [keepOthers, setKeepOthers] = useState(true);
+  const readFile = async (file: File | undefined) => {
+    setError(null);
+    setMapping(null);
+    if (!file) return;
+    setFileName(file.name);
+    const parsed = parseCsv(await file.text());
+    if (parsed.length < 2) return setError("This file needs a header row and at least one lead row.");
+    const [head, ...body] = parsed;
+    const width = Math.max(...parsed.map((row) => row.length));
+    const names = Array.from({ length: width }, (_, index) => head[index] || `Column ${index + 1}`);
+    setHeaders(names);
+    setRows(body);
+    setMapping(guessMapping(names, body));
+  };
+  const mapped = new Set(Object.values(mapping || {}).filter((value): value is number => value !== null));
+  const others = headers.map((header, index) => ({ header, index })).filter(({ index }) => !mapped.has(index));
+  const shown = importTargets.filter((target) => mapping?.[target.key] != null);
+  const cell = (row: string[], target: ImportTarget) => (mapping?.[target] == null ? "" : row[mapping[target] as number] || "");
+  const buildLeads = () =>
+    rows.map((row) => ({
+      phone: cell(row, "phone"),
+      name: cell(row, "name"),
+      company: cell(row, "company"),
+      role: cell(row, "role"),
+      timezone: cell(row, "timezone"),
+      note: cell(row, "note"),
+      details: keepOthers ? Object.fromEntries(others.map(({ header, index }) => [header, row[index] || ""]).filter(([, text]) => text)) : {},
+    }));
+  const withPhone = mapping?.phone == null ? 0 : rows.filter((row) => cell(row, "phone").replace(/\D/g, "").length >= 7).length;
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const file = new FormData(event.currentTarget).get("file");
-    if (!(file instanceof File)) return setError("Choose a CSV file first.");
-    setBusy(true); setError(null);
-    try { const result = await api<{ imported: number; skipped: number }>("/api/leads/import", { method: "POST", body: JSON.stringify({ csv: await file.text() }) }); await onSaved(`${result.imported} leads imported${result.skipped ? `; ${result.skipped} duplicates skipped` : ""}.`); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not import this CSV."); } finally { setBusy(false); }
+    if (!mapping) return setError("Choose a CSV file first.");
+    if (mapping.phone === null) return setError("Pick which column holds the phone number.");
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api<{ imported: number; duplicates: number; invalid: number }>("/api/leads/import", { method: "POST", body: JSON.stringify({ leads: buildLeads() }) });
+      const skipped = [result.duplicates && `${result.duplicates} already in the workspace`, result.invalid && `${result.invalid} without a usable phone number`].filter(Boolean).join(", ");
+      await onSaved(`${result.imported} leads imported${skipped ? `. Skipped ${skipped}` : ""}.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not import this CSV.");
+    } finally {
+      setBusy(false);
+    }
   };
-  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="import-leads-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="import-leads-title">Import leads</h2><p>Upload a CSV with <b>Name</b> and <b>Phone</b> columns. Company, Role, and Time zone are optional.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>CSV file<input name="file" type="file" accept=".csv,text/csv" required /></label><button className="primary-button" disabled={busy}>{busy ? "Importing…" : <><FileUp size={17} /> Import leads</>}</button></form></div>;
+  return (
+    <div className="modal-backdrop">
+      <form className={mapping ? "lead-form import-form import-form--mapping" : "lead-form import-form"} onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="import-leads-title">
+        <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
+        <h2 id="import-leads-title">Import leads</h2>
+        <p>Any CSV works. Pick the file, then tell Callboard which column is which. Only a phone number is required.</p>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <label>CSV file<input type="file" accept=".csv,.tsv,.txt,text/csv" onChange={(event) => void readFile(event.target.files?.[0])} /></label>
+        {mapping && (
+          <>
+            <div className="import-mapping">
+              {importTargets.map((target) => (
+                <label key={target.key}>
+                  <span>{target.label} <small>{target.hint}</small></span>
+                  <select value={mapping[target.key] ?? ""} onChange={(event) => setMapping({ ...mapping, [target.key]: event.target.value === "" ? null : Number(event.target.value) })}>
+                    <option value="">{target.key === "phone" ? "Choose a column…" : "Not in this file"}</option>
+                    {headers.map((header, index) => <option key={index} value={index}>{header}</option>)}
+                  </select>
+                </label>
+              ))}
+            </div>
+            {others.length > 0 && (
+              <label className="import-keep">
+                <input type="checkbox" checked={keepOthers} onChange={(event) => setKeepOthers(event.target.checked)} />
+                <span>Keep the other {others.length} columns as lead details <small>({others.map(({ header }) => header).join(", ")})</small></span>
+              </label>
+            )}
+            {shown.length > 0 && (
+              <div className="import-preview" aria-label="Import preview">
+                <table>
+                  <thead><tr>{shown.map((target) => <th key={target.key}>{target.label}</th>)}</tr></thead>
+                  <tbody>{rows.slice(0, 4).map((row, rowIndex) => <tr key={rowIndex}>{shown.map((target) => <td key={target.key}>{cell(row, target.key) || "—"}</td>)}</tr>)}</tbody>
+                </table>
+              </div>
+            )}
+            <p className="import-summary">{fileName}: {rows.length} rows, {withPhone} with a phone number{rows.length - withPhone ? `. ${rows.length - withPhone} will be skipped` : ""}.</p>
+          </>
+        )}
+        <button className="primary-button" disabled={busy || !mapping || mapping.phone === null}>{busy ? "Importing…" : <><FileUp size={17} /> {mapping ? `Import ${withPhone} leads` : "Import leads"}</>}</button>
+      </form>
+    </div>
+  );
 }
 
 function DncList({ onClose, onSaved }: { onClose: () => void; onSaved: (message: string) => Promise<void> }) {
@@ -1066,14 +1332,14 @@ function ConvertLead({ lead, onClose, onSaved }: { lead: Lead; onClose: () => vo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/opportunities", { method: "POST", body: JSON.stringify({ leadId: lead.id, name: form.get("name"), value: form.get("value") }) }); await onSaved(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not convert this lead."); } finally { setBusy(false); } };
-  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="convert-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="convert-title">Convert to opportunity</h2><p>{lead.name} at {lead.company} will move to Pipeline in Qualification.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Opportunity name<input name="name" defaultValue={`${lead.company} opportunity`} required /></label><label>Potential value<input name="value" type="number" min="0" defaultValue="0" required /></label><button className="primary-button" disabled={busy}>{busy ? "Converting…" : "Create opportunity"}</button></form></div>;
+  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="convert-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="convert-title">Convert to opportunity</h2><p>{leadLabel(lead)}{lead.name && lead.company !== "Unassigned" ? ` at ${lead.company}` : ""} will move to Pipeline in Qualification.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Opportunity name<input name="name" defaultValue={`${lead.company} opportunity`} required /></label><label>Potential value<input name="value" type="number" min="0" defaultValue="0" required /></label><button className="primary-button" disabled={busy}>{busy ? "Converting…" : "Create opportunity"}</button></form></div>;
 }
 
-function CallOutcome({ lead, onClose, onSaved }: { lead: Lead; onClose: () => void; onSaved: () => Promise<void> }) {
+function CallOutcome({ lead, onClose, onSaved }: { lead: Lead; onClose: () => void; onSaved: (outcome: string) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt") }) }); await onSaved(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
-  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="outcome-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="outcome-title">Log call outcome</h2><p>Record the result for {lead.name}. This updates the lead and call history immediately.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Outcome<select name="outcome" defaultValue="Interested"><option>Interested</option><option>Meeting booked</option><option>Callback</option><option>Maybe later</option><option>No answer</option><option>Busy</option><option>Voicemail</option><option>Not interested</option><option>Wrong number</option><option>Do not call</option></select></label><label>Follow-up date and time <input name="followUpAt" type="datetime-local" /></label><label>Notes<textarea name="note" placeholder="What happened on this call?" /></label><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save outcome"}</button></form></div>;
+  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt") }) }); await onSaved(String(form.get("outcome"))); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
+  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="outcome-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="outcome-title">Log call outcome</h2><p>Record the result for {leadLabel(lead)}. This updates the lead and call history, then moves you to the next lead.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Outcome<select name="outcome" defaultValue="" required><option value="" disabled>Choose what happened…</option><option>Interested</option><option>Meeting booked</option><option>Callback</option><option>Maybe later</option><option>No answer</option><option>Busy</option><option>Voicemail</option><option>Not interested</option><option>Wrong number</option><option>Do not call</option></select></label><label>Follow-up date and time <input name="followUpAt" type="datetime-local" /></label><label>Notes<textarea name="note" placeholder="What happened on this call?" /></label><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save outcome"}</button></form></div>;
 }
 
 function ActivityLog({ activity }: { activity: State["activity"] }) {
@@ -1116,7 +1382,7 @@ function QuickTour({
     {
       eyebrow: "YOUR WORKSPACE · 2 OF 3",
       title: "Start with a clean list.",
-      body: "Add leads one at a time today, then bring in a CSV when your import flow is ready.",
+      body: "Add leads one at a time or import any CSV. You choose which column is the phone, name, and company.",
       action: "Next stop",
     },
     {
@@ -1450,86 +1716,98 @@ function SettingsPanel({
 }
 
 function LeadForm({
+  lead,
   onClose,
   onSaved,
+  onDeleted,
 }: {
+  lead?: Lead;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  onDeleted?: () => Promise<void>;
 }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const editing = Boolean(lead);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
     setError(null);
     const form = new FormData(event.currentTarget);
     try {
-      await api("/api/leads", {
-        method: "POST",
+      await api(editing ? `/api/leads/${lead!.id}` : "/api/leads", {
+        method: editing ? "PATCH" : "POST",
         body: JSON.stringify(Object.fromEntries(form)),
       });
       await onSaved();
     } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : "Could not add this lead.",
-      );
+      setError(cause instanceof Error ? cause.message : "Could not save this lead.");
     } finally {
       setSaving(false);
     }
   };
+  const remove = async () => {
+    if (!lead || !window.confirm(`Delete ${leadLabel(lead)}? This cannot be undone.`)) return;
+    setSaving(true);
+    try {
+      await api(`/api/leads/${lead.id}`, { method: "DELETE" });
+      await onDeleted?.();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not delete this lead.");
+      setSaving(false);
+    }
+  };
+  const blank = (value: string | undefined, placeholder: string) => (value === placeholder ? "" : value || "");
   return (
     <div className="modal-backdrop">
-      <form
-        className="lead-form"
-        onSubmit={submit}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="add-lead-title"
-      >
-        <button
-          type="button"
-          className="close-button"
-          onClick={onClose}
-          aria-label="Close"
-        >
+      <form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="add-lead-title">
+        <button type="button" className="close-button" onClick={onClose} aria-label="Close">
           <X />
         </button>
-        <h2 id="add-lead-title">Add a lead</h2>
-        <p>This creates one contact in the local workspace.</p>
-        <label>
-          Name
-          <input name="name" required />
-        </label>
+        <h2 id="add-lead-title">{editing ? "Edit lead" : "Add a lead"}</h2>
+        <p>{editing ? "Fix anything that is wrong. Only the phone number is required." : "Only the phone number is required."}</p>
         {error && (
           <p className="form-error" role="alert">
             {error}
           </p>
         )}
         <label>
+          Phone
+          <input name="phone" type="tel" required placeholder="+1 555 0100" defaultValue={lead?.phone} />
+        </label>
+        <label>
+          Contact name (optional)
+          <input name="name" placeholder="Leave blank for a front desk or main line" defaultValue={lead?.name} />
+        </label>
+        <label>
           Company
-          <input name="company" />
+          <input name="company" defaultValue={blank(lead?.company, "Unassigned")} />
         </label>
         <label>
           Role
-          <input name="role" />
-        </label>
-        <label>
-          Phone
-          <input name="phone" type="tel" required placeholder="+1 555 0100" />
+          <input name="role" placeholder="e.g. Receptionist, Superintendent" defaultValue={blank(lead?.role, "Contact")} />
         </label>
         <label>
           Time zone
-          <input name="timezone" placeholder="America/Los_Angeles" />
+          <input name="timezone" placeholder="America/New_York" defaultValue={blank(lead?.timezone, "Unknown")} list="timezone-options" />
+          <datalist id="timezone-options">
+            {["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"].map((zone) => <option key={zone} value={zone} />)}
+          </datalist>
         </label>
+        {editing && (
+          <label>
+            Note
+            <textarea name="note" defaultValue={lead?.note} />
+          </label>
+        )}
         <button className="primary-button" disabled={saving}>
-          {saving ? (
-            "Saving…"
-          ) : (
-            <>
-              <UserPlus size={17} /> Add to route
-            </>
-          )}
+          {saving ? "Saving…" : editing ? <><Check size={17} /> Save changes</> : <><UserPlus size={17} /> Add to route</>}
         </button>
+        {editing && (
+          <button type="button" className="quiet-button danger-button" onClick={remove} disabled={saving}>
+            Delete lead
+          </button>
+        )}
       </form>
     </div>
   );
