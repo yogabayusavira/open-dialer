@@ -1,5 +1,5 @@
 ---
-name: Callboard
+name: Open Dialer v2
 description: A dense, calm operating workspace for responsible outbound calling.
 colors:
   canvas: "#111110"
@@ -81,13 +81,13 @@ components:
     height: "40px"
 ---
 
-# Design System: Callboard
+# Design System: Open Dialer v2
 
 ## Overview
 
 **Creative North Star: "The focused switchboard."**
 
-Callboard is an Operate-mode product: dense enough to work from all day, quiet enough that a caller can scan the next decision without visual noise. Dark neutral layers do the structural work; one aubergine accent communicates selection and forward action.
+Open Dialer v2 is an Operate-mode product: dense enough to work from all day, quiet enough that a caller can scan the next decision without visual noise. Dark neutral layers do the structural work; one aubergine accent communicates selection and forward action.
 
 It uses one sans-serif family. Hierarchy comes from the approved type scale, weight, and space—not extra fonts or near-duplicate sizes.
 

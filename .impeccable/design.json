@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedAt": "2026-11-10T00:00:00Z",
-  "title": "Design System: Callboard",
+  "title": "Design System: Open Dialer v2",
   "extensions": {
     "shadows": [{"name": "dialog", "value": "0 18px 50px rgb(0 0 0 / 28%)", "purpose": "Lift a protected dialog above its backdrop."}],
     "motion": [{"name": "spinner", "value": "spin 0.9s linear infinite", "purpose": "Show an active request; it stops under reduced-motion preference."}],

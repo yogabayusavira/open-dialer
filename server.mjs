@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -20,7 +21,7 @@ import pg from "pg";
 const port = Number(process.env.PORT || 3000);
 const root = process.cwd();
 const storeDir = join(root, "data");
-const storePath = join(storeDir, "callboard.json");
+const storePath = join(storeDir, "open-dialer.json");
 const distDir = join(root, "dist");
 const databaseUrl = process.env.DATABASE_URL?.trim();
 const database = databaseUrl ? new pg.Pool({ connectionString: databaseUrl }) : null;
@@ -112,13 +113,21 @@ async function databaseClient() {
   if (!database) return null;
   if (!databaseReady) {
     databaseReady = database
+      // One-time migration from the previous product name. Safe to delete after the first deploy.
       .query(`
-        CREATE TABLE IF NOT EXISTS callboard_state (
+        DO $$ BEGIN
+          IF to_regclass('callboard_state') IS NOT NULL AND to_regclass('open_dialer_state') IS NULL THEN
+            ALTER TABLE callboard_state RENAME TO open_dialer_state;
+          END IF;
+        END $$;
+      `)
+      .then(() => database.query(`
+        CREATE TABLE IF NOT EXISTS open_dialer_state (
           id TEXT PRIMARY KEY,
           payload JSONB NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-      `)
+      `))
       .catch((error) => {
         databaseReady = undefined;
         throw error;
@@ -150,6 +159,9 @@ function normalizeState(stored) {
 }
 
 function readFileState() {
+  // One-time migration from the previous product name. Safe to delete after the first run.
+  const legacyPath = join(storeDir, "callboard.json");
+  if (!existsSync(storePath) && existsSync(legacyPath)) renameSync(legacyPath, storePath);
   if (!existsSync(storePath)) return null;
   try {
     return normalizeState(JSON.parse(readFileSync(storePath, "utf8")));
@@ -162,7 +174,7 @@ async function readState() {
   const client = await databaseClient();
   if (client) {
     const result = await client.query(
-      "SELECT payload FROM callboard_state WHERE id = $1",
+      "SELECT payload FROM open_dialer_state WHERE id = $1",
       ["workspace"],
     );
     if (result.rows[0]) return normalizeState(result.rows[0].payload);
@@ -180,7 +192,7 @@ async function writeState(state) {
   if (client) {
     await client.query(
       `
-        INSERT INTO callboard_state (id, payload, updated_at)
+        INSERT INTO open_dialer_state (id, payload, updated_at)
         VALUES ($1, $2::jsonb, NOW())
         ON CONFLICT (id) DO UPDATE
         SET payload = EXCLUDED.payload, updated_at = NOW()
@@ -246,10 +258,10 @@ function importedLeadRows(rows) {
   });
 }
 function encryptionKey() {
-  const secret = process.env.CALLBOARD_ENCRYPTION_KEY;
+  const secret = process.env.OPEN_DIALER_ENCRYPTION_KEY;
   if (!secret || secret.length < 24)
     throw new Error(
-      "CALLBOARD_ENCRYPTION_KEY must be set to a long random secret before saving credentials.",
+      "OPEN_DIALER_ENCRYPTION_KEY must be set to a long random secret before saving credentials.",
     );
   return createHash("sha256").update(secret).digest();
 }
@@ -279,7 +291,7 @@ function unseal(connection) {
   ]).toString("utf8");
 }
 function publicOrigin(req) {
-  const configured = process.env.CALLBOARD_PUBLIC_URL?.trim().replace(/\/$/, "");
+  const configured = process.env.OPEN_DIALER_PUBLIC_URL?.trim().replace(/\/$/, "");
   if (configured) return configured;
   const protocol = req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
   return `${protocol}://${req.headers.host}`;
@@ -333,7 +345,7 @@ function getBody(req) {
   });
 }
 function configuredAdminPassword() {
-  return process.env.CALLBOARD_ADMIN_PASSWORD || null;
+  return process.env.OPEN_DIALER_ADMIN_PASSWORD || null;
 }
 function cookies(req) {
   return Object.fromEntries(
@@ -351,16 +363,16 @@ function safeEqual(left, right) {
 function isAuthenticated(req) {
   const password = configuredAdminPassword();
   if (!password) return process.env.NODE_ENV !== "production";
-  const token = cookies(req).callboard_session;
+  const token = cookies(req).open_dialer_session;
   const session = token && sessions.get(token);
   if (session && session.expiresAt > Date.now()) return true;
   if (token) sessions.delete(token);
-  const remembered = cookies(req).callboard_remember;
+  const remembered = cookies(req).open_dialer_remember;
   const [expiresAt, signature] = remembered?.split(".") || [];
   if (!/^\d{13}$/.test(expiresAt || "") || !signature) return false;
   if (Number(expiresAt) <= Date.now()) return false;
   const expected = createHmac("sha256", password)
-    .update(`callboard-remember:${expiresAt}`)
+    .update(`open-dialer-remember:${expiresAt}`)
     .digest("base64url");
   return safeEqual(signature, expected);
 }
@@ -372,27 +384,27 @@ function setSession(res, remember = false) {
   if (remember) {
     const expiresAt = String(Date.now() + rememberedSessionLifetimeMs);
     const signature = createHmac("sha256", configuredAdminPassword())
-      .update(`callboard-remember:${expiresAt}`)
+      .update(`open-dialer-remember:${expiresAt}`)
       .digest("base64url");
     res.setHeader("set-cookie", [
-      `callboard_remember=${expiresAt}.${signature}; ${cookieAttributes(rememberedSessionLifetimeMs / 1000)}`,
-      `callboard_session=; ${cookieAttributes(0)}`,
+      `open_dialer_remember=${expiresAt}.${signature}; ${cookieAttributes(rememberedSessionLifetimeMs / 1000)}`,
+      `open_dialer_session=; ${cookieAttributes(0)}`,
     ]);
     return;
   }
   const token = randomBytes(32).toString("base64url");
   sessions.set(token, { expiresAt: Date.now() + sessionLifetimeMs });
   res.setHeader("set-cookie", [
-    `callboard_session=${token}; ${cookieAttributes(sessionLifetimeMs / 1000)}`,
-    `callboard_remember=; ${cookieAttributes(0)}`,
+    `open_dialer_session=${token}; ${cookieAttributes(sessionLifetimeMs / 1000)}`,
+    `open_dialer_remember=; ${cookieAttributes(0)}`,
   ]);
 }
 function clearSession(req, res) {
-  const token = cookies(req).callboard_session;
+  const token = cookies(req).open_dialer_session;
   if (token) sessions.delete(token);
   res.setHeader("set-cookie", [
-    `callboard_session=; ${cookieAttributes(0)}`,
-    `callboard_remember=; ${cookieAttributes(0)}`,
+    `open_dialer_session=; ${cookieAttributes(0)}`,
+    `open_dialer_remember=; ${cookieAttributes(0)}`,
   ]);
 }
 function requestKey(req) {
@@ -476,7 +488,7 @@ createServer(async (req, res) => {
       if (!password)
         return json(res, 400, {
           error:
-            "Set CALLBOARD_ADMIN_PASSWORD before using application sign-in.",
+            "Set OPEN_DIALER_ADMIN_PASSWORD before using application sign-in.",
         });
       if (!canAttemptLogin(req))
         return json(res, 429, {
@@ -485,7 +497,7 @@ createServer(async (req, res) => {
       const body = await getBody(req);
       if (!safeEqual(body.password || "", password)) {
         recordFailedLogin(req);
-        return json(res, 401, { error: "Incorrect Callboard password." });
+        return json(res, 401, { error: "Incorrect Open Dialer v2 password." });
       }
       clearFailedLogins(req);
       setSession(res, body.remember === true);
@@ -502,7 +514,7 @@ createServer(async (req, res) => {
     )
       return json(res, 503, {
         error:
-          "CALLBOARD_ADMIN_PASSWORD must be configured before production use.",
+          "OPEN_DIALER_ADMIN_PASSWORD must be configured before production use.",
       });
     if (url.pathname.startsWith("/api/") && !isAuthenticated(req))
       return json(res, 401, { error: "Sign in to access this workspace." });
@@ -649,7 +661,7 @@ createServer(async (req, res) => {
         lead.dnc = body.dnc;
         lead.status = body.dnc ? "Paused" : "Ready";
         lead.due = body.dnc ? "Suppressed" : "Unscheduled";
-        if (body.dnc) lead.note = "Do not call: set from Callboard.";
+        if (body.dnc) lead.note = "Do not call: set from Open Dialer v2.";
       }
       if (typeof body.status === "string") {
         if (!leadStatuses.includes(body.status)) return json(res, 400, { error: "Choose a valid status." });
@@ -854,4 +866,4 @@ createServer(async (req, res) => {
         error instanceof Error ? error.message : "Unexpected server error.",
     });
   }
-}).listen(port, "0.0.0.0", () => console.log(`Callboard listening on ${port}`));
+}).listen(port, "0.0.0.0", () => console.log(`Open Dialer v2 listening on ${port}`));
