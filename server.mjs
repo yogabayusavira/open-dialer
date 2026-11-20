@@ -45,7 +45,8 @@ const defaultState = {
       role: "Operations Director",
       phone: "+1 425 555 0148",
       timezone: "America/Los_Angeles",
-      status: "Ready",
+      status: "New",
+      campaigns: ["Demo"],
       dnc: false,
       note: "Asked to reconnect after budget review.",
       due: "Now",
@@ -58,6 +59,7 @@ const defaultState = {
       phone: "+1 312 555 0190",
       timezone: "America/Chicago",
       status: "Follow-up",
+      campaigns: ["Demo"],
       dnc: false,
       note: "Requested a short overview by phone.",
       due: "10:30",
@@ -69,7 +71,8 @@ const defaultState = {
       role: "Chief of Staff",
       phone: "+1 917 555 0173",
       timezone: "America/New_York",
-      status: "Queued",
+      status: "New",
+      campaigns: ["Demo"],
       dnc: false,
       note: "New import—verify contact details.",
       due: "11:15",
@@ -81,7 +84,8 @@ const defaultState = {
       role: "Head of Enrollment",
       phone: "+1 206 555 0141",
       timezone: "America/Los_Angeles",
-      status: "Paused",
+      status: "Lost",
+      campaigns: ["Demo"],
       dnc: true,
       note: "Do not call: requested removal on 2026-11-02.",
       due: "Suppressed",
@@ -143,9 +147,8 @@ function normalizeState(stored) {
   return {
     ...structuredClone(defaultState),
     ...stored,
-    leads: Array.isArray(stored.leads)
-      ? stored.leads
-      : structuredClone(defaultState.leads),
+    leads: (Array.isArray(stored.leads) ? stored.leads : structuredClone(defaultState.leads))
+      .map((lead) => migrateLead(lead, Array.isArray(stored.opportunities) ? stored.opportunities : [])),
     activity: Array.isArray(stored.activity)
       ? stored.activity
       : structuredClone(defaultState.activity),
@@ -153,8 +156,11 @@ function normalizeState(stored) {
       ? stored.opportunities
       : [],
     calls: Array.isArray(stored.calls) ? stored.calls : [],
-    dncNumbers: Array.isArray(stored.dncNumbers) ? stored.dncNumbers : [],
+    // Tasks you write yourself. Callbacks and meetings stay derived from leads.
+    tasks: Array.isArray(stored.tasks) ? stored.tasks : [],
+    dncNumbers: Array.isArray(stored.dncNumbers) ? [...new Set(stored.dncNumbers.map(phoneKey))] : [],
     connection: stored.connection || null,
+    settings: stored.settings && typeof stored.settings === "object" ? stored.settings : {},
   };
 }
 
@@ -173,10 +179,13 @@ function readFileState() {
 async function readState() {
   const client = await databaseClient();
   if (client) {
-    const result = await client.query(
-      "SELECT payload FROM open_dialer_state WHERE id = $1",
-      ["workspace"],
-    );
+    const query = () => client.query("SELECT payload FROM open_dialer_state WHERE id = $1", ["workspace"]);
+    // A garbled read over the network surfaces as a JSON parse error; retry once before failing.
+    const result = await query().catch((error) => {
+      if (!(error instanceof SyntaxError)) throw error;
+      console.error(`[open-dialer] workspace read came back garbled, retrying: ${error.message}`);
+      return query();
+    });
     if (result.rows[0]) return normalizeState(result.rows[0].payload);
     const legacyState = readFileState();
     if (legacyState) {
@@ -186,6 +195,20 @@ async function readState() {
     return structuredClone(defaultState);
   }
   return readFileState() || structuredClone(defaultState);
+}
+let stateQueue = Promise.resolve();
+// Runs read-change-save steps one at a time, so requests arriving together (like Twilio's call reports)
+// can't overwrite each other's changes. Return false from `change` to skip saving.
+// shortcut: in-process only; several server instances would need a database row lock.
+function updateState(change) {
+  const run = stateQueue.then(async () => {
+    const state = await readState();
+    const result = await change(state);
+    if (result !== false) await writeState(state);
+    return result;
+  });
+  stateQueue = run.catch(() => {});
+  return run;
 }
 async function writeState(state) {
   const client = await databaseClient();
@@ -205,7 +228,7 @@ async function writeState(state) {
   writeFileSync(storePath, JSON.stringify(state, null, 2), { mode: 0o600 });
 }
 function safeState(state) {
-  const { authToken, tokenCiphertext, iv, tag, ...connection } =
+  const { authToken, tokenCiphertext, iv, tag, apiKeySecret, ...connection } =
     state.connection || {};
   return { ...state, connection: state.connection ? connection : null };
 }
@@ -224,12 +247,46 @@ function activity(state, action, detail) {
   state.activity = state.activity.slice(0, 500);
 }
 function phoneKey(value) {
-  return String(value || "").replace(/\D/g, "").slice(-15);
+  // US numbers match with or without the leading country code 1.
+  const digits = String(value || "").replace(/[\s,;]*(?:ext\.?|extension|x|#)\s*\d+\s*$/i, "").replace(/\D/g, "").slice(-15);
+  return digits.length === 11 && digits[0] === "1" ? digits.slice(1) : digits;
+}
+function extensionDigits(value) {
+  return String(value || "").replace(/\D/g, "").slice(0, 10);
 }
 function leadLabel(lead) {
   return lead.name || (lead.company && lead.company !== "Unassigned" ? lead.company : "") || lead.phone;
 }
-const leadStatuses = ["Ready", "Try again", "Follow-up", "Closed", "Converted", "Paused"];
+// The pipeline: a lead's status is its stage. Lost is terminal; Do not call is a separate flag on top.
+const leadStages = ["New", "Follow-up", "Meeting booked", "Won", "Lost"];
+// Earlier statuses and stages, mapped once when a workspace is read.
+const legacyStages = { Ready: "New", Queued: "New", "Try again": "New", Attempted: "New", Interested: "Follow-up", Closed: "Lost", Paused: "Lost" };
+function migrateLead(lead, opportunities) {
+  if (!leadStages.includes(lead.status)) {
+    if (lead.status === "Converted") {
+      // Leads converted under the old separate-opportunity pipeline take that opportunity's stage and value.
+      const opportunity = opportunities.find((item) => item.leadId === lead.id);
+      lead.status = opportunity?.stage === "Closed Won" ? "Won" : opportunity?.stage === "Closed Lost" ? "Lost" : "Meeting booked";
+      if (opportunity && lead.value === undefined) lead.value = Number(opportunity.value) || 0;
+      if (lead.due === "Converted") lead.due = "Unscheduled";
+    } else lead.status = legacyStages[lead.status] || "New";
+    if (lead.due === "Closed") lead.due = "Lost";
+  }
+  lead.campaigns = Array.isArray(lead.campaigns) ? lead.campaigns.map((name) => cleanText(name, 80)).filter(Boolean) : [];
+  return lead;
+}
+// What a logged call outcome moves the lead to. No answer, busy and voicemail leave the stage alone;
+// the rest only move a lead forward, except Lost.
+const outcomeStage = { Callback: "Follow-up", "Maybe later": "Follow-up", Interested: "Follow-up", "Meeting booked": "Meeting booked", "Not interested": "Lost", "Wrong number": "Lost", "Do not call": "Lost" };
+function stageAfterOutcome(current, outcome) {
+  const next = outcomeStage[outcome];
+  if (!next) return current;
+  if (next === "Lost" || current === "Lost") return next;
+  return leadStages.indexOf(next) > leadStages.indexOf(current) ? next : current;
+}
+function campaignName(value) {
+  return cleanText(value, 80);
+}
 function cleanText(value, max = 500) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
@@ -249,10 +306,13 @@ function importedLeadRows(rows) {
     return {
       name: cleanText(row?.name, 120),
       phone: cleanText(row?.phone, 40),
+      extension: extensionDigits(row?.extension),
       company: cleanText(row?.company, 160) || "Unassigned",
       role: cleanText(row?.role, 120) || "Contact",
       timezone: cleanText(row?.timezone, 60) || "Unknown",
       note: cleanText(row?.note, 1000),
+      // An optional Stage column ("Follow-up", "won", ...) places the lead on the board; anything else starts as New.
+      status: leadStages.find((stage) => stage.toLowerCase() === cleanText(row?.stage, 40).toLowerCase()) || "New",
       details,
     };
   });
@@ -307,6 +367,89 @@ function validVoiceToken(token, leadId) {
   const expected = createHmac("sha256", encryptionKey()).update(payload).digest("base64url");
   return safeEqual(signature, expected);
 }
+function twilioAuthHeader(connection) {
+  return `Basic ${Buffer.from(`${connection.accountSid}:${unseal(connection)}`).toString("base64")}`;
+}
+async function twilioRequest(connection, path, params) {
+  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${connection.accountSid}${path}`, {
+    method: "POST",
+    headers: { authorization: twilioAuthHeader(connection), "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(params),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`Twilio: ${body.message || `request failed (${response.status})`}`);
+  return body;
+}
+async function twilioGet(connection, url) {
+  const response = await fetch(url, { headers: { authorization: twilioAuthHeader(connection) } });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.message || `request failed (${response.status})`);
+  return body;
+}
+function maskNumber(value) {
+  const text = String(value || "");
+  return text.length > 7 ? `${text.slice(0, 3)}${"•".repeat(text.length - 7)}${text.slice(-4)}` : text;
+}
+function base64url(value) {
+  return Buffer.from(typeof value === "string" ? value : JSON.stringify(value)).toString("base64url");
+}
+// Twilio access token (a signed JWT) that lets this browser place and receive calls for one hour.
+function voiceAccessToken({ accountSid, keySid, keySecret, appSid, identity }) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64url({ alg: "HS256", typ: "JWT", cty: "twilio-fpa;v=1" });
+  const payload = base64url({
+    jti: `${keySid}-${now}`,
+    iss: keySid,
+    sub: accountSid,
+    iat: now,
+    exp: now + 3600,
+    grants: { identity, voice: { incoming: { allow: true }, outgoing: { application_sid: appSid } } },
+  });
+  const signature = createHmac("sha256", keySecret).update(`${header}.${payload}`).digest("base64url");
+  return `${header}.${payload}.${signature}`;
+}
+const operatorIdentity = "operator";
+function statusToken(leadId) {
+  return createHmac("sha256", encryptionKey()).update(`call-status:${leadId}`).digest("base64url");
+}
+function getFormBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += chunk;
+      if (raw.length > 100_000) req.destroy();
+    });
+    req.on("end", () => resolve(Object.fromEntries(new URLSearchParams(raw))));
+    req.on("error", reject);
+  });
+}
+const sipReasons = {
+  403: "Twilio refused the call to your calling app (check SIP Registration and the credential list on the SIP domain)",
+  404: "nobody is registered at that address (check the Zoiper username and domain)",
+  408: "your calling app didn't respond in time",
+  480: "your calling app is offline or not registered right now",
+  486: "your calling app was busy",
+  487: "the call was cancelled before your calling app answered",
+  503: "your calling app's service was unavailable",
+};
+function describeCallResult(status, sipCode, errorCode, isSip, isLeadLeg = false) {
+  if (isLeadLeg) {
+    if (status === "completed") return "Call finished. Log the outcome for this lead.";
+    if (status === "busy") return "The lead's line was busy.";
+    if (status === "no-answer") return "The lead didn't answer.";
+    if (status === "canceled") return "You hung up before the lead answered.";
+    if (String(errorCode) === "13224") return "Didn't connect: Twilio won't dial this number (error 13224). It's invalid or can't take voice calls (for example a messaging-only number). Try another number for this lead. On a trial account, only verified numbers can be called.";
+    return `Didn't connect: the lead's number couldn't be reached${sipCode ? ` (SIP ${sipCode})` : ""}${errorCode ? `, Twilio error ${errorCode}` : ""}.`;
+  }
+  const where = isSip ? "Your calling app" : "Your phone";
+  if (status === "completed") return "Call finished. Log the outcome for this lead.";
+  if (status === "busy") return `${where} was busy.`;
+  if (status === "no-answer") return `${where} rang but nobody answered.`;
+  if (status === "canceled") return "The call was cancelled before it connected.";
+  const phoneReasons = { 404: "that number couldn't be reached (Twilio says it's invalid, not in service, or not supported)", 480: "that phone is switched off or out of reach", 403: "Twilio isn't allowed to call that number (check Voice geographic permissions)" };
+  const reason = (!isSip && phoneReasons[sipCode]) || (sipCode && sipReasons[sipCode]) || (sipCode ? `the call failed (SIP ${sipCode})` : "the call failed");
+  return `Didn't connect: ${reason}${sipCode ? ` (SIP ${sipCode})` : ""}${errorCode ? `, Twilio error ${errorCode}` : ""}.`;
+}
 function escapeXml(value) {
   return String(value).replace(/[<>&'\"]/g, (character) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" })[character]);
 }
@@ -315,6 +458,8 @@ function twiml(res, source) {
   res.end(source);
 }
 function json(res, status, payload) {
+  // Every failed request is written to the server output (path only, never query tokens or bodies).
+  if (status >= 400) console.error(`[open-dialer] ${status} ${res.req?.method || ""} ${new URL(res.req?.url || "/", "http://local").pathname}: ${payload?.error || ""}`);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
@@ -476,7 +621,54 @@ createServer(async (req, res) => {
       const lead = state.leads.find((item) => item.id === leadId);
       if (!lead || lead.dnc || !validVoiceToken(token, lead.id))
         return twiml(res, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Hangup/></Response>");
-      return twiml(res, `<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId="${escapeXml(state.connection?.selectedNumber || "")}">${escapeXml(lead.phone)}</Dial></Response>`);
+      return twiml(res, `<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId="${escapeXml(state.connection?.selectedNumber || "")}"><Number${lead.extension ? ` sendDigits="wwww${extensionDigits(lead.extension)}"` : ""}>${escapeXml(lead.phone)}</Number></Dial></Response>`);
+    }
+    if (url.pathname === "/api/twilio/voice/status" && req.method === "POST") {
+      const leadId = url.searchParams.get("leadId") || "";
+      const token = url.searchParams.get("token") || "";
+      if (!leadId || !safeEqual(token, statusToken(leadId))) return json(res, 403, { error: "Invalid status token." });
+      const report = await getFormBody(req);
+      const status = String(report.CallStatus || "");
+      const sipCode = Number(report.SipResponseCode) || null;
+      console.log(`[open-dialer] Twilio call …${String(report.CallSid || "").slice(-6)}: ${status}${sipCode ? ` (SIP ${sipCode})` : ""}${report.ErrorCode ? ` error ${report.ErrorCode}` : ""}`);
+      const apply = (state) => {
+        const call = state.calls.find((item) => item.sid && (item.sid === report.CallSid || item.sid === report.ParentCallSid) && item.leadId === leadId);
+        if (!call) return false;
+        const final = ["completed", "busy", "no-answer", "canceled", "failed"];
+        // Reports can arrive out of order; never let an early event overwrite a final one.
+        if (!final.includes(call.twilioStatus) || final.includes(status)) call.twilioStatus = status;
+        if (sipCode) call.sipCode = sipCode;
+        if (report.ParentCallSid && report.CallSid) call.leadLegSid = report.CallSid;
+        if (report.ErrorCode) call.errorCode = String(report.ErrorCode);
+        if (final.includes(status) && call.outcome === "In progress") {
+          call.outcome = status === "completed" ? "Call ended" : "Didn't connect";
+          call.note = describeCallResult(status, sipCode, report.ErrorCode, String(state.connection?.bridgeNumber || "").startsWith("sip:"), Boolean(report.ParentCallSid));
+          const lead = state.leads.find((item) => item.id === leadId);
+          activity(state, call.outcome, `${lead ? leadLabel(lead) : "Lead"} · ${call.note}`);
+        }
+        return true;
+      };
+      // A report can arrive before the call itself is saved; wait briefly and retry.
+      for (let attempt = 0; attempt < 4 && (await updateState(apply)) === false; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      return json(res, 200, {});
+    }
+    if (url.pathname === "/api/twilio/voice/client" && req.method === "POST") {
+      const params = await getFormBody(req);
+      const hangup = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
+      const state = await readState();
+      const lead = state.leads.find((item) => item.id === params.leadId);
+      if (!lead || lead.dnc || !validVoiceToken(params.token, lead.id)) return twiml(res, hangup);
+      await updateState((fresh) => {
+        if (fresh.calls.some((item) => item.sid === params.CallSid)) return false;
+        fresh.calls.unshift({ id: /^call_[\w]+$/.test(params.callId || "") ? params.callId : `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling from the app.", at: new Date().toISOString(), sid: params.CallSid });
+        activity(fresh, "Call started", `${leadLabel(lead)} · from the app`);
+      });
+      const statusUrl = new URL("/api/twilio/voice/status", publicOrigin(req));
+      statusUrl.searchParams.set("leadId", lead.id);
+      statusUrl.searchParams.set("token", statusToken(lead.id));
+      const digits = lead.extension ? ` sendDigits="wwww${extensionDigits(lead.extension)}"` : "";
+      return twiml(res, `<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId="${escapeXml(state.connection?.selectedNumber || "")}" answerOnBridge="true"><Number${digits} statusCallback="${escapeXml(statusUrl.toString())}" statusCallbackMethod="POST" statusCallbackEvent="initiated ringing answered completed">${escapeXml(lead.phone)}</Number></Dial></Response>`);
     }
     if (url.pathname === "/api/session" && req.method === "GET")
       return json(res, 200, {
@@ -519,7 +711,8 @@ createServer(async (req, res) => {
     if (url.pathname.startsWith("/api/") && !isAuthenticated(req))
       return json(res, 401, { error: "Sign in to access this workspace." });
     if (url.pathname === "/api/state" && req.method === "GET")
-      return json(res, 200, safeState(await readState()));
+      // callbackReachable tells the setup guide whether Twilio could fetch the call instructions from this app.
+      return json(res, 200, { ...safeState(await readState()), callbackReachable: !/\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(publicOrigin(req)) });
     if (url.pathname === "/api/leads" && req.method === "POST") {
       const body = await getBody(req);
       if (!phoneKey(body.phone))
@@ -533,8 +726,10 @@ createServer(async (req, res) => {
         company: body.company?.trim() || "Unassigned",
         role: body.role?.trim() || "Contact",
         phone: body.phone.trim(),
+        extension: extensionDigits(body.extension),
         timezone: body.timezone?.trim() || "Unknown",
-        status: "Ready",
+        status: "New",
+        campaigns: campaignName(body.campaign) ? [campaignName(body.campaign)] : [],
         dnc: false,
         note: "Added manually.",
         due: "Unscheduled",
@@ -549,12 +744,67 @@ createServer(async (req, res) => {
       await writeState(state);
       return json(res, 201, lead);
     }
+    if (url.pathname === "/api/tasks" && req.method === "POST") {
+      const { title, details, due, leadId } = await getBody(req);
+      const text = cleanText(title, 200);
+      if (!text) return json(res, 400, { error: "Write what the task is." });
+      const state = await readState();
+      if (leadId && !state.leads.some((lead) => lead.id === leadId)) return json(res, 400, { error: "That lead no longer exists." });
+      const task = { id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, title: text, details: cleanText(details, 4000), due: cleanText(due, 40), leadId: leadId || null, createdAt: new Date().toISOString(), doneAt: null };
+      state.tasks.unshift(task);
+      activity(state, "Task added", text);
+      await writeState(state);
+      return json(res, 201, task);
+    }
+    if (url.pathname.match(/^\/api\/tasks\/[^/]+$/) && (req.method === "PATCH" || req.method === "DELETE")) {
+      const id = url.pathname.split("/")[3];
+      const state = await readState();
+      const task = state.tasks.find((item) => item.id === id);
+      if (!task) return json(res, 404, { error: "Task not found." });
+      if (req.method === "DELETE") {
+        state.tasks = state.tasks.filter((item) => item.id !== id);
+        activity(state, "Task deleted", task.title);
+      } else {
+        const { done, title, details, due, leadId } = await getBody(req);
+        if (typeof done === "boolean") {
+          task.doneAt = done ? new Date().toISOString() : null;
+          activity(state, done ? "Task done" : "Task reopened", task.title);
+        } else {
+          // Edit: title, details, due and lead together, as the task dialog sends them.
+          const text = cleanText(title, 200);
+          if (!text) return json(res, 400, { error: "Write what the task is." });
+          if (leadId && !state.leads.some((lead) => lead.id === leadId)) return json(res, 400, { error: "That lead no longer exists." });
+          Object.assign(task, { title: text, details: cleanText(details, 4000), due: cleanText(due, 40), leadId: leadId || null });
+          activity(state, "Task updated", task.title);
+        }
+      }
+      await writeState(state);
+      return json(res, 200, task);
+    }
+    if (url.pathname === "/api/leads/campaign" && req.method === "POST") {
+      const { ids, campaign } = await getBody(req);
+      const tag = campaignName(campaign);
+      if (!tag) return json(res, 400, { error: "Type a campaign name first." });
+      if (!Array.isArray(ids) || !ids.length) return json(res, 400, { error: "Select at least one lead." });
+      const wanted = new Set(ids);
+      const state = await readState();
+      let added = 0;
+      for (const lead of state.leads)
+        if (wanted.has(lead.id) && !lead.campaigns.includes(tag)) { lead.campaigns.push(tag); added += 1; }
+      if (added) {
+        activity(state, "Leads tagged", `${added} leads added to ${tag}`);
+        await writeState(state);
+      }
+      return json(res, 200, { added, already: wanted.size - added });
+    }
     if (url.pathname === "/api/leads/import" && req.method === "POST") {
-      const { leads } = await getBody(req);
+      const { leads, campaign } = await getBody(req);
+      const tag = campaignName(campaign);
       const imported = importedLeadRows(leads);
       const state = await readState();
       const known = new Set(state.leads.map((lead) => phoneKey(lead.phone)));
       let duplicates = 0;
+      let tagged = 0;
       let invalid = 0;
       const created = imported.flatMap((candidate, index) => {
         const key = phoneKey(candidate.phone);
@@ -564,6 +814,8 @@ createServer(async (req, res) => {
         }
         if (known.has(key)) {
           duplicates += 1;
+          const existing = tag && state.leads.find((lead) => phoneKey(lead.phone) === key);
+          if (existing && !existing.campaigns.includes(tag)) { existing.campaigns.push(tag); tagged += 1; }
           return [];
         }
         known.add(key);
@@ -571,24 +823,33 @@ createServer(async (req, res) => {
         return [{
           id: `lead_${Date.now()}_${index}`,
           ...candidate,
-          status: dnc ? "Paused" : "Ready",
+          status: dnc ? "Lost" : candidate.status,
+          campaigns: tag ? [tag] : [],
           dnc,
-          note: dnc ? "Do not call: matched the workspace suppression list." : candidate.note || "Imported from CSV.",
-          due: dnc ? "Suppressed" : "Unscheduled",
+          note: dnc ? "Do not call: matched the workspace suppression list." : candidate.note,
+          due: dnc ? "Suppressed" : ["Won", "Lost"].includes(candidate.status) ? candidate.status : "Unscheduled",
         }];
       });
+      if (!created.length && tagged) {
+        activity(state, "Leads tagged", `${tagged} existing leads added to ${tag}`);
+        await writeState(state);
+        return json(res, 201, { imported: 0, duplicates, invalid, tagged });
+      }
       if (!created.length)
         return json(res, 409, {
           error: invalid === imported.length
             ? "None of the rows had a usable phone number. Check that the right column is mapped to Phone."
-            : "Every row with a phone number is already in this workspace.",
+            : tag
+              ? `Every row is already in this workspace and already in ${tag}.`
+              // The usual reason to re-upload a file is to put its leads in a campaign, so say how.
+              : `All ${duplicates} leads in this file are already in your workspace. To put them in a campaign, type a campaign name and import again.`,
           duplicates,
           invalid,
         });
       state.leads.unshift(...created);
-      activity(state, "Leads imported", `${created.length} leads added from CSV`);
+      activity(state, "Leads imported", `${created.length} leads added from CSV${tag ? ` to ${tag}` : ""}`);
       await writeState(state);
-      return json(res, 201, { imported: created.length, duplicates, invalid });
+      return json(res, 201, { imported: created.length, duplicates, invalid, tagged });
     }
     if (url.pathname === "/api/dnc" && req.method === "POST") {
       const { numbers } = await getBody(req);
@@ -602,7 +863,7 @@ createServer(async (req, res) => {
       for (const lead of state.leads) {
         if (!additions.includes(phoneKey(lead.phone))) continue;
         lead.dnc = true;
-        lead.status = "Paused";
+        lead.status = "Lost";
         lead.due = "Suppressed";
         lead.note = "Do not call: matched the workspace suppression list.";
         matched += 1;
@@ -618,7 +879,7 @@ createServer(async (req, res) => {
       for (const lead of state.leads) {
         if (phoneKey(lead.phone) !== key) continue;
         lead.dnc = false;
-        lead.status = "Ready";
+        lead.status = "New";
         lead.due = "Unscheduled";
       }
       activity(state, "DNC suppression removed", "A number was allowed again");
@@ -652,6 +913,7 @@ createServer(async (req, res) => {
         lead.phone = cleanText(body.phone, 40);
         if (state.dncNumbers.includes(key)) body.dnc = true;
       }
+      if (typeof body.extension === "string") lead.extension = extensionDigits(body.extension);
       if (typeof body.name === "string") lead.name = cleanText(body.name, 120);
       if (typeof body.company === "string") lead.company = cleanText(body.company, 160) || "Unassigned";
       if (typeof body.role === "string") lead.role = cleanText(body.role, 120) || "Contact";
@@ -659,17 +921,41 @@ createServer(async (req, res) => {
       if (typeof body.note === "string") lead.note = cleanText(body.note, 1000);
       if (typeof body.dnc === "boolean") {
         lead.dnc = body.dnc;
-        lead.status = body.dnc ? "Paused" : "Ready";
+        lead.status = body.dnc ? "Lost" : "New";
         lead.due = body.dnc ? "Suppressed" : "Unscheduled";
         if (body.dnc) lead.note = "Do not call: set from Open Dialer v2.";
       }
       if (typeof body.status === "string") {
-        if (!leadStatuses.includes(body.status)) return json(res, 400, { error: "Choose a valid status." });
+        if (!leadStages.includes(body.status)) return json(res, 400, { error: "Choose a valid stage." });
         lead.status = body.status;
-        if (body.status !== "Follow-up" && lead.due !== "Suppressed") lead.due = body.status === "Closed" ? "Closed" : "Unscheduled";
+        if (lead.due !== "Suppressed" && ["Won", "Lost"].includes(body.status)) lead.due = body.status;
+        else if (lead.due !== "Suppressed" && ["Won", "Lost"].includes(lead.due)) lead.due = "Unscheduled";
+      }
+      if (Array.isArray(body.campaigns)) lead.campaigns = [...new Set(body.campaigns.map(campaignName).filter(Boolean))];
+      if (body.value !== undefined) {
+        const amount = Number(body.value);
+        if (!Number.isFinite(amount) || amount < 0) return json(res, 400, { error: "Deal value must be a positive number." });
+        lead.value = amount;
       }
       if (typeof body.due === "string") lead.due = cleanText(body.due, 40) || "Unscheduled";
       activity(state, lead.dnc ? "DNC suppression" : "Lead updated", `${leadLabel(lead)} · ${lead.company}`);
+      await writeState(state);
+      return json(res, 200, lead);
+    }
+    if (url.pathname.match(/^\/api\/leads\/[^/]+\/task$/) && req.method === "POST") {
+      const { done } = await getBody(req);
+      const state = await readState();
+      const lead = state.leads.find((item) => item.id === url.pathname.split("/")[3]);
+      if (!lead) return json(res, 404, { error: "Lead not found." });
+      if (done === true && !lead.taskDone) {
+        lead.taskDone = { at: new Date().toISOString(), due: lead.due };
+        lead.due = "Unscheduled";
+        activity(state, "Task done", `${leadLabel(lead)} · ${lead.status}`);
+      } else if (done === false && lead.taskDone) {
+        lead.due = lead.taskDone.due;
+        delete lead.taskDone;
+        activity(state, "Task reopened", `${leadLabel(lead)} · ${lead.status}`);
+      }
       await writeState(state);
       return json(res, 200, lead);
     }
@@ -683,49 +969,6 @@ createServer(async (req, res) => {
       await writeState(state);
       return json(res, 204, {});
     }
-    if (url.pathname === "/api/opportunities" && req.method === "POST") {
-      const { leadId, name, value } = await getBody(req);
-      const state = await readState();
-      const lead = state.leads.find((item) => item.id === leadId);
-      if (!lead) return json(res, 404, { error: "Lead not found." });
-      const existing = state.opportunities.find((item) => item.leadId === lead.id);
-      if (existing) return json(res, 409, { error: "This lead is already an opportunity." });
-      const amount = Number(value || 0);
-      if (!Number.isFinite(amount) || amount < 0)
-        return json(res, 400, { error: "Opportunity value must be a positive number." });
-      const opportunity = {
-        id: `opp_${Date.now()}`,
-        leadId: lead.id,
-        name: String(name || `${lead.company} opportunity`).trim().slice(0, 120) || `${lead.company} opportunity`,
-        company: lead.company,
-        contact: lead.name || "",
-        value: amount,
-        stage: "Qualification",
-        createdAt: new Date().toISOString(),
-      };
-      state.opportunities.unshift(opportunity);
-      lead.status = "Converted";
-      lead.due = "Converted";
-      activity(state, "Lead converted", `${leadLabel(lead)} → ${opportunity.name}`);
-      await writeState(state);
-      return json(res, 201, opportunity);
-    }
-    if (url.pathname.match(/^\/api\/opportunities\/[^/]+$/) && req.method === "PATCH") {
-      const body = await getBody(req);
-      const state = await readState();
-      const opportunity = state.opportunities.find((item) => item.id === url.pathname.split("/").pop());
-      if (!opportunity) return json(res, 404, { error: "Opportunity not found." });
-      const stages = ["Qualification", "Proposal", "Negotiation", "Closed Won", "Closed Lost"];
-      if (typeof body.stage === "string" && stages.includes(body.stage)) opportunity.stage = body.stage;
-      if (body.value !== undefined) {
-        const amount = Number(body.value);
-        if (!Number.isFinite(amount) || amount < 0) return json(res, 400, { error: "Opportunity value must be a positive number." });
-        opportunity.value = amount;
-      }
-      activity(state, "Opportunity updated", `${opportunity.name} · ${opportunity.stage}`);
-      await writeState(state);
-      return json(res, 200, opportunity);
-    }
     if (url.pathname === "/api/calls/record" && req.method === "POST") {
       const { leadId, outcome, note, followUpAt } = await getBody(req);
       const state = await readState();
@@ -735,18 +978,16 @@ createServer(async (req, res) => {
       if (!outcomes.includes(outcome)) return json(res, 400, { error: "Choose a valid call outcome." });
       const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString() };
       state.calls.unshift(call);
+      lead.status = stageAfterOutcome(lead.status, outcome);
+      delete lead.taskDone;
+      const followUp = typeof followUpAt === "string" && followUpAt ? followUpAt : "";
       if (outcome === "Do not call") {
         lead.dnc = true;
-        lead.status = "Paused";
         lead.due = "Suppressed";
         state.dncNumbers = [...new Set([...state.dncNumbers, phoneKey(lead.phone)])];
-      } else if (["Callback", "Interested", "Meeting booked", "Maybe later"].includes(outcome)) {
-        lead.status = "Follow-up";
-        lead.due = typeof followUpAt === "string" && followUpAt ? followUpAt : "Follow up";
-      } else if (["Not interested", "Wrong number"].includes(outcome)) {
-        lead.status = "Closed";
-        lead.due = "Closed";
-      } else lead.status = "Try again";
+      } else if (lead.status === "Lost") lead.due = "Lost";
+      else if (followUp) lead.due = followUp;
+      else if (["Callback", "Maybe later", "Interested"].includes(outcome)) lead.due = "Follow up";
       if (call.note) lead.note = call.note;
       activity(state, "Call outcome recorded", `${leadLabel(lead)} · ${outcome}`);
       await writeState(state);
@@ -803,15 +1044,114 @@ createServer(async (req, res) => {
     }
     if (url.pathname === "/api/twilio/connection" && req.method === "PATCH") {
       const { bridgeNumber } = await getBody(req);
-      const normalized = String(bridgeNumber || "").trim();
-      if (!/^\+?[1-9]\d{7,14}$/.test(normalized.replace(/[\s()-]/g, "")))
-        return json(res, 400, { error: "Enter the operator phone number in international format, for example +15551234567." });
+      const raw = String(bridgeNumber || "").trim();
+      // Either a phone in international format or a softphone SIP address such as sip:bayu@example.sip.twilio.com.
+      const isSip = /^sip:[^\s@]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(raw);
+      // "browser" = talk through this app's microphone and speaker.
+      const isBrowser = raw === "browser";
+      const normalized = isSip || isBrowser ? raw : raw.replace(/[\s()-]/g, "");
+      if (!isSip && !isBrowser && !/^\+?[1-9]\d{7,14}$/.test(normalized))
+        return json(res, 400, { error: "Enter your phone number with the country code, like +6281234567890, or your Zoiper address, like bayu@yourname.sip.twilio.com." });
       const state = await readState();
       if (!state.connection) return json(res, 409, { error: "Connect Twilio before setting the calling bridge." });
       state.connection.bridgeNumber = normalized;
-      activity(state, "Calling bridge configured", `Operator bridge ${normalized.slice(0, 4)}••••`);
+      activity(state, "Calling bridge configured", isBrowser ? "Calls are taken in the app (microphone and speaker)" : isSip ? "Calls ring a SIP softphone first" : `Calls ring ${normalized.slice(0, 4)}•••• first`);
       await writeState(state);
       return json(res, 200, { connection: safeState(state).connection });
+    }
+    if (url.pathname.match(/^\/api\/calls\/[^/]+\/why$/) && req.method === "GET") {
+      const state = await readState();
+      const call = state.calls.find((item) => item.id === url.pathname.split("/")[3]);
+      if (!call) return json(res, 404, { error: "Call not found." });
+      if (!state.connection) return json(res, 409, { error: "Connect your Twilio account in Settings first." });
+      const sids = [call.leadLegSid, call.sid].filter(Boolean);
+      if (!sids.length) return json(res, 409, { error: "Twilio hasn't reported this call yet." });
+      const alerts = [];
+      for (const sid of sids) {
+        const result = await twilioGet(state.connection, `https://monitor.twilio.com/v1/Alerts?ResourceSid=${encodeURIComponent(sid)}&PageSize=5`).catch((error) => ({ error: error.message }));
+        if (result.error) return json(res, 502, { error: `Twilio wouldn't share its alerts with these credentials (${result.error}).` });
+        for (const alert of result.alerts || []) {
+          const params = new URLSearchParams(alert.alert_text || "");
+          alerts.push({ code: alert.error_code, message: params.get("Msg") || params.get("msg") || alert.alert_text || "", moreInfo: alert.more_info || "", at: alert.date_created });
+        }
+      }
+      return json(res, 200, { alerts });
+    }
+    if (url.pathname === "/api/settings" && req.method === "PATCH") {
+      const { bookingUrl } = await getBody(req);
+      const value = String(bookingUrl || "").trim();
+      if (value) {
+        let host = "";
+        try {
+          const parsed = new URL(value);
+          host = parsed.protocol === "https:" ? parsed.hostname.toLowerCase() : "";
+        } catch {}
+        if (!/(^|\.)calendly\.com$/.test(host) && !/(^|\.)cal\.com$/.test(host))
+          return json(res, 400, { error: "Paste a Calendly or Cal.com link, for example https://calendly.com/your-name/30min or https://cal.com/your-name/30min." });
+      }
+      await updateState((state) => {
+        state.settings = { ...(state.settings || {}), bookingUrl: value };
+        activity(state, "Booking link updated", value ? "Book a call opens your scheduling page" : "Booking link removed");
+      });
+      return json(res, 200, { bookingUrl: value });
+    }
+    if (url.pathname === "/api/twilio/account-check" && req.method === "GET") {
+      // Read-only look at the calling account, for people who only have its credentials, not Console access.
+      const state = await readState();
+      const connection = state.connection;
+      if (!connection) return json(res, 409, { error: "Connect your Twilio account in Settings first." });
+      const base = `https://api.twilio.com/2010-04-01/Accounts/${connection.accountSid}`;
+      const settle = (promise) => promise.then((value) => ({ value }), (error) => ({ error: error.message }));
+      const [account, verified, us] = await Promise.all([
+        settle(twilioGet(connection, `${base}.json`)),
+        settle(twilioGet(connection, `${base}/OutgoingCallerIds.json?PageSize=50`)),
+        settle(twilioGet(connection, "https://voice.twilio.com/v1/DialingPermissions/Countries/US")),
+      ]);
+      const country = (result) => (result.error ? { error: result.error } : { allowed: Boolean(result.value.low_risk_numbers_enabled) });
+      return json(res, 200, {
+        account: account.error ? { error: account.error } : { type: account.value.type, status: account.value.status, name: account.value.friendly_name },
+        verifiedNumbers: verified.error ? { error: verified.error } : { numbers: (verified.value.outgoing_caller_ids || []).map((item) => maskNumber(item.phone_number)) },
+        countries: { US: country(us) },
+      });
+    }
+    if (url.pathname === "/api/twilio/token" && req.method === "POST") {
+      const state = await readState();
+      const connection = state.connection;
+      if (!connection) return json(res, 409, { error: "Connect your Twilio account in Settings first." });
+      const voiceUrl = new URL("/api/twilio/voice/client", publicOrigin(req)).toString();
+      // First use: create an API key and a TwiML app in the calling account, then keep them.
+      if (!connection.apiKeySid || !connection.apiKeySecret) {
+        const key = await twilioRequest(connection, "/Keys.json", { FriendlyName: "Open Dialer browser calling" });
+        connection.apiKeySid = key.sid;
+        connection.apiKeySecret = seal(key.secret);
+      }
+      if (!connection.twimlAppSid) {
+        const app = await twilioRequest(connection, "/Applications.json", { FriendlyName: "Open Dialer browser calling", VoiceUrl: voiceUrl, VoiceMethod: "POST" });
+        connection.twimlAppSid = app.sid;
+        connection.twimlAppVoiceUrl = voiceUrl;
+      } else if (connection.twimlAppVoiceUrl !== voiceUrl) {
+        // The app's public address changed (for example a new tunnel); point Twilio at it.
+        await twilioRequest(connection, `/Applications/${connection.twimlAppSid}.json`, { VoiceUrl: voiceUrl, VoiceMethod: "POST" });
+        connection.twimlAppVoiceUrl = voiceUrl;
+      }
+      await updateState((fresh) => {
+        if (!fresh.connection) return false;
+        Object.assign(fresh.connection, { apiKeySid: connection.apiKeySid, apiKeySecret: connection.apiKeySecret, twimlAppSid: connection.twimlAppSid, twimlAppVoiceUrl: connection.twimlAppVoiceUrl });
+      });
+      const keySecret = unseal(connection.apiKeySecret);
+      return json(res, 200, { token: voiceAccessToken({ accountSid: connection.accountSid, keySid: connection.apiKeySid, keySecret, appSid: connection.twimlAppSid, identity: operatorIdentity }) });
+    }
+    if (url.pathname === "/api/calls/browser-start" && req.method === "POST") {
+      const { leadId } = await getBody(req);
+      const state = await readState();
+      const lead = state.leads.find((item) => item.id === leadId);
+      if (!lead) return json(res, 404, { error: "Lead not found." });
+      if (lead.dnc) return json(res, 409, { error: "This contact is suppressed and cannot be called." });
+      if (!state.connection?.selectedNumber) return json(res, 409, { error: "Connect Twilio and pick an outbound number in Settings first." });
+      // The call record is created when Twilio actually starts the call (voice/client), so a blocked
+      // microphone or failed connection never leaves a call stuck "In progress".
+      const callId = `call_${Date.now()}_${randomBytes(3).toString("hex")}`;
+      return json(res, 201, { callId, leadId: lead.id, token: voiceToken(lead.id, Date.now() + 10 * 60 * 1000) });
     }
     if (url.pathname === "/api/calls/start" && req.method === "POST") {
       const { leadId } = await getBody(req);
@@ -819,8 +1159,8 @@ createServer(async (req, res) => {
       const lead = state.leads.find((item) => item.id === leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
       if (lead.dnc) return json(res, 409, { error: "This contact is suppressed and cannot be called." });
-      if (!state.connection?.bridgeNumber)
-        return json(res, 409, { error: "Save the operator phone number in Settings before starting a call." });
+      if (!state.connection?.bridgeNumber || state.connection.bridgeNumber === "browser")
+        return json(res, 409, { error: "This workspace takes calls in the app. Reload the page and press Call again." });
       const token = unseal(state.connection);
       const expiresAt = Date.now() + 10 * 60 * 1000;
       const voiceUrl = new URL("/api/twilio/voice/connect", publicOrigin(req));
@@ -833,28 +1173,40 @@ createServer(async (req, res) => {
         Url: voiceUrl.toString(),
         Method: "GET",
       });
+      const statusUrl = new URL("/api/twilio/voice/status", publicOrigin(req));
+      statusUrl.searchParams.set("leadId", lead.id);
+      statusUrl.searchParams.set("token", statusToken(lead.id));
+      body.append("StatusCallback", statusUrl.toString());
+      body.append("StatusCallbackMethod", "POST");
+      for (const event of ["initiated", "ringing", "answered", "completed"]) body.append("StatusCallbackEvent", event);
       const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${state.connection.accountSid}/Calls.json`, {
         method: "POST",
         headers: { authorization: `Basic ${auth}`, "content-type": "application/x-www-form-urlencoded" },
         body,
       });
-      if (!response.ok) return json(res, 502, { error: "Twilio could not start the calling bridge. Check the selected number and operator phone number." });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        return json(res, 502, { error: `Twilio could not start the call${detail.message ? `: ${detail.message}` : ". Check the outbound number and where you answer calls."}` });
+      }
       const remote = await response.json();
-      state.calls.unshift({ id: `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling bridge started.", at: new Date().toISOString(), sid: remote.sid });
-      activity(state, "Call bridge started", `${leadLabel(lead)} · answer your bridge call to connect`);
-      await writeState(state);
+      await updateState((fresh) => {
+        fresh.calls.unshift({ id: `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling bridge started.", at: new Date().toISOString(), sid: remote.sid });
+        activity(fresh, "Call bridge started", `${leadLabel(lead)} · answer your bridge call to connect`);
+      });
       return json(res, 201, { sid: remote.sid });
     }
     const requested =
       url.pathname === "/" ? "index.html" : url.pathname.replace(/^\//, "");
     const file = normalize(join(distDir, requested));
+    // Built files have a hash in their name, so they can be cached for good; the page itself is always re-checked,
+    // so a new build shows up on a normal refresh.
     if (file.startsWith(distDir) && existsSync(file)) {
-      res.writeHead(200, { "content-type": mime(file) });
+      res.writeHead(200, { "content-type": mime(file), "cache-control": file.startsWith(join(distDir, "assets")) ? "public, max-age=31536000, immutable" : "no-cache" });
       return createReadStream(file).pipe(res);
     }
     const index = join(distDir, "index.html");
     if (existsSync(index)) {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
       return createReadStream(index).pipe(res);
     }
     json(res, 404, {

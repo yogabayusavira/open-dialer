@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -7,13 +7,12 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
-  CircleDot,
   ClipboardList,
+  ExternalLink,
   FileUp,
   Filter,
   LoaderCircle,
   LockKeyhole,
-  MoreHorizontal,
   Phone,
   PhoneCall,
   Plus,
@@ -24,7 +23,26 @@ import {
   UserPlus,
   Users,
   X,
+  CalendarPlus,
+  Grid3x3,
+  Mic,
+  MicOff,
+  PhoneOff,
+  PhoneOutgoing,
+  MessageSquare,
+  Clock,
+  ListTodo,
+  RotateCcw,
+  Ban,
+  UserRound,
+  Tag,
+  MoreHorizontal,
+  Trash2,
+  Pause,
+  Play,
+  SkipForward,
 } from "lucide-react";
+import { Call, Device } from "@twilio/voice-sdk";
 import "./styles.css";
 import "./design-system.css";
 
@@ -39,7 +57,11 @@ type Lead = {
   dnc: boolean;
   note: string;
   due: string;
+  extension?: string;
   details?: Record<string, string>;
+  campaigns?: string[];
+  value?: number;
+  taskDone?: { at: string; due: string };
 };
 type Connection = {
   accountSid: string;
@@ -48,16 +70,6 @@ type Connection = {
   connectedAt: string;
   bridgeNumber?: string;
 };
-type Opportunity = {
-  id: string;
-  leadId: string;
-  name: string;
-  company: string;
-  contact: string;
-  value: number;
-  stage: "Qualification" | "Proposal" | "Negotiation" | "Closed Won" | "Closed Lost";
-  createdAt: string;
-};
 type CallRecord = {
   id: string;
   leadId: string;
@@ -65,24 +77,29 @@ type CallRecord = {
   note: string;
   at: string;
 };
+type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
+type TaskFields = { title: string; details: string; due: string; leadId: string | null };
 type State = {
+  tasks?: Task[];
   leads: Lead[];
   activity: { id: string; at: string; action: string; detail: string }[];
   connection: Connection | null;
-  opportunities: Opportunity[];
   calls: CallRecord[];
   dncNumbers: string[];
+  callbackReachable?: boolean;
+  settings?: { bookingUrl?: string };
 };
 type NumberOption = { sid: string; number: string; label: string };
 type Session = { requiresAuth: boolean; authenticated: boolean };
-type Screen = "queue" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "settings";
+type Screen = "queue" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "settings";
 type SettingsArea = "calling" | "workspace" | "account";
 type SettingsPage =
   | "numbers"
   | "team"
   | "fields"
   | "profile"
-  | "privacy";
+  | "privacy"
+  | "booking";
 
 class ApiError extends Error {
   constructor(
@@ -95,11 +112,12 @@ class ApiError extends Error {
 
 const nav = [
   { id: "dashboard", key: "queue", label: "Dashboard", icon: Activity },
+  { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Tag },
   { id: "leads", key: "leads", label: "Leads", icon: Users },
   { id: "calls", key: "calls", label: "Calls", icon: Phone },
   { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock },
-  { id: "sequences", key: "activity", label: "Sequences", icon: ClipboardList },
   { id: "pipeline", key: "pipeline", label: "Pipeline", icon: SlidersHorizontal },
+  { id: "logs", key: "activity", label: "Logs", icon: ClipboardList },
 ] as const;
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -113,10 +131,173 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new ApiError(body.error || "Something went wrong.", response.status);
+    const message = body.error || "Something went wrong.";
+    console.error(`[Open Dialer] ${options?.method || "GET"} ${path} failed (${response.status}): ${message}`);
+    recentErrors.add(message);
+    throw new ApiError(message, response.status);
   }
   return body;
 }
+
+let phoneDevice: Device | null = null;
+let phoneTokenAt = 0;
+let phoneAccount = "";
+// The in-app phone (Twilio's browser softphone). Tokens last an hour; refresh after 50 minutes.
+// A token belongs to one Twilio account, so switching accounts in Settings starts a fresh phone.
+async function getPhone(accountSid: string) {
+  if (phoneDevice && phoneAccount !== accountSid) {
+    phoneDevice.destroy();
+    phoneDevice = null;
+  }
+  if (phoneDevice && Date.now() - phoneTokenAt < 50 * 60_000) return phoneDevice;
+  const { token } = await api<{ token: string }>("/api/twilio/token", { method: "POST" });
+  if (phoneDevice) phoneDevice.updateToken(token);
+  else {
+    phoneDevice = new Device(token, { codecPreferences: [Call.Codec.Opus, Call.Codec.PCMU], closeProtection: "A call is in progress. Leave this page anyway?" });
+    phoneDevice.on("error", (error) => console.error("[Open Dialer] phone error", error));
+  }
+  phoneTokenAt = Date.now();
+  phoneAccount = accountSid;
+  return phoneDevice;
+}
+
+function usesAppPhone(connection: Connection | null | undefined) {
+  return !connection?.bridgeNumber || connection.bridgeNumber === "browser";
+}
+
+type ActiveCall = { lead: Lead; call: Call | null; status: "connecting" | "ringing" | "in-call"; muted: boolean; startedAt: number | null };
+
+function loadScript(src: string) {
+  return new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>(`script[src="${src}"]`);
+    if (existing?.dataset.loaded) return resolve();
+    const script = existing || document.createElement("script");
+    script.addEventListener("load", () => { script.dataset.loaded = "1"; resolve(); });
+    script.addEventListener("error", () => reject(new Error(`Couldn't load ${new URL(src).hostname}. Check your internet connection.`)));
+    if (!existing) { script.src = src; script.async = true; document.head.appendChild(script); }
+  });
+}
+
+// Opens Calendly's or Cal.com's own booking popup, using their official embed scripts and styling.
+async function openBooking(url: string, name: string) {
+  const host = new URL(url).hostname;
+  if (/(^|\.)calendly\.com$/.test(host)) {
+    if (!document.querySelector('link[href="https://assets.calendly.com/assets/external/widget.css"]')) {
+      const css = document.createElement("link");
+      css.rel = "stylesheet";
+      css.href = "https://assets.calendly.com/assets/external/widget.css";
+      document.head.appendChild(css);
+    }
+    await loadScript("https://assets.calendly.com/assets/external/widget.js");
+    (window as unknown as { Calendly: { initPopupWidget: (options: object) => void } }).Calendly.initPopupWidget({ url, prefill: name ? { name } : {} });
+    return;
+  }
+  // Cal.com's official embed loader (their published snippet), then their modal.
+  const w = window as unknown as { Cal?: (...args: unknown[]) => void };
+  if (!w.Cal) {
+    /* eslint-disable */
+    (function (C: any, A: string, L: string) { const p = function (a: any, ar: any) { a.q.push(ar); }; const d = C.document; C.Cal = C.Cal || function () { const cal = C.Cal; const ar = arguments; if (!cal.loaded) { cal.ns = {}; cal.q = cal.q || []; d.head.appendChild(d.createElement("script")).src = A; cal.loaded = true; } if (ar[0] === L) { const api: any = function () { p(api, arguments); }; const namespace = ar[1]; api.q = api.q || []; if (typeof namespace === "string") { cal.ns[namespace] = cal.ns[namespace] || api; p(cal.ns[namespace], ar); p(cal, ["initNamespace", namespace]); } else p(cal, ar); return; } p(cal, ar); }; })(window, "https://app.cal.com/embed/embed.js", "init");
+    /* eslint-enable */
+    w.Cal!("init", { origin: "https://cal.com" });
+  }
+  w.Cal!("modal", { calLink: new URL(url).pathname.replace(/^\/+/, ""), config: name ? { name } : {} });
+}
+
+const keypadKeys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
+// Seconds between calls: enough to glance at the next lead's fact before it rings.
+const autoDialSeconds = 5;
+
+function AutoDialBar({ next, onPause, onSkip, onCallNow, onStop }: { next: { lead: Lead; seconds: number; paused: boolean }; onPause: () => void; onSkip: () => void; onCallNow: () => void; onStop: () => void }) {
+  return (
+    <div className="in-call-bar auto-dial-bar" role="region" aria-label="Next call">
+      <span className="in-call-bar__dot" aria-hidden="true" />
+      <div>
+        <b>Next: {leadLabel(next.lead)}</b>
+        <small>{next.paused ? "Paused" : `Calling in ${next.seconds}`} · {formatPhone(next.lead.phone, next.lead.extension)}</small>
+      </div>
+      <button type="button" className="quiet-button" onClick={onPause} aria-pressed={next.paused}>
+        {next.paused ? <Play size={16} /> : <Pause size={16} />} {next.paused ? "Resume" : "Pause"}
+      </button>
+      <button type="button" className="quiet-button" onClick={onSkip}>
+        <SkipForward size={16} /> Skip
+      </button>
+      <button type="button" className="primary-button" onClick={onCallNow}>
+        <Phone size={16} /> Call now
+      </button>
+      <button type="button" className="icon-button" onClick={onStop} aria-label="Stop auto-dial">
+        <X size={18} />
+      </button>
+    </div>
+  );
+}
+
+function InCallBar({ active, onMute, onHangUp, onBook }: { active: ActiveCall; onMute: () => void; onHangUp: () => void; onBook: () => void }) {
+  const [, setTick] = useState(0);
+  const [keypadOpen, setKeypadOpen] = useState(false);
+  const [typed, setTyped] = useState("");
+  const live = active.status === "in-call" && Boolean(active.call);
+  // Sends a phone-menu tone ("press 1 for sales") into the call.
+  const press = (key: string) => {
+    if (!live) return;
+    active.call!.sendDigits(key);
+    setTyped((current) => (current + key).slice(-24));
+  };
+  // While the keypad is open, the keyboard's number keys, * and # press it too.
+  useEffect(() => {
+    if (!keypadOpen || !live) return;
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      if (event.key === "Escape") return setKeypadOpen(false);
+      if (keypadKeys.includes(event.key)) {
+        event.preventDefault();
+        press(event.key);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const seconds = active.startedAt ? Math.floor((Date.now() - active.startedAt) / 1000) : 0;
+  const status = active.status === "in-call" ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : active.status === "ringing" ? "Ringing…" : "Connecting…";
+  return (
+    <div className="in-call-bar" role="region" aria-label="Call in progress">
+      <span className={`in-call-bar__dot${active.status === "in-call" ? " is-live" : ""}`} aria-hidden="true" />
+      <div>
+        <b>{leadLabel(active.lead)}</b>
+        <small>{formatPhone(active.lead.phone, active.lead.extension)} · {status}</small>
+      </div>
+      <button type="button" className="quiet-button" onClick={onMute} disabled={active.status !== "in-call"} aria-pressed={active.muted}>
+        {active.muted ? <MicOff size={16} /> : <Mic size={16} />} {active.muted ? "Unmute" : "Mute"}
+      </button>
+      <button type="button" className="quiet-button" onClick={() => setKeypadOpen((open) => !open)} disabled={!live} aria-expanded={keypadOpen}>
+        <Grid3x3 size={16} /> Keypad
+      </button>
+      <button type="button" className="quiet-button" onClick={onBook}>
+        <CalendarPlus size={16} /> Book a call
+      </button>
+      <button type="button" className="hang-up-button" onClick={onHangUp}>
+        <PhoneOff size={16} /> Hang up
+      </button>
+      {keypadOpen && live && (
+        <section className="in-call-keypad" aria-label="Keypad">
+          <output aria-live="polite" className={typed ? undefined : "is-empty"}>{typed || "Press a key or type numbers"}</output>
+          <div role="group" aria-label="Keys">
+            {keypadKeys.map((key) => (
+              <button type="button" key={key} onClick={() => press(key)}>{key}</button>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+// Messages that came from a failed request; their toasts stay open until dismissed instead of closing on a timer.
+const recentErrors = new Set<string>();
 
 function Status({
   children,
@@ -140,6 +321,23 @@ function localTime(timezone: string) {
   }
 }
 
+// Splits "540-586-1045 ext. 10257" into a dialable +1 number and an extension; unreadable input comes back unchanged with ok=false.
+function normalizePhone(raw: string) {
+  const match = raw.trim().match(/^(.*?)(?:[\s,;]*(?:ext\.?|extension|x|#)\s*(\d{1,10}))?$/i);
+  const main = match?.[1] || raw;
+  const extension = match?.[2] || "";
+  const digits = main.replace(/\D/g, "");
+  if (/^\D*\+/.test(main) && digits.length >= 8 && digits.length <= 15) return { phone: `+${digits}`, extension, ok: true };
+  if (digits.length === 10) return { phone: `+1${digits}`, extension, ok: true };
+  if (digits.length === 11 && digits[0] === "1") return { phone: `+${digits}`, extension, ok: true };
+  return { phone: raw.trim(), extension: "", ok: false };
+}
+
+function formatPhone(phone: string, extension?: string) {
+  const us = phone.replace(/[^\d+]/g, "").match(/^\+?1?(\d{3})(\d{3})(\d{4})$/);
+  return `${us ? `(${us[1]}) ${us[2]}-${us[3]}` : phone}${extension ? ` ext. ${extension}` : ""}`;
+}
+
 function leadLabel(lead: Lead) {
   return lead.name || (lead.company && lead.company !== "Unassigned" ? lead.company : "") || lead.phone;
 }
@@ -150,17 +348,81 @@ function leadSubtitle(lead: Lead) {
   return role || "Main line · no contact name yet";
 }
 
-const leadStatuses = ["Ready", "Try again", "Follow-up", "Closed"] as const;
+// The pipeline: a lead's status is its stage. Logging a call moves it forward; the board and the stage menu override.
+const leadStages = ["New", "Follow-up", "Meeting booked", "Won", "Lost"] as const;
+
+function campaignsOf(leads: Lead[]) {
+  return [...new Set(leads.flatMap((lead) => lead.campaigns || []))].sort((left, right) => left.localeCompare(right));
+}
+
+function CampaignPicker({ campaigns, value, onChange }: { campaigns: string[]; value: string; onChange: (name: string) => void }) {
+  if (!campaigns.length) return null;
+  return (
+    <label className="campaign-picker">
+      <Tag size={16} aria-hidden="true" />
+      <select value={value} onChange={(event) => onChange(event.target.value)} aria-label="Campaign">
+        <option value="">All campaigns</option>
+        {campaigns.map((name) => <option key={name}>{name}</option>)}
+      </select>
+    </label>
+  );
+}
+
+// The lead's own note, ignoring the placeholder older imports wrote when a row had none.
+function realNote(lead: Lead) {
+  return lead.note === "Imported from CSV." ? "" : lead.note;
+}
 
 function inQueue(lead: Lead) {
-  return !lead.dnc && !["Closed", "Converted"].includes(lead.status);
+  return !lead.dnc && !["Meeting booked", "Won", "Lost"].includes(lead.status);
+}
+
+// Called before: a call logged in the app, or an imported call history marking it "called".
+// shortcut: reads the imported "Called" column by name (the district import); a campaign setting can replace it later.
+function calledBefore(lead: Lead, calledIds: Set<string>) {
+  return calledIds.has(lead.id) || /^called$/i.test(lead.details?.Called?.trim() || "");
+}
+
+// A dial that reached nobody. "In progress" counts too: a call that just ended may not have Twilio's result yet.
+const missedOutcomes = ["Didn't connect", "No answer", "Busy", "Voicemail", "In progress"];
+const reachedOutcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "Not interested", "Wrong number", "Do not call"];
+const restAfterMisses = 3;
+const restDays = 14;
+type CallStat = { lastAt: string; misses: number; lastMissAt: string; reached: boolean };
+
+// Per lead: when it was last called, and how many misses in a row since anyone last picked up.
+function callStats(calls: CallRecord[]) {
+  const stats = new Map<string, CallStat>();
+  for (const call of calls) { // newest first
+    const entry = stats.get(call.leadId) || { lastAt: call.at, misses: 0, lastMissAt: "", reached: false };
+    if (!entry.reached) {
+      if (reachedOutcomes.includes(call.outcome)) entry.reached = true;
+      else if (missedOutcomes.includes(call.outcome)) { entry.misses += 1; entry.lastMissAt ||= call.at; }
+    }
+    stats.set(call.leadId, entry);
+  }
+  return stats;
+}
+
+// Three misses in a row: set the lead aside for two weeks so it isn't dialed every day, then it comes back.
+function resting(entry: CallStat | undefined) {
+  return Boolean(entry && entry.misses >= restAfterMisses && Date.now() - new Date(entry.lastMissAt).getTime() < restDays * 86_400_000);
+}
+
+// The calling order: leads never called first (in the order they were added), then retries, least recently called first.
+function callQueue(leads: Lead[], calls: CallRecord[]) {
+  const calledIds = new Set(calls.map((call) => call.leadId));
+  const stats = callStats(calls);
+  const queue = leads.filter((lead) => inQueue(lead) && !resting(stats.get(lead.id)));
+  const lastAt = (lead: Lead) => stats.get(lead.id)?.lastAt || "";
+  return [...queue.filter((lead) => !calledBefore(lead, calledIds)), ...queue.filter((lead) => calledBefore(lead, calledIds)).sort((left, right) => lastAt(left).localeCompare(lastAt(right)))];
 }
 
 function exportLeads(leads: Lead[], fileName: string) {
   const detailKeys = [...new Set(leads.flatMap((lead) => Object.keys(lead.details || {})))];
   const lines = [
     ["Name", "Company", "Role", "Phone", "Time zone", "Status", "Next step", "Do not call", "Note", ...detailKeys],
-    ...leads.map((lead) => [lead.name, lead.company === "Unassigned" ? "" : lead.company, lead.role === "Contact" ? "" : lead.role, lead.phone, lead.timezone === "Unknown" ? "" : lead.timezone, lead.status, lead.due, lead.dnc ? "yes" : "no", lead.note, ...detailKeys.map((key) => lead.details?.[key] || "")]),
+    ...leads.map((lead) => [lead.name, lead.company === "Unassigned" ? "" : lead.company, lead.role === "Contact" ? "" : lead.role, formatPhone(lead.phone, lead.extension), lead.timezone === "Unknown" ? "" : lead.timezone, lead.status, lead.due, lead.dnc ? "yes" : "no", lead.note, ...detailKeys.map((key) => lead.details?.[key] || "")]),
   ];
   const csv = lines.map((row) => row.map((item) => `"${String(item ?? "").replaceAll('"', '""')}"`).join(",")).join("\n");
   const href = URL.createObjectURL(new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" }));
@@ -196,10 +458,7 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
   return (
     <main className="login-page">
       <form className="login-card" onSubmit={submit}>
-        <div className="brand">
-          <span className="brand-mark">O</span>
-          <span>Open Dialer v2</span>
-        </div>
+        <Brand />
         <h1>Operator sign-in</h1>
         <p>
           Enter the application password configured in Dokploy to access this
@@ -237,18 +496,65 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
   );
 }
 
+// The current screen (and the open lead on the dashboard) lives in the address, e.g. #dashboard/lead_123,
+// so reload, back/forward and bookmarks keep it.
+const screenHashes: Record<Screen, string> = { queue: "dashboard", campaigns: "campaigns", leads: "leads", calls: "calls", followups: "tasks", activity: "activity", pipeline: "pipeline", settings: "settings" };
+// The logo is the owner's artwork; which color version shows is set in CSS by theme.
+function Brand() {
+  return (
+    <div className="brand">
+      <span className="brand-logo" role="img" aria-label="Open Dialer" />
+    </div>
+  );
+}
+
+function hashParts() {
+  const [page = "", lead = ""] = window.location.hash.slice(1).split("/");
+  return { page, lead: lead ? decodeURIComponent(lead) : null };
+}
+function screenFromHash(): Screen {
+  return (Object.keys(screenHashes) as Screen[]).find((key) => screenHashes[key] === hashParts().page) || "leads";
+}
+
 function App() {
-  const [screen, setScreen] = useState<Screen>("leads");
+  const [screen, setScreen] = useState<Screen>(screenFromHash);
+  const [selectedId, setSelectedId] = useState<string | null>(() => hashParts().lead);
+  useEffect(() => {
+    const hash = `#${screenHashes[screen]}${screen === "queue" && selectedId ? `/${encodeURIComponent(selectedId)}` : ""}`;
+    if (window.location.hash === hash) return;
+    // Switching leads replaces the entry so Back goes to the previous screen, not through every lead.
+    if (window.location.hash && hashParts().page !== screenHashes[screen]) window.history.pushState(null, "", hash);
+    else window.history.replaceState(null, "", hash);
+  }, [screen, selectedId]);
+  useEffect(() => {
+    const onBack = () => {
+      setScreen(screenFromHash());
+      const lead = hashParts().lead;
+      if (lead) setSelectedId(lead);
+    };
+    window.addEventListener("popstate", onBack);
+    return () => window.removeEventListener("popstate", onBack);
+  }, []);
   const [state, setState] = useState<State | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // A toast can carry one next step ("Start calling", "Import more leads"); it shows only with its own message.
+  const [noticeAction, setNoticeAction] = useState<{ message: string; label: string; run: () => void } | null>(null);
+  const notifyWith = (message: string, label: string, run: () => void) => {
+    setNotice(message);
+    setNoticeAction({ message, label, run });
+  };
+  // Which list a shortcut opens: the Leads bucket or the Calls tab. The sidebar resets both.
+  const [leadsView, setLeadsView] = useState<"all" | "to-call" | "try-again" | "follow-up" | "closed">("all");
+  const [callsView, setCallsView] = useState<"conversations" | "attempts" | "callbacks">("conversations");
   const [showLeadForm, setShowLeadForm] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
+  // "campaign" when opened from the Campaigns page, where the import must name a campaign.
+  const [importOpen, setImportOpen] = useState<false | "leads" | "campaign">(false);
   const [dncOpen, setDncOpen] = useState(false);
-  const [convertLead, setConvertLead] = useState<Lead | null>(null);
+  const [campaign, setCampaign] = useState(() => { try { return localStorage.getItem("open-dialer-campaign") || ""; } catch { return ""; } });
+  useEffect(() => { try { localStorage.setItem("open-dialer-campaign", campaign); } catch { /* private mode: keep it for this visit only */ } }, [campaign]);
   const [outcomeLead, setOutcomeLead] = useState<Lead | null>(null);
   const [editLead, setEditLead] = useState<Lead | null>(null);
-  const [tourStep, setTourStep] = useState<number | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [lightMode, setLightMode] = useState(() => localStorage.getItem("open-dialer-theme") === "light");
@@ -262,6 +568,7 @@ function App() {
       setState(next);
       setLoadError(null);
       setSelectedId((current) => current || next.leads[0]?.id || null);
+      return next;
     } catch (error) {
       setNotice(
         error instanceof Error
@@ -296,13 +603,27 @@ function App() {
     document.documentElement.dataset.theme = lightMode ? "light" : "dark";
     localStorage.setItem("open-dialer-theme", lightMode ? "light" : "dark");
   }, [lightMode]);
+  // Success toasts close themselves; error toasts stay until dismissed.
+  useEffect(() => {
+    if (!notice || recentErrors.has(notice)) return;
+    const timer = window.setTimeout(() => setNotice(null), Math.min(15_000, 5_000 + notice.length * 60));
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+  // While a call from the last 15 minutes is still "In progress", re-check every 5s so Twilio's result shows up.
+  const liveCall = state?.calls.some((call) => call.outcome === "In progress" && Date.now() - new Date(call.at).getTime() < 15 * 60_000);
+  useEffect(() => {
+    if (!liveCall) return;
+    const timer = window.setInterval(() => void refresh(), 5_000);
+    return () => window.clearInterval(timer);
+  }, [liveCall]);
   const selected = useMemo(
     () =>
       state?.leads.find((lead) => lead.id === selectedId) || state?.leads[0],
     [state, selectedId],
   );
+  // Tasks: every follow-up, plus meetings that have a date set, until they're checked off.
   const followUps =
-    state?.leads.filter((lead) => lead.status === "Follow-up") || [];
+    state?.leads.filter((lead) => !lead.dnc && !lead.taskDone && (lead.status === "Follow-up" || (lead.status === "Meeting booked" && /^\d{4}-\d{2}-\d{2}/.test(lead.due)))) || [];
   const todayLabel = new Intl.DateTimeFormat(undefined, {
     weekday: "long",
     day: "2-digit",
@@ -310,14 +631,91 @@ function App() {
     year: "numeric",
   }).format(new Date());
 
+  const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
+  // Auto-dial: after a missed call or a saved outcome, count down and call the next lead in the queue.
+  const [autoNext, setAutoNext] = useState<{ lead: Lead; seconds: number; paused: boolean; skipped: string[] } | null>(null);
+  const hungUpByMe = useRef(false);
+  const nextInQueue = (fresh: State, exclude: string[]) => {
+    const inCampaign = campaign && fresh.leads.some((lead) => lead.campaigns?.includes(campaign)) ? fresh.leads.filter((lead) => lead.campaigns?.includes(campaign)) : fresh.leads;
+    return callQueue(inCampaign, fresh.calls).find((lead) => !exclude.includes(lead.id)) || null;
+  };
+  // Select the next lead and, when calls go through the app, start the countdown to it.
+  const advanceFrom = (fresh: State | undefined, done: Lead, message: string) => {
+    const next = fresh ? nextInQueue(fresh, [done.id]) : null;
+    if (!next) return notifyWith(`${message} That was the last lead in the queue.`, "Import more leads", () => { setScreen("leads"); setImportOpen("leads"); });
+    setSelectedId(next.id);
+    setNotice(message);
+    if (usesAppPhone(fresh?.connection)) setAutoNext({ lead: next, seconds: autoDialSeconds, paused: false, skipped: [done.id] });
+  };
+  const showError = (message: string) => {
+    recentErrors.add(message);
+    console.error(`[Open Dialer] ${message}`);
+    setNotice(message);
+  };
+  const startAppCall = async (lead: Lead) => {
+    if (activeCall) return;
+    setAutoNext(null);
+    hungUpByMe.current = false;
+    setActiveCall({ lead, call: null, status: "connecting", muted: false, startedAt: null });
+    try {
+      const start = await api<{ callId: string; leadId: string; token: string }>("/api/calls/browser-start", { method: "POST", body: JSON.stringify({ leadId: lead.id }) });
+      const phone = await getPhone(state?.connection?.accountSid || "");
+      const call = await phone.connect({ params: { leadId: start.leadId, callId: start.callId, token: start.token } });
+      setActiveCall((current) => current && { ...current, call });
+      const end = (message?: string, isError = false) => {
+        setActiveCall(null);
+        void refresh();
+        if (message) (isError ? showError : setNotice)(message);
+      };
+      call.on("ringing", () => setActiveCall((current) => current && { ...current, status: "ringing" }));
+      // accept fires only once the lead answers (answerOnBridge), so it marks a real conversation.
+      let connected = false;
+      call.on("accept", () => { connected = true; setActiveCall((current) => current && { ...current, status: "in-call", startedAt: Date.now() }); });
+      call.on("disconnect", () => {
+        if (connected) {
+          end();
+          return setOutcomeLead(lead);
+        }
+        setActiveCall(null);
+        // Hanging up while it rings means "stop", so the dialer waits for you instead of moving on.
+        if (hungUpByMe.current) return void refresh().then(() => setNotice("Stopped. Press Call when you're ready."));
+        void refresh().then((fresh) => {
+          const misses = (fresh && callStats(fresh.calls).get(lead.id)?.misses) || 1;
+          advanceFrom(fresh, lead, `No answer from ${leadLabel(lead)} (${misses} ${misses === 1 ? "miss" : "misses"} in a row${misses >= restAfterMisses ? `, resting it for ${restDays} days` : ""}).`);
+        });
+      });
+      call.on("cancel", () => end());
+      call.on("error", (error: { message?: string; code?: number }) =>
+        end(error.code === 31005 ? `The call to ${leadLabel(lead)} was ended by Twilio. The reason is on the call card ("Last attempt").` : `Call failed: ${error.message || "unknown error"}${error.code ? ` (Twilio ${error.code})` : ""}`, true));
+      void refresh();
+    } catch (error) {
+      setActiveCall(null);
+      const message = error instanceof Error ? error.message : String(error);
+      showError(/permission|denied|notallowed|31401|31402/i.test(message)
+        ? "Microphone access is blocked. Allow the microphone for this site (the icon in the address bar) and press Call again."
+        : message || "Could not start the call.");
+    }
+  };
+  useEffect(() => {
+    if (!autoNext || autoNext.paused || activeCall) return;
+    if (autoNext.seconds <= 0) {
+      const lead = state?.leads.find((item) => item.id === autoNext.lead.id) || autoNext.lead;
+      setAutoNext(null);
+      void startAppCall(lead);
+      return;
+    }
+    const timer = window.setTimeout(() => setAutoNext((current) => current && { ...current, seconds: current.seconds - 1 }), 1000);
+    return () => window.clearTimeout(timer);
+  }, [autoNext, activeCall]);
   const prepareCall = async (lead: Lead) => {
+    if (usesAppPhone(state?.connection)) return startAppCall(lead);
     try {
       await api("/api/calls/start", {
         method: "POST",
         body: JSON.stringify({ leadId: lead.id }),
       });
       await refresh();
-      setNotice(`Calling your bridge number now. Answer it to connect with ${leadLabel(lead)}.`);
+      setNotice(`Ringing ${state?.connection?.bridgeNumber?.startsWith("sip:") ? "Zoiper" : "your phone"} now. Answer it to connect with ${leadLabel(lead)}.`);
     } catch (error) {
       setNotice(
         error instanceof Error ? error.message : "Could not prepare the call.",
@@ -343,11 +741,53 @@ function App() {
     }
   };
   const setStatus = async (lead: Lead, status: string) => {
+    // Move the card right away; the refresh below confirms or corrects it.
+    setState((current) => current && { ...current, leads: current.leads.map((item) => (item.id === lead.id ? { ...item, status } : item)) });
     try {
       await api(`/api/leads/${lead.id}`, { method: "PATCH", body: JSON.stringify({ status }) });
       await refresh();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not change the status.");
+    }
+  };
+  const setTaskDone = async (lead: Lead, done: boolean) => {
+    // Move the task across right away; the refresh confirms it.
+    setState((current) => current && { ...current, leads: current.leads.map((item) => (item.id === lead.id ? { ...item, taskDone: done ? { at: new Date().toISOString(), due: item.due } : undefined } : item)) });
+    try {
+      await api(`/api/leads/${lead.id}/task`, { method: "POST", body: JSON.stringify({ done }) });
+      await refresh();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update the task.");
+      await refresh();
+    }
+  };
+  // The task dialog: "new" to add one, or the task being viewed and edited.
+  const [taskDialog, setTaskDialog] = useState<{ task?: Task; leadId?: string } | null>(null);
+  const saveTask = async (fields: TaskFields, task?: Task) => {
+    await api(task ? `/api/tasks/${task.id}` : "/api/tasks", { method: task ? "PATCH" : "POST", body: JSON.stringify(fields) });
+    setTaskDialog(null);
+    await refresh();
+    setNotice(task ? "Task updated." : "Task added.");
+  };
+  const changeTask = async (task: Task, change: { done: boolean } | "delete") => {
+    // Update the list right away; the refresh confirms it.
+    setState((current) => current && { ...current, tasks: change === "delete" ? (current.tasks || []).filter((item) => item.id !== task.id) : (current.tasks || []).map((item) => (item.id === task.id ? { ...item, doneAt: change.done ? new Date().toISOString() : null } : item)) });
+    try {
+      await api(`/api/tasks/${task.id}`, change === "delete" ? { method: "DELETE" } : { method: "PATCH", body: JSON.stringify(change) });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update the task.");
+    }
+    await refresh();
+  };
+  const tagLeads = async (ids: string[], name: string) => {
+    try {
+      const result = await api<{ added: number; already: number }>("/api/leads/campaign", { method: "POST", body: JSON.stringify({ ids, campaign: name }) });
+      await refresh();
+      setNotice(`Added ${result.added} lead${result.added === 1 ? "" : "s"} to ${name.trim()}.${result.already ? ` ${result.already} ${result.already === 1 ? "was" : "were"} already in it.` : ""}`);
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not add those leads to the campaign.");
+      return false;
     }
   };
   const deleteLeads = async (ids: string[]) => {
@@ -360,15 +800,6 @@ function App() {
       setNotice(error instanceof Error ? error.message : "Could not delete those leads.");
     }
   };
-  const updateOpportunity = async (id: string, body: Partial<Pick<Opportunity, "stage" | "value">>) => {
-    try {
-      await api(`/api/opportunities/${id}`, { method: "PATCH", body: JSON.stringify(body) });
-      await refresh();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not update the opportunity.");
-    }
-  };
-
   if (needsLogin)
     return (
       <Login
@@ -389,36 +820,60 @@ function App() {
       </main>
     );
   if (!state)
+    // A grey outline of the real layout, so the page fills in rather than jumping from a blank screen.
     return (
-      <main className="loading">
-        <LoaderCircle className="spin" size={28} /> Loading Open Dialer v2…
+      <main className="app-shell is-loading" aria-busy="true">
+        <aside className="sidebar">
+          <Brand />
+          <div className="skeleton-nav">{Array.from({ length: 7 }, (_, index) => <i className="skeleton" key={index} />)}</div>
+        </aside>
+        <section className="workbench">
+          <span className="sr-only">Loading</span>
+          <div className="skeleton-page" aria-hidden="true">
+            <i className="skeleton skeleton--title" />
+            <div className="skeleton-card skeleton-card--banner"><i className="skeleton" /><i className="skeleton" /><i className="skeleton" /></div>
+            <div className="skeleton-row">{Array.from({ length: 4 }, (_, index) => <div className="skeleton-card" key={index}><i className="skeleton" /><i className="skeleton" /></div>)}</div>
+            <div className="skeleton-card skeleton-card--table">{Array.from({ length: 5 }, (_, index) => <i className="skeleton" key={index} />)}</div>
+          </div>
+        </section>
       </main>
     );
+  const campaigns = campaignsOf(state.leads);
+  const activeCampaign = campaigns.includes(campaign) ? campaign : "";
+  // The campaign picker narrows the dashboard, leads list and board together.
+  const scoped = activeCampaign
+    ? (() => {
+        const leads = state.leads.filter((lead) => lead.campaigns?.includes(activeCampaign));
+        const ids = new Set(leads.map((lead) => lead.id));
+        return { ...state, leads, calls: state.calls.filter((call) => ids.has(call.leadId)) };
+      })()
+    : state;
+  const scopedSelected = scoped.leads.find((lead) => lead.id === selected?.id) || scoped.leads[0];
+  const picker = <CampaignPicker campaigns={campaigns} value={activeCampaign} onChange={setCampaign} />;
+  const startCampaign = (name: string) => {
+    setCampaign(name);
+    const first = callQueue(state.leads.filter((lead) => lead.campaigns?.includes(name)), state.calls)[0];
+    if (first) setSelectedId(first.id);
+    setScreen("queue");
+  };
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark">O</span>
-          <span>Open Dialer v2</span>
-        </div>
+        <Brand />
         <div className="workspace-label">Workspace</div>
         <nav aria-label="Workspace navigation">
           {nav.map(({ id, key, label, icon: Icon }) => (
             <button
               key={id}
-              className={
-                (screen === key && (key !== "queue" || id === "dashboard")) ||
-                (screen === "activity" && id === "sequences")
-                  ? "nav-item nav-item--active"
-                  : "nav-item"
-              }
-              onClick={() => setScreen(key)}
+              className={screen === key ? "nav-item nav-item--active" : "nav-item"}
+              onClick={() => { setLeadsView("all"); setCallsView("conversations"); setScreen(key); }}
             >
               <Icon size={18} />
               <span>{label}</span>
-              {id === "tasks" && <b>{followUps.length}</b>}
+              {id === "tasks" && followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length > 0 && <b>{followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length}</b>}
             </button>
           ))}
+          {/* Placeholder for tools that come later; for now it opens the logs. */}
           <button className="nav-item" type="button" onClick={() => setScreen("activity")}>
             <MoreHorizontal size={18} />
             <span>More</span>
@@ -444,15 +899,11 @@ function App() {
         </div>
       </aside>
       <section className="workbench">
-        {screen !== "calls" && <header className="topbar">
+        {screen !== "queue" && <header className="topbar">
           <div>
             <p className="date-line">Workspace</p>
             <h1>
-              {screen === "queue"
-                ? "Today’s route"
-                : screen === "settings"
-                  ? "Settings"
-                  : nav.find((item) => item.key === screen)?.label}
+              {screen === "settings" ? "Settings" : nav.find((item) => item.key === screen)?.label}
             </h1>
             {screen === "leads" && (
               <p className="page-subtitle">
@@ -461,46 +912,109 @@ function App() {
             )}
           </div>
           <div className="top-actions">
+            {(screen === "leads" || screen === "pipeline") && picker}
             <button
               className="quick-tour-button"
-              onClick={() => setTourStep(0)}
+              onClick={() => setGuideOpen(true)}
             >
-              <BadgeCheck size={17} /> Quick tour
+              <BadgeCheck size={17} /> Setup guide
             </button>
             <button
               className="primary-button"
-              onClick={() => setShowLeadForm(true)}
+              onClick={() => (screen === "followups" ? setTaskDialog({}) : setShowLeadForm(true))}
             >
-              <Plus size={18} /> Add lead
+              <Plus size={18} /> {screen === "followups" ? "Add task" : "Add lead"}
             </button>
           </div>
         </header>}
+        {activeCall && (
+          <InCallBar
+            active={activeCall}
+            onMute={() => {
+              if (!activeCall.call) return;
+              activeCall.call.mute(!activeCall.muted);
+              setActiveCall({ ...activeCall, muted: !activeCall.muted });
+            }}
+            onHangUp={() => {
+              hungUpByMe.current = activeCall.status !== "in-call";
+              if (activeCall.call) activeCall.call.disconnect();
+              else setActiveCall(null);
+            }}
+            onBook={() => {
+              const url = state.settings?.bookingUrl;
+              if (!url) return showError("Add your Calendly or Cal.com link first: Settings → Workspace → Booking link.");
+              openBooking(url, activeCall.lead.name).catch((error) => showError(error instanceof Error ? error.message : "Couldn't open the booking page."));
+            }}
+          />
+        )}
+        {!activeCall && autoNext && (
+          <AutoDialBar
+            next={autoNext}
+            onPause={() => setAutoNext({ ...autoNext, paused: !autoNext.paused })}
+            onSkip={() => {
+              const skipped = [...autoNext.skipped, autoNext.lead.id];
+              const next = nextInQueue(state, skipped);
+              if (!next) { setAutoNext(null); return notifyWith("No more leads in the queue.", "Import more leads", () => { setScreen("leads"); setImportOpen("leads"); }); }
+              setSelectedId(next.id);
+              setAutoNext({ lead: next, seconds: autoDialSeconds, paused: autoNext.paused, skipped });
+            }}
+            onCallNow={() => setAutoNext({ ...autoNext, seconds: 0, paused: false })}
+            onStop={() => setAutoNext(null)}
+          />
+        )}
         {notice && (
-          <div className="notice" role="status">
+          <div className={`notice toast${recentErrors.has(notice) ? " is-error" : ""}`} role={recentErrors.has(notice) ? "alert" : "status"} aria-live="polite" key={notice}>
             <CircleAlert size={18} />
             <span>{notice}</span>
+            {noticeAction?.message === notice && (
+              <button type="button" className="toast-action" onClick={() => { noticeAction.run(); setNotice(null); }}>{noticeAction.label}</button>
+            )}
             <button aria-label="Dismiss notice" onClick={() => setNotice(null)}>
               <X size={18} />
             </button>
           </div>
         )}
-        {screen === "queue" && selected && (
+        {screen === "queue" && scopedSelected && (
           <Queue
-            state={state}
-            selected={selected}
+            state={scoped}
+            selected={scopedSelected}
+            picker={picker}
             onSelect={setSelectedId}
             onPrepare={prepareCall}
+            calling={Boolean(activeCall)}
             onRecord={(lead) => setOutcomeLead(lead)}
             onDnc={setDnc}
             onEdit={setEditLead}
             onStatus={setStatus}
             onSettings={() => setScreen("settings")}
+            onAddLead={() => setShowLeadForm(true)}
+            onGuide={() => setGuideOpen(true)}
+            onAddTask={(lead) => setTaskDialog({ leadId: lead.id })}
+            onGo={(target) => {
+              if (target === "followups") return setScreen("followups");
+              if (target === "to-call") { setLeadsView("to-call"); return setScreen("leads"); }
+              setCallsView(target === "conversations" ? "conversations" : "attempts");
+              setScreen("calls");
+            }}
           />
+        )}
+        {screen === "queue" && !scopedSelected && (
+          <section className="dash-empty" aria-label="No leads yet">
+            <h1>No leads yet</h1>
+            <p>Import a CSV of the people you want to call, or add one lead by hand. They show up here, ready to dial.</p>
+            <div>
+              <button type="button" className="primary-button" onClick={() => setImportOpen("leads")}><FileUp size={16} aria-hidden="true" /> Import a CSV</button>
+              <button type="button" className="quiet-button" onClick={() => setShowLeadForm(true)}><Plus size={16} aria-hidden="true" /> Add a lead</button>
+            </div>
+          </section>
         )}
         {screen === "calls" && (
           <CallHistory
+            key={callsView}
             calls={state.calls}
             leads={state.leads}
+            initialView={callsView}
+            onOpenLead={(id) => { setSelectedId(id); setScreen("queue"); }}
             onStartDialing={() => setScreen("leads")}
             onOpenDialer={() => {
               setSelectedId(state.leads.find((lead) => !lead.dnc)?.id || null);
@@ -512,44 +1026,92 @@ function App() {
         )}
         {screen === "leads" && (
           <LeadList
-            leads={state.leads}
+            key={leadsView}
+            leads={scoped.leads}
             calls={state.calls}
-            selectedId={selected?.id || null}
             onEdit={setEditLead}
             onDelete={deleteLeads}
+            onTag={tagLeads}
+            campaigns={campaigns}
+            initialSegment={leadsView}
+            onCampaign={setCampaign}
+            onStatus={setStatus}
             onOpen={(id) => {
               setSelectedId(id);
               setScreen("queue");
             }}
-            onConvert={(lead) => setConvertLead(lead)}
-            onImport={() => setImportOpen(true)}
+            onImport={() => setImportOpen("leads")}
             onDncList={() => setDncOpen(true)}
           />
         )}
         {screen === "followups" && (
           <FollowUps
             leads={followUps}
+            allLeads={state.leads}
+            tasks={state.tasks || []}
+            onOpenTask={(task) => setTaskDialog({ task })}
+            onChangeTask={changeTask}
+            done={state.leads.filter((lead) => lead.taskDone).sort((left, right) => right.taskDone!.at.localeCompare(left.taskDone!.at)).slice(0, 12)}
+            onToggle={setTaskDone}
             onSelect={(id) => {
               setSelectedId(id);
               setScreen("queue");
             }}
           />
         )}
-        {screen === "activity" && <ActivityLog activity={state.activity} />}
+        {screen === "activity" && <ActivityLog activity={state.activity} leads={state.leads} onOpenLead={(id) => { setSelectedId(id); setScreen("queue"); }} />}
         {screen === "pipeline" && (
-          <Pipeline opportunities={state.opportunities} onUpdate={updateOpportunity} />
+          <Pipeline
+            leads={scoped.leads}
+            calls={state.calls}
+            onMove={setStatus}
+            onEdit={setEditLead}
+            onAddTask={(lead) => setTaskDialog({ leadId: lead.id })}
+            onCall={(id) => {
+              setSelectedId(id);
+              setScreen("queue");
+            }}
+          />
+        )}
+        {screen === "campaigns" && (
+          <Campaigns
+            leads={state.leads}
+            onStart={startCampaign}
+            onView={(name) => { setCampaign(name); setScreen("leads"); }}
+            onStage={(name) => { setCampaign(name); setScreen("pipeline"); }}
+            onImport={() => setImportOpen("campaign")}
+          />
         )}
         {screen === "settings" && (
           <Settings
             connection={state.connection}
+            bookingUrl={state.settings?.bookingUrl || ""}
             onRefresh={refresh}
             onNotice={setNotice}
           />
         )}
       </section>
+      {taskDialog && (
+        <TaskDialog
+          task={taskDialog.task}
+          leadId={taskDialog.leadId}
+          leads={state.leads}
+          onSave={saveTask}
+          onDelete={(task) => { setTaskDialog(null); void changeTask(task, "delete"); }}
+          onOpenLead={(id) => { setTaskDialog(null); setSelectedId(id); setScreen("queue"); }}
+          onClose={() => setTaskDialog(null)}
+        />
+      )}
       {showLeadForm && (
         <LeadForm
+          campaigns={campaigns}
+          defaultCampaign={activeCampaign}
           onClose={() => setShowLeadForm(false)}
+          onImport={() => {
+            setShowLeadForm(false);
+            setScreen("leads");
+            setImportOpen("leads");
+          }}
           onSaved={async () => {
             setShowLeadForm(false);
             await refresh();
@@ -557,32 +1119,20 @@ function App() {
           }}
         />
       )}
-      {importOpen && <ImportLeads onClose={() => setImportOpen(false)} onSaved={async (message) => { setImportOpen(false); await refresh(); setNotice(message); }} />}
+      {importOpen && <ImportLeads campaigns={campaigns} defaultCampaign={activeCampaign} requireCampaign={importOpen === "campaign"} onClose={() => setImportOpen(false)} onSaved={async (message, name) => { setImportOpen(false); await refresh(); notifyWith(message, "Start calling", () => { setCampaign(name); setScreen("queue"); }); }} />}
       {dncOpen && <DncList onClose={() => setDncOpen(false)} onSaved={async (message) => { setDncOpen(false); await refresh(); setNotice(message); }} />}
-      {convertLead && <ConvertLead lead={convertLead} onClose={() => setConvertLead(null)} onSaved={async () => { setConvertLead(null); await refresh(); setScreen("pipeline"); setNotice(`${leadLabel(convertLead)} is now an opportunity.`); }} />}
-      {outcomeLead && <CallOutcome lead={outcomeLead} onClose={() => setOutcomeLead(null)} onSaved={async (outcome) => {
-        const queue = state.leads.filter(inQueue);
-        const position = queue.findIndex((lead) => lead.id === outcomeLead.id);
-        const next = queue.slice(position + 1).find((lead) => lead.id !== outcomeLead.id) || queue.find((lead) => lead.id !== outcomeLead.id);
+      {outcomeLead && <CallOutcome lead={outcomeLead} bookingUrl={state.settings?.bookingUrl || ""} onBook={() => openBooking(state.settings!.bookingUrl!, outcomeLead.name).catch((error) => showError(error instanceof Error ? error.message : "Couldn't open the booking page."))} onClose={() => setOutcomeLead(null)} onSaved={async (outcome) => {
         setOutcomeLead(null);
-        await refresh();
-        if (next) setSelectedId(next.id);
-        setNotice(`${outcome} saved for ${leadLabel(outcomeLead)}.${next ? ` Next up: ${leadLabel(next)}.` : ""}`);
+        advanceFrom(await refresh(), outcomeLead, `${outcome} saved for ${leadLabel(outcomeLead)}.`);
       }} />}
-      {editLead && <LeadForm lead={editLead} onClose={() => setEditLead(null)} onSaved={async () => { setEditLead(null); await refresh(); setNotice("Lead updated."); }} onDeleted={async () => { const name = leadLabel(editLead); setEditLead(null); if (selectedId === editLead.id) setSelectedId(null); await refresh(); setNotice(`${name} deleted.`); }} />}
-      {tourStep !== null && (
-        <QuickTour
-          step={tourStep}
-          onClose={() => setTourStep(null)}
-          onBack={() => setTourStep((current) => Math.max(0, (current || 0) - 1))}
-          onNext={() => {
-            if (tourStep === 0) setScreen("leads");
-            if (tourStep === 2) {
-              setScreen("queue");
-              setTourStep(null);
-              return;
-            }
-            setTourStep((current) => Math.min(2, (current || 0) + 1));
+      {editLead && <LeadForm lead={editLead} campaigns={campaigns} onClose={() => setEditLead(null)} onSaved={async () => { setEditLead(null); await refresh(); setNotice("Lead updated."); }} onDeleted={async () => { const name = leadLabel(editLead); setEditLead(null); if (selectedId === editLead.id) setSelectedId(null); await refresh(); setNotice(`${name} deleted.`); }} />}
+      {guideOpen && (
+        <SetupGuide
+          state={state}
+          onClose={() => setGuideOpen(false)}
+          onGo={(target) => {
+            setGuideOpen(false);
+            setScreen(target);
           }}
         />
       )}
@@ -597,6 +1147,8 @@ function CallHistory({
   onOpenDialer,
   onOpenPhoneNumbers,
   onUpgrade,
+  initialView,
+  onOpenLead,
 }: {
   calls: CallRecord[];
   leads: Lead[];
@@ -604,8 +1156,10 @@ function CallHistory({
   onOpenDialer: () => void;
   onOpenPhoneNumbers: () => void;
   onUpgrade: () => void;
+  initialView: "conversations" | "attempts" | "callbacks";
+  onOpenLead: (id: string) => void;
 }) {
-  const [view, setView] = useState<"conversations" | "attempts" | "callbacks">("conversations");
+  const [view, setView] = useState(initialView);
   const [query, setQuery] = useState("");
   const [range, setRange] = useState("Last 30 days");
   const [outcome, setOutcome] = useState("All outcomes");
@@ -618,7 +1172,7 @@ function CallHistory({
     .filter((call) => outcome === "All outcomes" || call.outcome === outcome)
     .filter((call) => [call.lead?.name, call.lead?.company, call.lead?.phone, call.outcome, call.note].join(" ").toLowerCase().includes(query.toLowerCase()));
   const exportCalls = () => {
-    const lines = [["Date", "Lead", "Company", "Phone", "Outcome", "Note"], ...entries.map((call) => [new Date(call.at).toLocaleString(), call.lead ? leadLabel(call.lead) : "", call.lead?.company || "", call.lead?.phone || "", call.outcome, call.note])];
+    const lines = [["Date", "Lead", "Company", "Phone", "Outcome", "Note"], ...entries.map((call) => [new Date(call.at).toLocaleString(), call.lead ? leadLabel(call.lead) : "", call.lead?.company || "", call.lead ? formatPhone(call.lead.phone, call.lead.extension) : "", call.outcome, call.note])];
     const csv = lines.map((row) => row.map((item) => `"${String(item).replaceAll('"', '""')}"`).join(",")).join("\n");
     const href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");
@@ -630,15 +1184,9 @@ function CallHistory({
   const subtitle = view === "conversations" ? `${entries.length} recorded conversations` : view === "attempts" ? `${entries.length} recorded call attempts` : `${entries.length} callbacks`;
 
   return (
-    <section className="calls-page" aria-labelledby="calls-heading">
+    <section className="calls-page" aria-label="Calls">
       <header className="calls-page__header">
-        <div className="calls-page__title">
-          <span className="calls-page__icon"><PhoneCall size={21} /></span>
-          <div>
-            <h1 id="calls-heading">Calls</h1>
-            <p>{subtitle}</p>
-          </div>
-        </div>
+        <p className="calls-page__summary">{subtitle}</p>
         <div className="calls-page__actions">
           <button className="calls-outline-button" onClick={onOpenDialer}>
             <Phone size={15} /> Phone dialer
@@ -686,7 +1234,7 @@ function CallHistory({
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search anything..."
+              placeholder="Search"
               aria-label="Search calls"
             />
           </label>
@@ -705,12 +1253,225 @@ function CallHistory({
               <option>Callback</option>
               <option>No answer</option>
               <option>Do not call</option>
+              <option>Didn't connect</option>
+              <option>Call ended</option>
             </select>
           </label>
         </div>
       )}
 
-      {!entries.length ? <div className="calls-empty"><p>{isCallbacks ? "No callbacks are recorded yet." : "No calls match this view."}</p><span><button type="button" onClick={onStartDialing}>Open leads →</button> or <button type="button" onClick={onOpenPhoneNumbers}>review phone settings →</button></span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><b>{call.lead && leadLabel(call.lead)}</b><small>{call.lead?.company} · {call.lead?.phone}</small></div><Status tone={call.outcome === "Do not call" ? "alert" : "good"}>{call.outcome}</Status><div><small>{new Date(call.at).toLocaleString()}</small>{call.note && <p>{call.note}</p>}</div></article>)}</div>}
+      {!entries.length ? <div className="calls-empty"><p>{isCallbacks ? "No callbacks are recorded yet." : "No calls match this view."}</p><span><button type="button" onClick={onStartDialing}>Open leads →</button> or <button type="button" onClick={onOpenPhoneNumbers}>review phone settings →</button></span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><button type="button" className="text-link" onClick={() => call.lead && onOpenLead(call.lead.id)}><b>{call.lead && leadLabel(call.lead)}</b></button><small>{call.lead?.company} · {call.lead && formatPhone(call.lead.phone, call.lead.extension)}</small></div><Status tone={call.outcome === "Do not call" || call.outcome === "Didn't connect" ? "alert" : call.outcome === "In progress" || call.outcome === "Call ended" ? "quiet" : "good"}>{call.outcome}</Status><div><small>{dueLabel(call.at).text}</small>{call.note && <p>{call.note}</p>}</div></article>)}</div>}
+    </section>
+  );
+}
+
+// Sorts imported columns into call-card sections by label and content, so any CSV gets a sensible layout.
+function groupDetails(details: Lead["details"]) {
+  const groups = { quick: [] as [string, string][], say: [] as [string, string][], research: [] as [string, string][], sources: [] as [string, string][] };
+  for (const entry of Object.entries(details || {})) {
+    const [label, value] = entry;
+    // Talking points: what gets said on the call, e.g. "Current fact to use" is the opening line's hook.
+    if (/opener|script|pitch|talk|question|objection|fact/i.test(label)) groups.say.push(entry);
+    else if (/^https?:\/\//i.test(value) || /source|url|website|link|recorded|observed|evidence|touch|\bids?\b/i.test(label)) groups.sources.push(entry);
+    else if (value.length <= 32) groups.quick.push(entry);
+    else groups.research.push(entry);
+  }
+  return groups;
+}
+
+function DetailValue({ value }: { value: string }) {
+  if (/^https?:\/\/\S+$/i.test(value)) {
+    let label = value;
+    try {
+      const url = new URL(value);
+      label = url.hostname.replace(/^www\./, "") + (url.pathname.length > 1 ? url.pathname : "");
+    } catch {}
+    return <a href={value} target="_blank" rel="noreferrer">{label} <ExternalLink size={12} aria-hidden="true" /></a>;
+  }
+  const items = value.split(/;\s*/).filter(Boolean);
+  if (items.length > 3) return <details className="detail-list"><summary>{items.slice(0, 2).join("; ")} +{items.length - 2} more</summary>{items.slice(2).join("; ")}</details>;
+  return <>{value}</>;
+}
+
+// One primary time zone per US state; good enough for a calling-hours check when a lead has no time zone.
+const stateZones: [string, string, string][] = [
+  ["AL", "Alabama", "America/Chicago"], ["AK", "Alaska", "America/Anchorage"], ["AZ", "Arizona", "America/Phoenix"], ["AR", "Arkansas", "America/Chicago"],
+  ["CA", "California", "America/Los_Angeles"], ["CO", "Colorado", "America/Denver"], ["CT", "Connecticut", "America/New_York"], ["DE", "Delaware", "America/New_York"],
+  ["DC", "District of Columbia", "America/New_York"], ["FL", "Florida", "America/New_York"], ["GA", "Georgia", "America/New_York"], ["HI", "Hawaii", "Pacific/Honolulu"],
+  ["ID", "Idaho", "America/Boise"], ["IL", "Illinois", "America/Chicago"], ["IN", "Indiana", "America/Indiana/Indianapolis"], ["IA", "Iowa", "America/Chicago"],
+  ["KS", "Kansas", "America/Chicago"], ["KY", "Kentucky", "America/New_York"], ["LA", "Louisiana", "America/Chicago"], ["ME", "Maine", "America/New_York"],
+  ["MD", "Maryland", "America/New_York"], ["MA", "Massachusetts", "America/New_York"], ["MI", "Michigan", "America/Detroit"], ["MN", "Minnesota", "America/Chicago"],
+  ["MS", "Mississippi", "America/Chicago"], ["MO", "Missouri", "America/Chicago"], ["MT", "Montana", "America/Denver"], ["NE", "Nebraska", "America/Chicago"],
+  ["NV", "Nevada", "America/Los_Angeles"], ["NH", "New Hampshire", "America/New_York"], ["NJ", "New Jersey", "America/New_York"], ["NM", "New Mexico", "America/Denver"],
+  ["NY", "New York", "America/New_York"], ["NC", "North Carolina", "America/New_York"], ["ND", "North Dakota", "America/Chicago"], ["OH", "Ohio", "America/New_York"],
+  ["OK", "Oklahoma", "America/Chicago"], ["OR", "Oregon", "America/Los_Angeles"], ["PA", "Pennsylvania", "America/New_York"], ["RI", "Rhode Island", "America/New_York"],
+  ["SC", "South Carolina", "America/New_York"], ["SD", "South Dakota", "America/Chicago"], ["TN", "Tennessee", "America/Chicago"], ["TX", "Texas", "America/Chicago"],
+  ["UT", "Utah", "America/Denver"], ["VT", "Vermont", "America/New_York"], ["VA", "Virginia", "America/New_York"], ["WA", "Washington", "America/Los_Angeles"],
+  ["WV", "West Virginia", "America/New_York"], ["WI", "Wisconsin", "America/Chicago"], ["WY", "Wyoming", "America/Denver"],
+];
+
+// A real time zone name like "America/New_York", as opposed to a state typed into the time zone field.
+function isTimeZone(value: string | undefined) {
+  if (!value || value === "Unknown") return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// A lead's US state, as a code or a name: from its "State" detail (what the import's State / province column saves),
+// or from the time zone field when a state was put there (older imports mapped the state column to Time zone).
+function leadState(lead: Lead) {
+  const detail = Object.entries(lead.details || {}).find(([key]) => /^(state|st|state\/province|province)$/i.test(key.trim()))?.[1];
+  const find = (value: string | undefined) => {
+    const text = value?.trim().toLowerCase();
+    return (text && stateZones.find(([code, name]) => code.toLowerCase() === text || name.toLowerCase() === text)) || null;
+  };
+  return find(detail) || find(lead.timezone);
+}
+
+function leadStateCode(lead: Lead) {
+  return leadState(lead)?.[0] || null;
+}
+
+// Tile grid of the US: one square per state, [code, column, row].
+const stateTiles: [string, number, number][] = [
+  ["AK", 0, 0], ["ME", 10, 0],
+  ["WI", 5, 1], ["VT", 9, 1], ["NH", 10, 1],
+  ["WA", 0, 2], ["ID", 1, 2], ["MT", 2, 2], ["ND", 3, 2], ["MN", 4, 2], ["IL", 5, 2], ["MI", 6, 2], ["NY", 8, 2], ["MA", 9, 2],
+  ["OR", 0, 3], ["NV", 1, 3], ["WY", 2, 3], ["SD", 3, 3], ["IA", 4, 3], ["IN", 5, 3], ["OH", 6, 3], ["PA", 7, 3], ["NJ", 8, 3], ["CT", 9, 3], ["RI", 10, 3],
+  ["CA", 0, 4], ["UT", 1, 4], ["CO", 2, 4], ["NE", 3, 4], ["MO", 4, 4], ["KY", 5, 4], ["WV", 6, 4], ["VA", 7, 4], ["MD", 8, 4], ["DE", 9, 4],
+  ["AZ", 1, 5], ["NM", 2, 5], ["KS", 3, 5], ["AR", 4, 5], ["TN", 5, 5], ["NC", 6, 5], ["SC", 7, 5], ["DC", 8, 5],
+  ["OK", 3, 6], ["LA", 4, 6], ["MS", 5, 6], ["AL", 6, 6], ["GA", 7, 6],
+  ["HI", 0, 7], ["TX", 3, 7], ["FL", 8, 7],
+];
+
+function StateTileMap({ leads, current, zone }: { leads: Lead[]; current: string | null; zone: string | null }) {
+  const counts = new Map<string, number>();
+  for (const lead of leads) { const code = leadStateCode(lead); if (code) counts.set(code, (counts.get(code) || 0) + 1); }
+  const size = 22, gap = 3;
+  return (
+    <svg className="state-map" viewBox={`0 0 ${11 * (size + gap) - gap} ${8 * (size + gap) - gap}`} role="img" aria-label={`Leads by state${current ? `, current lead in ${current}` : ""}`}>
+      {stateTiles.map(([code, col, row]) => {
+        const count = counts.get(code) || 0;
+        return (
+          <g key={code} className={[code === current && "is-current", zone && stateZones.find(([c]) => c === code)?.[2] === zone && "in-zone", count && "has-leads"].filter(Boolean).join(" ")}>
+            <title>{`${code}: ${count} lead${count === 1 ? "" : "s"}`}</title>
+            <rect x={col * (size + gap)} y={row * (size + gap)} width={size} height={size} rx={4} />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// 24-hour strip in the lead's time zone: the calling window (8 AM to 9 PM) shaded, a sun at their current time.
+function DaylightStrip({ hour, minute }: { hour: number | null; minute: number }) {
+  const at = (h: number) => `${(h / 24) * 100}%`;
+  return (
+    <div className="daylight" aria-hidden="true">
+      <div className="daylight__bar">
+        <span className="daylight__window" style={{ left: at(8), width: at(13) }} />
+        {hour !== null && <span className={`daylight__sun${hour >= 8 && hour < 21 ? "" : " is-night"}`} style={{ left: at(hour + minute / 60) }} />}
+      </div>
+      <div className="daylight__ticks"><span>12 AM</span><span style={{ left: at(8) }}>8 AM</span><span style={{ left: at(12) }}>Noon</span><span style={{ left: at(21) }}>9 PM</span></div>
+    </div>
+  );
+}
+
+function leadZone(lead: Lead): { zone: string; place: string } | null {
+  // A time zone set by hand wins; otherwise the state decides.
+  if (isTimeZone(lead.timezone)) return { zone: lead.timezone, place: lead.timezone.split("/").pop()!.replace(/_/g, " ") };
+  const match = leadState(lead);
+  return match ? { zone: match[2], place: match[1] } : null;
+}
+
+function zoneClock(zone: string, now: Date) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "numeric", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
+    const hour = Number(parts.find((part) => part.type === "hour")?.value);
+    const minute = Number(parts.find((part) => part.type === "minute")?.value);
+    return { label: new Intl.DateTimeFormat(undefined, { timeZone: zone, hour: "numeric", minute: "2-digit" }).format(now), hour, minute };
+  } catch {
+    return null;
+  }
+}
+
+const conversationOutcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "Not interested"];
+
+type StatTarget = "calls-today" | "conversations" | "followups" | "to-call";
+
+function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide, onGo }: { state: State; selected: Lead; picker: ReactNode; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void }) {
+  const setup = setupSteps(state);
+  const setupDone = setup.filter((step) => step.done).length;
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const endOfDay = startOfDay + 86_400_000;
+  const callsToday = state.calls.filter((call) => new Date(call.at).getTime() >= startOfDay);
+  const followUpsDue = state.leads.filter((lead) => lead.status === "Follow-up" && !lead.dnc && (!/^\d{4}-\d{2}-\d{2}/.test(lead.due) || new Date(lead.due).getTime() < endOfDay)).length;
+  const toCall = state.leads.filter(inQueue).length;
+  // Today's progress: distinct leads called today out of everything that was in today's queue.
+  const calledLeads = new Set(callsToday.map((call) => call.leadId));
+  const progressTotal = new Set([...state.leads.filter(inQueue).map((lead) => lead.id), ...calledLeads]).size;
+  const zone = leadZone(selected);
+  const clock = zone && zoneClock(zone.zone, now);
+  const inHours = clock ? clock.hour >= 8 && clock.hour < 21 : null;
+  return (
+    <section className="dash-banner" aria-label="Today">
+      <div className="dash-banner__head">
+        <div>
+          <h1>{new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long" }).format(now)}</h1>
+          <p>{new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(now)} your time</p>
+        </div>
+        <div className="dash-banner__actions">
+          {picker}
+          {setupDone < setup.length && <button className="quiet-button" onClick={onGuide}><BadgeCheck size={16} /> Setup {setupDone}/{setup.length}</button>}
+          <button className="quiet-button" onClick={onAddLead}><Plus size={16} /> Add lead</button>
+          <button className="primary-button" onClick={onStart} disabled={!toCall}>Start calling <ChevronRight size={16} /></button>
+        </div>
+      </div>
+      <div className="dash-banner__body">
+        <div className="dash-banner__main">
+        <div className={`dash-window${inHours === false ? " is-closed" : ""}`}>
+          <CalendarClock size={20} aria-hidden="true" />
+          <div>
+            {clock && zone ? (
+              <>
+                <b>{clock.label} in {zone.place}</b>
+                <span>{inHours ? "Inside calling hours (8 AM to 9 PM their time)" : clock.hour < 8 ? "Too early to call. Calling hours start at 8 AM their time" : "Too late to call. Calling hours ended at 9 PM their time"} · {leadLabel(selected)}</span>
+              </>
+            ) : (
+              <>
+                <b>Local time unknown</b>
+                <span>{leadLabel(selected)} has no time zone or state. Add one with Edit to check calling hours.</span>
+              </>
+            )}
+          </div>
+        </div>
+        <dl className="dash-stats">
+          {/* Each number opens the list behind it; the label is a button stretched over the whole tile. */}
+          <div><dt><PhoneOutgoing size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("calls-today")}>Calls today</button></dt><dd>{callsToday.length}</dd></div>
+          <div><dt><MessageSquare size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("conversations")}>Conversations</button></dt><dd>{callsToday.filter((call) => conversationOutcomes.includes(call.outcome)).length}</dd></div>
+          <div><dt><Clock size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("followups")}>Follow-ups due</button></dt><dd>{followUpsDue}</dd></div>
+          <div><dt><ListTodo size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("to-call")}>Left to call</button></dt><dd>{toCall}</dd></div>
+        </dl>
+        <div className="dash-progress">
+          <span><i style={{ width: `${progressTotal ? Math.round((calledLeads.size / progressTotal) * 100) : 0}%` }} /></span>
+          <em>{calledLeads.size} of {progressTotal} leads called today</em>
+        </div>
+        </div>
+        <figure className="dash-where">
+          <StateTileMap leads={state.leads.filter((lead) => !lead.dnc)} current={leadStateCode(selected)} zone={zone ? zone.zone : null} />
+          <DaylightStrip hour={clock ? clock.hour : null} minute={clock ? clock.minute : 0} />
+          <figcaption>{zone ? `${leadLabel(selected)} · ${zone.place}` : "Add a state to see where this lead is"}</figcaption>
+        </figure>
+      </div>
     </section>
   );
 }
@@ -725,7 +1486,19 @@ function Queue({
   onEdit,
   onStatus,
   onSettings,
+  onAddLead,
+  onGuide,
+  onAddTask,
+  onGo,
+  calling,
+  picker,
 }: {
+  calling: boolean;
+  picker: ReactNode;
+  onAddLead: () => void;
+  onGuide: () => void;
+  onAddTask: (lead: Lead) => void;
+  onGo: (target: StatTarget) => void;
   state: State;
   selected: Lead;
   onSelect: (id: string) => void;
@@ -736,26 +1509,23 @@ function Queue({
   onStatus: (lead: Lead, status: string) => void;
   onSettings: () => void;
 }) {
-  const upcoming = state.leads.filter(inQueue);
+  const upcoming = callQueue(state.leads, state.calls);
+  const groups = groupDetails(selected.details);
   return (
     <div className="queue-page">
-      <section className="route-header">
-        <div>
-          <span className="route-label">
-            Calling queue / {upcoming.length} ready
-          </span>
-          <h2>The next responsible call is already in context.</h2>
-        </div>
-        <div className="route-stops">
-          <span>
-            <i /> Queue open
-          </span>
-          <span>
-            <i className="route-stops__muted" />{" "}
-            {state.connection ? "Line selected" : "Line not connected"}
-          </span>
-        </div>
-      </section>
+      <DashboardBanner
+        state={state}
+        selected={selected}
+        picker={picker}
+        onAddLead={onAddLead}
+        onGuide={onGuide}
+        onGo={onGo}
+        onStart={() => {
+          const next = upcoming[0];
+          if (next) onSelect(next.id);
+          document.querySelector(".call-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
+      />
       <section className="queue-layout">
         <aside className="call-list" aria-label="Calling queue">
           {upcoming.map((lead) => (
@@ -768,28 +1538,33 @@ function Queue({
               }
               onClick={() => onSelect(lead.id)}
             >
-              <span className="lead-time">{lead.due}</span>
               <span>
                 <b>{leadLabel(lead)}</b>
                 <small>{leadSubtitle(lead)}</small>
+                {lead.due && lead.due !== "Unscheduled" && <span className="lead-time">{lead.due.replace("T", " ")}</span>}
               </span>
               <ChevronRight size={17} />
             </button>
           ))}
         </aside>
         <article className="call-panel">
-          <div className="call-panel__bar">
-            <span>Current stop</span>
-            <Status tone={selected.dnc ? "alert" : "quiet"}>
-              {selected.dnc ? "Suppressed" : "Window pending"}
-            </Status>
-          </div>
+          {selected.dnc && (
+            <div className="call-panel__bar">
+              <Status tone="alert">Suppressed</Status>
+            </div>
+          )}
           <div className="lead-heading">
-            <div>
-              <h2>{leadLabel(selected)}</h2>
-              <p>{leadSubtitle(selected)}</p>
+            <div className="lead-heading__identity">
+              <i aria-hidden="true">{leadLabel(selected).split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</i>
+              <div>
+                <h2>{leadLabel(selected)}</h2>
+                <p>{leadSubtitle(selected)}</p>
+              </div>
             </div>
             <div className="lead-heading__actions">
+              <button className="quiet-button" onClick={() => onAddTask(selected)}>
+                <ListTodo size={16} aria-hidden="true" /> Add task
+              </button>
               <button className="quiet-button" onClick={() => onEdit(selected)}>
                 Edit
               </button>
@@ -801,95 +1576,87 @@ function Queue({
               </button>
             </div>
           </div>
-          <dl className="facts">
-            <div>
-              <dt>Phone</dt>
-              <dd><a href={`tel:${selected.phone.replace(/[^\d+]/g, "")}`}>{selected.phone}</a></dd>
-            </div>
-            <div>
-              <dt>Local time zone</dt>
-              <dd>
-                {selected.timezone && selected.timezone !== "Unknown" ? selected.timezone.replace("America/", "").replace("_", " ") : "Not set"}
-              </dd>
-            </div>
-            <div>
-              <dt>Stage</dt>
-              <dd>
-                <select className="status-select" value={selected.status} disabled={selected.dnc} onChange={(event) => onStatus(selected, event.target.value)} aria-label="Lead status">
-                  {[...new Set([...leadStatuses, selected.status])].map((status) => <option key={status}>{status}</option>)}
+          <section className="dial-strip" aria-label="Dial">
+            <div className="dial-strip__number">
+              <a href={`tel:${selected.phone.replace(/[^\d+]/g, "")}${selected.extension ? `,${selected.extension}` : ""}`}>{formatPhone(selected.phone, selected.extension)}</a>
+              <div className="dial-strip__meta">
+                <span>{(() => { const zone = leadZone(selected); return zone ? `${localTime(zone.zone)} in ${zone.place}` : <button type="button" className="text-link" onClick={() => onEdit(selected)}>Set the state to see local time</button>; })()}</span>
+                <select className="status-select" value={selected.status} disabled={selected.dnc} onChange={(event) => onStatus(selected, event.target.value)} aria-label="Pipeline stage">
+                  {leadStages.map((stage) => <option key={stage}>{stage}</option>)}
                 </select>
-              </dd>
+              </div>
             </div>
-            {Object.entries(selected.details || {}).map(([label, value]) => (
+            <div className="dial-strip__actions">
+              <button className="call-button" onClick={() => onPrepare(selected)} disabled={selected.dnc || calling}>
+                <Phone size={17} /> {state.connection ? "Call lead" : "Call via Twilio"}
+              </button>
+              <button className="quiet-button" onClick={() => onRecord(selected)}>Log outcome</button>
+            </div>
+            {(() => {
+              const last = state.calls.find((call) => call.leadId === selected.id);
+              if (!last || !["In progress", "Didn't connect", "Call ended"].includes(last.outcome)) return null;
+              const text = last.outcome === "In progress" ? "Call in progress." : last.note;
+              return (
+                <div className={`dial-strip__last${last.outcome === "Didn't connect" ? " is-failed" : ""}`} role="status">
+                  <p>Last attempt, {new Date(last.at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}: {text}</p>
+                  {last.outcome === "Didn't connect" && <TwilioWhy callId={last.id} />}
+                </div>
+              );
+            })()}
+            <p className="dial-strip__note">
+              <LockKeyhole size={14} aria-hidden="true" />
+              <span>
+                {selected.dnc ? "On the do-not-call list" : "Do-not-call clear"} ·{" "}
+                {state.connection ? (
+                  usesAppPhone(state.connection)
+                    ? `The lead sees ${state.connection.selectedNumber}. You talk through this app's microphone and speaker.`
+                    : `The lead sees ${state.connection.selectedNumber}. ${state.connection.bridgeNumber!.startsWith("sip:") ? "Zoiper" : "Your phone"} rings first, then the lead.`
+                ) : (
+                  <>
+                    <button onClick={onSettings}>Connect Twilio</button> to call from here, or dial yourself and log the outcome.
+                  </>
+                )}
+              </span>
+            </p>
+          </section>
+          {groups.quick.length > 0 && (
+            <dl className="call-facts">
+              {groups.quick.map(([label, value]) => (
+                <div key={label}>
+                  <dt>{label}</dt>
+                  <dd>{value}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          <section className="call-script" aria-label="Talking points">
+            {realNote(selected) && (
+              <div>
+                <h3>Note</h3>
+                <p>{realNote(selected)}</p>
+              </div>
+            )}
+            {groups.say.map(([label, value]) => (
               <div key={label}>
-                <dt>{label}</dt>
-                <dd>{value}</dd>
+                <h3>{label}</h3>
+                <p>{value}</p>
               </div>
             ))}
-          </dl>
-          <div className="call-objective">
-            <span>Call objective</span>
-            <p>{selected.note}</p>
-          </div>
-          <div className="call-actions">
-            <button
-              className="call-button"
-              onClick={() => onPrepare(selected)}
-              disabled={selected.dnc}
-            >
-              <Phone size={19} /> {state.connection ? "Call lead" : "Call via Twilio"}
-            </button>
-            <button className="quiet-button" onClick={() => onRecord(selected)}>Log outcome</button>
-          </div>
-          <p className="compliance-note">
-            <LockKeyhole size={15} />{" "}
-            {state.connection ? (
-              `Outbound line: ${state.connection.selectedNumber}`
-            ) : (
-              <>
-                <button onClick={onSettings}>Connect your Twilio line</button>{" "}
-                before calls can be prepared.
-              </>
-            )}{" "}
-            Calls ring your saved operator number first, then connect the lead.
-          </p>
+            {!realNote(selected) && !groups.say.length && <p className="call-script__empty">No talking points yet. <button type="button" className="text-link" onClick={() => onEdit(selected)}>Add a note</button></p>}
+          </section>
+          {groups.research.length > 0 && (
+            <details className="call-more">
+              <summary><ChevronRight size={16} aria-hidden="true" /> Research <small>{groups.research.length}</small></summary>
+              <dl>{groups.research.map(([label, value]) => <div key={label}><dt>{label}</dt><dd><DetailValue value={value} /></dd></div>)}</dl>
+            </details>
+          )}
+          {groups.sources.length > 0 && (
+            <details className="call-more">
+              <summary><ChevronRight size={16} aria-hidden="true" /> Sources &amp; history <small>{groups.sources.length}</small></summary>
+              <dl>{groups.sources.map(([label, value]) => <div key={label}><dt>{label}</dt><dd><DetailValue value={value} /></dd></div>)}</dl>
+            </details>
+          )}
         </article>
-        <aside className="guardrail-panel">
-          <div>
-            <span className="panel-kicker">Guardrails</span>
-            <h3>Controls applied before calls</h3>
-          </div>
-          <ul>
-            <li>
-              <BadgeCheck size={18} />
-              <span>
-                <b>Do-not-call status</b>
-                <small>{selected.dnc ? "Blocked" : "Clear"}</small>
-              </span>
-            </li>
-            <li>
-              <CircleAlert size={18} />
-              <span>
-                <b>Local calling window</b>
-                <small>
-                  {selected.dnc ? "Blocked" : "Verified when Voice is enabled"}
-                </small>
-              </span>
-            </li>
-            <li>
-              <BadgeCheck size={18} />
-              <span>
-                <b>Selected number</b>
-                <small>
-                  {state.connection?.selectedNumber || "Not configured"}
-                </small>
-              </span>
-            </li>
-          </ul>
-          <div className="guardrail-footer">
-            DNC, the selected number, and the calling bridge are checked before every call.
-          </div>
-        </aside>
       </section>
     </div>
   );
@@ -897,44 +1664,53 @@ function Queue({
 
 function LeadList({
   leads,
-  selectedId,
   onOpen,
-  onConvert,
   onImport,
   onDncList,
   calls,
   onEdit,
   onDelete,
+  onTag,
+  campaigns,
+  initialSegment,
+  onCampaign,
+  onStatus,
 }: {
   leads: Lead[];
   calls: CallRecord[];
   onEdit: (lead: Lead) => void;
   onDelete: (ids: string[]) => Promise<void>;
-  selectedId: string | null;
+  onTag: (ids: string[], campaign: string) => Promise<boolean>;
+  campaigns: string[];
+  initialSegment: "all" | "to-call" | "try-again" | "follow-up" | "closed";
+  onCampaign: (name: string) => void;
+  onStatus: (lead: Lead, status: string) => void;
   onOpen: (id: string) => void;
-  onConvert: (lead: Lead) => void;
   onImport: () => void;
   onDncList: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [tagName, setTagName] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
   const [sort, setSort] = useState<"newest" | "name">("newest");
   const [segment, setSegment] = useState<
     "all" | "to-call" | "try-again" | "follow-up" | "closed"
-  >("all");
+  >(initialSegment);
+  const calledIds = new Set(calls.map((call) => call.leadId));
   const groups = {
-    "to-call": leads.filter((lead) => !lead.dnc && lead.status === "Ready"),
-    "try-again": leads.filter((lead) => /again|answer|busy|failed/i.test(lead.status)),
-    "follow-up": leads.filter((lead) => lead.status === "Follow-up"),
-    closed: leads.filter((lead) => lead.dnc || /closed|not interested|wrong/i.test(lead.status)),
+    // New splits by call history: never called vs called without reaching anyone.
+    "to-call": leads.filter((lead) => !lead.dnc && lead.status === "New" && !calledBefore(lead, calledIds)),
+    "try-again": leads.filter((lead) => !lead.dnc && lead.status === "New" && calledBefore(lead, calledIds)),
+    "follow-up": leads.filter((lead) => !lead.dnc && ["Follow-up", "Meeting booked"].includes(lead.status)),
+    closed: leads.filter((lead) => lead.dnc || ["Won", "Lost"].includes(lead.status)),
   };
   const tabs = [
-    { key: "all" as const, label: "All leads", detail: "Every active prospect", count: leads.length },
-    { key: "to-call" as const, label: "To call", detail: "Ready for a first attempt", count: groups["to-call"].length },
-    { key: "try-again" as const, label: "Try again", detail: "No answer, busy, or failed", count: groups["try-again"].length },
-    { key: "follow-up" as const, label: "Follow up", detail: "A scheduled next step", count: groups["follow-up"].length },
-    { key: "closed" as const, label: "Closed", detail: "DNC or no longer active", count: groups.closed.length },
+    { key: "all" as const, icon: Users, label: "All leads", detail: "Every active prospect", count: leads.length },
+    { key: "to-call" as const, icon: Phone, label: "To call", detail: "New, not called yet", count: groups["to-call"].length },
+    { key: "try-again" as const, icon: RotateCcw, label: "Try again", detail: "Called, no one reached yet", count: groups["try-again"].length },
+    { key: "follow-up" as const, icon: CalendarClock, label: "Follow up", detail: "Follow-ups and meetings", count: groups["follow-up"].length },
+    { key: "closed" as const, icon: Ban, label: "Closed", detail: "Won, lost or do not call", count: groups.closed.length },
   ];
   const visibleLeads = (segment === "all" ? leads : groups[segment])
     .filter((lead) => [lead.name, lead.company, lead.role, lead.phone, lead.status, lead.note, ...Object.values(lead.details || {})].join(" ").toLowerCase().includes(query.trim().toLowerCase()))
@@ -944,6 +1720,14 @@ function LeadList({
   const picked = visibleLeads.filter((lead) => checked.has(lead.id));
   const allPicked = visibleLeads.length > 0 && picked.length === visibleLeads.length;
   const toggle = (id: string) => setChecked((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const tagPicked = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!tagName.trim()) return;
+    if (await onTag(picked.map((lead) => lead.id), tagName)) {
+      setChecked(new Set());
+      setTagName("");
+    }
+  };
   const removePicked = async () => {
     if (!window.confirm(`Delete ${picked.length} lead${picked.length === 1 ? "" : "s"}? This cannot be undone.`)) return;
     await onDelete(picked.map((lead) => lead.id));
@@ -962,7 +1746,7 @@ function LeadList({
             className={segment === tab.key ? "lead-bucket is-active" : "lead-bucket"}
             onClick={() => setSegment(tab.key)}
           >
-            <span>{tab.label}</span>
+            <span><tab.icon size={16} aria-hidden="true" />{tab.label}</span>
             <strong>{tab.count}</strong>
             <small>{tab.detail}</small>
             {tab.key === "all" && (
@@ -1006,6 +1790,11 @@ function LeadList({
       {picked.length > 0 && (
         <div className="lead-bulk-bar" role="region" aria-label="Selected leads">
           <b>{picked.length} selected</b>
+          <form className="lead-bulk-tag" onSubmit={(event) => void tagPicked(event)}>
+            <input value={tagName} onChange={(event) => setTagName(event.target.value)} placeholder="Campaign name" list="bulk-campaign-options" autoComplete="off" aria-label="Campaign for the selected leads" />
+            <datalist id="bulk-campaign-options">{campaigns.map((name) => <option key={name} value={name} />)}</datalist>
+            <button type="submit" className="toolbar-button" disabled={!tagName.trim()}><Tag size={16} aria-hidden="true" /> Add to campaign</button>
+          </form>
           <button type="button" className="toolbar-button" onClick={() => exportLeads(picked, "open-dialer-selected-leads.csv")}>Export selected</button>
           <button type="button" className="toolbar-button danger-button" onClick={() => void removePicked()}>Delete selected</button>
           <button type="button" className="toolbar-button" onClick={() => setChecked(new Set())}>Clear</button>
@@ -1022,7 +1811,6 @@ function LeadList({
             <col className="lead-col--status" />
             <col className="lead-col--last-call" />
             <col className="lead-col--email" />
-            <col className="lead-col--sequence" />
             <col className="lead-col--actions" />
           </colgroup>
           <thead>
@@ -1032,8 +1820,7 @@ function LeadList({
               <th scope="col">Contact</th>
               <th scope="col">Status</th>
               <th scope="col">Last call</th>
-              <th scope="col">Email activity</th>
-              <th scope="col">Sequence</th>
+              <th scope="col">Campaign</th>
               <th scope="col"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
@@ -1045,11 +1832,11 @@ function LeadList({
                 .join("")
                 .slice(0, 2)
                 .toUpperCase();
-              const tag = lead.dnc ? "do not call" : lead.due && !["Unscheduled", "Closed", "Converted"].includes(lead.due) ? `next: ${lead.due.replace("T", " ")}` : lead.status.toLowerCase();
-              const statusLabel = lead.dnc ? "DNC" : lead.status.toUpperCase();
+              const tag = lead.dnc ? "do not call" : lead.due && !["Unscheduled", "Won", "Lost", "Follow up"].includes(lead.due) ? `next: ${lead.due.replace("T", " ")}` : lead.status.toLowerCase();
+              const statusLabel = lead.dnc ? "DNC" : lead.status;
               const latest = lastCall.get(lead.id);
               return (
-                <tr className={lead.id === selectedId ? "is-current" : undefined} key={lead.id}>
+                <tr key={lead.id}>
                 <td><input type="checkbox" aria-label={`Select ${leadLabel(lead)}`} checked={checked.has(lead.id)} onChange={() => toggle(lead.id)} /></td>
                 <td>
                   <button className="prospect-button" type="button" onClick={() => onOpen(lead.id)}>
@@ -1064,26 +1851,24 @@ function LeadList({
                   </button>
                 </td>
                 <td>
-                  <span className="contact-phone">{lead.phone}</span>
-                  <small>{lead.timezone && lead.timezone !== "Unknown" ? `${localTime(lead.timezone)} local` : "Time zone not set"}</small>
+                  <span className="contact-phone">{formatPhone(lead.phone, lead.extension)}</span>
+                  <small>{(() => { const zone = leadZone(lead); return zone ? `${localTime(zone.zone)} in ${zone.place}` : <button type="button" className="text-link" onClick={() => onEdit(lead)}>Set the state</button>; })()}</small>
                 </td>
                 <td>
-                  <span className={lead.dnc ? "lead-status is-dnc" : "lead-status"}>
+                  {/* The stage pill opens the stage list: the native select sits invisibly over it. */}
+                  <span className={`lead-status-menu ${lead.dnc || lead.status === "Lost" ? "lead-status is-dnc" : lead.status === "Won" ? "lead-status is-ready" : "lead-status"}`}>
                     {!lead.dnc && <Plus size={13} aria-hidden="true" />}
                     {statusLabel}
+                    {!lead.dnc && (
+                      <select value={lead.status} onChange={(event) => onStatus(lead, event.target.value)} aria-label={`Stage for ${leadLabel(lead)}`}>
+                        {leadStages.map((option) => <option key={option}>{option}</option>)}
+                      </select>
+                    )}
                   </span>
                 </td>
                 <td><span className="next-step">{latest ? <>{latest.outcome}<small>{new Date(latest.at).toLocaleDateString()}</small></> : "Not yet"}</span></td>
-                <td><span className="empty-cell">—</span></td>
-                <td><span className="empty-cell">—</span></td>
+                <td>{lead.campaigns?.length ? <span className="campaign-tags">{lead.campaigns.map((name, index) => <span key={name}>{index > 0 && ", "}<button type="button" className="text-link" onClick={() => onCampaign(name)} title={`Show only ${name}`}>{name}</button></span>)}</span> : <span className="empty-cell">—</span>}</td>
                 <td className="lead-row-actions">
-                  <button
-                    type="button"
-                    className="convert-button"
-                    onClick={() => onConvert(lead)}
-                  >
-                    <CircleDot size={16} aria-hidden="true" /> Convert
-                  </button>
                   <button type="button" onClick={() => onEdit(lead)}>Edit</button>
                   <button type="button" onClick={() => onOpen(lead.id)}>View</button>
                 </td>
@@ -1095,6 +1880,8 @@ function LeadList({
         {!visibleLeads.length && (
           <div className="lead-list-empty">
             <Search size={19} /> No leads match this view.
+            {query.trim() && <button type="button" className="text-link" onClick={() => setQuery("")}>Clear search</button>}
+            {segment !== "all" && <button type="button" className="text-link" onClick={() => setSegment("all")}>Show all leads</button>}
           </div>
         )}
       </div>
@@ -1111,48 +1898,334 @@ function LeadList({
   );
 }
 
+// "2026-11-21T10:00" reads as "Tomorrow, 10:00 AM"; free text like "Follow up" stays as typed.
+function dueLabel(due: string) {
+  if (!/^\d{4}-\d{2}-\d{2}/.test(due)) return { text: due && due !== "Unscheduled" ? due : "No date", overdue: false };
+  const at = new Date(due);
+  const today = new Date();
+  const days = Math.round((new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime() - new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()) / 86_400_000);
+  const day = days === 0 ? "Today" : days === 1 ? "Tomorrow" : days === -1 ? "Yesterday" : new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(at);
+  const time = due.includes("T") ? `, ${new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(at)}` : "";
+  return { text: `${day}${time}`, overdue: at.getTime() < Date.now() };
+}
+
 function FollowUps({
   leads,
+  allLeads,
+  tasks,
+  onOpenTask,
+  onChangeTask,
+  done,
+  onToggle,
   onSelect,
 }: {
   leads: Lead[];
+  allLeads: Lead[];
+  tasks: Task[];
+  onOpenTask: (task: Task) => void;
+  onChangeTask: (task: Task, change: { done: boolean } | "delete") => void;
+  done: Lead[];
+  onToggle: (lead: Lead, done: boolean) => void;
   onSelect: (id: string) => void;
 }) {
+  const leadOption = (lead: Lead) => `${leadLabel(lead)} · ${lead.company}`;
+  // Dated first, soonest on top; undated after.
+  const soonest = (left: string, right: string) => (/^\d{4}-/.test(left) ? new Date(left).getTime() : Infinity) - (/^\d{4}-/.test(right) ? new Date(right).getTime() : Infinity);
+  const open = [...leads].sort((left, right) => soonest(left.due, right.due));
+  // The app's own tasks are grouped: one for booked meetings (they have a set time, so they come first), one for callbacks.
+  const groups = [
+    { key: "meetings", title: (count: number) => `${count} booked meeting${count === 1 ? "" : "s"}`, leads: open.filter((lead) => lead.status === "Meeting booked"), icon: CalendarClock, startOpen: true },
+    { key: "callbacks", title: (count: number) => `Call back ${count} lead${count === 1 ? "" : "s"}`, leads: open.filter((lead) => lead.status !== "Meeting booked"), icon: PhoneOutgoing, startOpen: false },
+  ].filter((group) => group.leads.length);
+  const mine = tasks.filter((task) => !task.doneAt).sort((left, right) => soonest(left.due, right.due) || right.createdAt.localeCompare(left.createdAt));
+  const leadById = new Map(allLeads.map((lead) => [lead.id, lead]));
+  // Done recently: your tasks and callbacks together, newest first.
+  const finished = [
+    ...tasks.filter((task) => task.doneAt).map((task) => ({ key: task.id, at: task.doneAt!, label: task.title, undo: () => onChangeTask(task, { done: false }) })),
+    ...done.map((lead) => ({ key: lead.id, at: lead.taskDone!.at, label: leadLabel(lead), undo: () => onToggle(lead, false) })),
+  ].sort((left, right) => right.at.localeCompare(left.at)).slice(0, 12);
   return (
-    <section className="followups">
-      {leads.map((lead) => (
-        <button key={lead.id} onClick={() => onSelect(lead.id)}>
-          <span className="followup-time">{lead.due}</span>
-          <span>
-            <b>{leadLabel(lead)}</b>
-            <small>
-              {leadSubtitle(lead)} · {lead.note}
-            </small>
-          </span>
-          <ChevronRight size={18} />
-        </button>
-      ))}
+    <section className="tasks-page">
+      <div className="tasks-main">
+        <div className="tasks-open">
+          <header><h2>To do</h2><span>{mine.length + open.length}</span></header>
+          {mine.map((task) => {
+            const lead = task.leadId ? leadById.get(task.leadId) : undefined;
+            const when = task.due ? dueLabel(task.due) : null;
+            return (
+              <article className="task-item" key={task.id}>
+                <input type="checkbox" checked={false} onChange={() => onChangeTask(task, { done: true })} aria-label={`Mark "${task.title}" done`} />
+                <button type="button" className="task-item__body" onClick={() => onOpenTask(task)}>
+                  <b>{task.title}</b>
+                  {lead && <small>{leadOption(lead)}</small>}
+                </button>
+                {when ? <span className={`task-item__due${when.overdue ? " is-overdue" : ""}`}><CalendarClock size={16} aria-hidden="true" />{when.text}</span> : <span />}
+                <button type="button" className="icon-button" onClick={() => onChangeTask(task, "delete")} aria-label={`Delete "${task.title}"`}><Trash2 size={16} /></button>
+              </article>
+            );
+          })}
+          {groups.map((group) => {
+            const overdue = group.leads.filter((lead) => dueLabel(lead.due).overdue).length;
+            const next = group.leads.find((lead) => /^\d{4}-/.test(lead.due));
+            return (
+              <details className="task-group" key={group.key} open={group.startOpen}>
+                <summary>
+                  <group.icon size={18} aria-hidden="true" />
+                  <b>{group.title(group.leads.length)}</b>
+                  <span className={`task-item__due${overdue ? " is-overdue" : ""}`}>{overdue ? `${overdue} overdue` : next ? `Next: ${dueLabel(next.due).text}` : ""}</span>
+                  <ChevronRight size={18} aria-hidden="true" className="task-group__chevron" />
+                </summary>
+                {group.leads.map((lead) => {
+                  const when = dueLabel(lead.due);
+                  return (
+                    <article className="task-item" key={lead.id}>
+                      <input type="checkbox" checked={false} onChange={() => onToggle(lead, true)} aria-label={`Mark ${leadLabel(lead)} done`} />
+                      <button type="button" className="task-item__body" onClick={() => onSelect(lead.id)}>
+                        <b>{leadLabel(lead)}</b>
+                        <small>{[leadSubtitle(lead), realNote(lead)].filter(Boolean).join(" · ")}</small>
+                      </button>
+                      <span className={`task-item__due${when.overdue ? " is-overdue" : ""}`}><CalendarClock size={16} aria-hidden="true" />{when.text}</span>
+                      <button type="button" className="icon-button" onClick={() => onSelect(lead.id)} aria-label={`Open ${leadLabel(lead)}`}><ChevronRight size={18} /></button>
+                    </article>
+                  );
+                })}
+              </details>
+            );
+          })}
+          {!mine.length && !groups.length && <p className="tasks-done__empty">Nothing to do. Add a task with the button above, or log a callback or meeting on a call.</p>}
+        </div>
+      </div>
+      <aside className="tasks-done" aria-label="Done recently">
+        <header><h2>Done recently</h2><span>{finished.length}</span></header>
+        {finished.map((item) => (
+          <article className="task-done" key={item.key}>
+            <input type="checkbox" checked onChange={item.undo} aria-label={`Undo ${item.label}`} />
+            <span>
+              <b>{item.label}</b>
+              <small>Done {dueLabel(item.at).text}</small>
+            </span>
+          </article>
+        ))}
+        {!finished.length && <p className="tasks-done__empty">Checked-off tasks land here.</p>}
+      </aside>
     </section>
   );
 }
 
-function Pipeline({ opportunities, onUpdate }: { opportunities: Opportunity[]; onUpdate: (id: string, body: Partial<Pick<Opportunity, "stage" | "value">>) => void }) {
-  const stages = ["Qualification", "Proposal", "Negotiation", "Closed Won", "Closed Lost"] as const;
-  const total = opportunities.reduce((sum, item) => sum + item.value, 0);
-  return <section className="pipeline-page">
-    <header className="pipeline-header"><div><h2>Sales Pipeline</h2><p>Track converted leads through the next commercial decision.</p></div><div><strong>${total.toLocaleString()}</strong><small>{opportunities.length} opportunities</small></div></header>
-    <div className="pipeline-board">{stages.map((stage) => { const items = opportunities.filter((item) => item.stage === stage); return <section className="pipeline-column" key={stage}><header><b>{stage}</b><span>{items.length} deals · ${items.reduce((sum, item) => sum + item.value, 0).toLocaleString()}</span></header>{items.length ? items.map((item) => <article className="opportunity-card" key={item.id}><b>{item.name}</b><small>{item.company} · {item.contact}</small><label>Value<input type="number" min="0" value={item.value} onChange={(event) => onUpdate(item.id, { value: Number(event.target.value) || 0 })} /></label><label>Stage<select value={item.stage} onChange={(event) => onUpdate(item.id, { stage: event.target.value as Opportunity["stage"] })}>{stages.map((option) => <option key={option}>{option}</option>)}</select></label></article>) : <p className="pipeline-empty">No opportunities</p>}</section>; })}</div>
-  </section>;
+// A quick look at one lead from the board: who they are, where they stand, what was said. Stage changes here
+// also cover keyboard and touch, where dragging doesn't work.
+function LeadPeek({ lead, calls, onClose, onMove, onEdit, onCall, onAddTask }: { lead: Lead; calls: CallRecord[]; onClose: () => void; onMove: (lead: Lead, stage: string) => void; onEdit: (lead: Lead) => void; onCall: (id: string) => void; onAddTask: (lead: Lead) => void }) {
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [onClose]);
+  const zone = leadZone(lead);
+  const due = lead.due && !["Unscheduled", "Won", "Lost", "Suppressed"].includes(lead.due) ? dueLabel(lead.due) : null;
+  const history = calls.filter((call) => call.leadId === lead.id).sort((left, right) => right.at.localeCompare(left.at)).slice(0, 3);
+  const details = Object.entries(lead.details || {}).filter(([, value]) => value?.trim());
+  return (
+    <div className="modal-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="lead-form lead-peek" role="dialog" aria-modal="true" aria-labelledby="lead-peek-title">
+        <button type="button" className="close-button" onClick={onClose} aria-label="Close" autoFocus><X /></button>
+        <header>
+          <h2 id="lead-peek-title">{leadLabel(lead)}</h2>
+          {leadSubtitle(lead) && <p>{leadSubtitle(lead)}</p>}
+        </header>
+        <dl className="lead-peek__facts">
+          <div><dt>Phone</dt><dd>{formatPhone(lead.phone, lead.extension)}{lead.dnc && <em> · Do not call</em>}{zone && <small>{localTime(zone.zone)} in {zone.place}</small>}</dd></div>
+          <div><dt>Stage</dt><dd><select value={lead.status} onChange={(event) => onMove(lead, event.target.value)} aria-label="Stage">{leadStages.map((option) => <option key={option}>{option}</option>)}</select></dd></div>
+          {due && <div><dt>Next step</dt><dd className={due.overdue ? "is-overdue" : undefined}>{due.text}</dd></div>}
+          {!!lead.value && <div><dt>Deal value</dt><dd>${lead.value.toLocaleString()}</dd></div>}
+          {!!lead.campaigns?.length && <div><dt>Campaign</dt><dd>{lead.campaigns.join(", ")}</dd></div>}
+        </dl>
+        {realNote(lead) && <section className="lead-peek__block"><h3>Note</h3><p>{realNote(lead)}</p></section>}
+        <section className="lead-peek__block">
+          <h3>Recent calls</h3>
+          {history.length ? (
+            <ul>{history.map((call) => <li key={call.id}><b>{call.outcome}</b> <small>{dueLabel(call.at).text}</small>{call.note && <p>{call.note}</p>}</li>)}</ul>
+          ) : <p>Not called yet.</p>}
+        </section>
+        {!!details.length && (
+          <details className="lead-peek__block">
+            <summary>From the import ({details.length})</summary>
+            <dl className="lead-peek__facts">{details.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
+          </details>
+        )}
+        <div className="lead-peek__actions">
+          <button type="button" className="quiet-button" onClick={() => onAddTask(lead)}><ListTodo size={16} aria-hidden="true" /> Add task</button>
+          <button type="button" className="quiet-button" onClick={() => onEdit(lead)}>Edit</button>
+          <button type="button" className="primary-button" onClick={() => onCall(lead.id)} disabled={lead.dnc}><Phone size={16} aria-hidden="true" />Open in dialer</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-type ImportTarget = "phone" | "name" | "company" | "role" | "timezone" | "note";
+// Add, view and edit one task. Details live here and stay out of the list.
+function TaskDialog({ task, leadId, leads, onSave, onDelete, onOpenLead, onClose }: { task?: Task; leadId?: string; leads: Lead[]; onSave: (fields: TaskFields, task?: Task) => Promise<void>; onDelete: (task: Task) => void; onOpenLead: (id: string) => void; onClose: () => void }) {
+  const leadOption = (lead: Lead) => `${leadLabel(lead)} · ${lead.company}`;
+  const linkedId = task?.leadId || leadId;
+  const linked = linkedId ? leads.find((lead) => lead.id === linkedId) : undefined;
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [onClose]);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const leadText = String(form.get("lead") || "").trim();
+    const lead = leadText ? leads.find((item) => leadOption(item) === leadText) : null;
+    if (leadText && !lead) return setError("Pick the lead from the list, or leave it empty.");
+    setBusy(true);
+    setError(null);
+    try {
+      await onSave({ title: String(form.get("title") || ""), details: String(form.get("details") || ""), due: String(form.get("due") || ""), leadId: lead?.id || null }, task);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save the task.");
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="modal-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <form className="lead-form task-dialog" onSubmit={(event) => void submit(event)} role="dialog" aria-modal="true" aria-labelledby="task-dialog-title">
+        <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
+        <h2 id="task-dialog-title">{task ? "Task" : "Add a task"}</h2>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <label>What to do<input name="title" defaultValue={task?.title} placeholder="Email Andrea Lilley the NC math sample" maxLength={200} required autoFocus={!task} /></label>
+        <label>Details<textarea name="details" defaultValue={task?.details} placeholder="Anything you need to remember: what was promised, links, who to ask for" rows={5} maxLength={4000} /></label>
+        <label>Due<input name="due" type="datetime-local" defaultValue={/^\d{4}-\d{2}-\d{2}T/.test(task?.due || "") ? task!.due : ""} /></label>
+        <label>Lead<input name="lead" defaultValue={linked ? leadOption(linked) : ""} placeholder="Optional. Start typing a name or district" list="task-dialog-leads" autoComplete="off" /></label>
+        <datalist id="task-dialog-leads">{leads.map((lead) => <option key={lead.id} value={leadOption(lead)} />)}</datalist>
+        <div className="task-dialog__actions">
+          {task && <button type="button" className="quiet-button task-dialog__delete" onClick={() => onDelete(task)}><Trash2 size={16} aria-hidden="true" /> Delete</button>}
+          {linked && task && <button type="button" className="quiet-button" onClick={() => onOpenLead(linked.id)}><Phone size={16} aria-hidden="true" /> Open lead</button>}
+          <button className="primary-button" disabled={busy}>{busy ? "Saving…" : task ? "Save" : "Add task"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function Pipeline({
+  leads,
+  calls,
+  onMove,
+  onEdit,
+  onCall,
+  onAddTask,
+}: {
+  leads: Lead[];
+  calls: CallRecord[];
+  onMove: (lead: Lead, stage: string) => void;
+  onEdit: (lead: Lead) => void;
+  onCall: (id: string) => void;
+  onAddTask: (lead: Lead) => void;
+}) {
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [peekId, setPeekId] = useState<string | null>(null);
+  const peek = leads.find((lead) => lead.id === peekId);
+  const [over, setOver] = useState<string | null>(null);
+  const won = leads.filter((lead) => lead.status === "Won").reduce((sum, lead) => sum + (lead.value || 0), 0);
+  return (
+    <section className="pipeline-page">
+      <header className="pipeline-header">
+        <p>Drag a lead to another stage, or click it for details. Logging a call moves it for you.</p>
+        <div><strong>{leads.filter((lead) => lead.status === "Won").length} won</strong><small>{won ? `$${won.toLocaleString()} in deals` : `${leads.filter(inQueue).length} still open`}</small></div>
+      </header>
+      <div className="pipeline-board">
+        {leadStages.map((stage) => {
+          const items = leads.filter((lead) => lead.status === stage);
+          return (
+            <section
+              key={stage}
+              className={`pipeline-column${over === stage ? " is-over" : ""}`}
+              onDragOver={(event) => { event.preventDefault(); setOver(stage); }}
+              onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setOver(null); }}
+              onDrop={(event) => {
+                event.preventDefault();
+                setOver(null);
+                const lead = leads.find((item) => item.id === event.dataTransfer.getData("text/plain"));
+                if (lead && lead.status !== stage) onMove(lead, stage);
+              }}
+            >
+              <header><b>{stage}</b><span>{items.length}</span></header>
+              <div className="pipeline-cards">
+                {items.map((lead) => (
+                  <article
+                    key={lead.id}
+                    className={`pipeline-card${dragging === lead.id ? " is-dragging" : ""}`}
+                    draggable
+                    onDragStart={(event) => { event.dataTransfer.setData("text/plain", lead.id); event.dataTransfer.effectAllowed = "move"; setDragging(lead.id); }}
+                    onDragEnd={() => setDragging(null)}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Details for ${leadLabel(lead)}`}
+                    onClick={() => setPeekId(lead.id)}
+                    onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setPeekId(lead.id); } }}
+                  >
+                    <b>{leadLabel(lead)}</b>
+                    <small>{leadSubtitle(lead)}</small>
+                    <span className="pipeline-card__meta">{formatPhone(lead.phone, lead.extension)}{lead.dnc ? " · Do not call" : ""}</span>
+                    {lead.campaigns?.length ? <span className="pipeline-card__meta">{lead.campaigns.join(", ")}</span> : null}
+                  </article>
+                ))}
+                {!items.length && <p className="pipeline-empty">Drop a lead here</p>}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      {peek && <LeadPeek lead={peek} calls={calls} onClose={() => setPeekId(null)} onMove={onMove} onEdit={(lead) => { setPeekId(null); onEdit(lead); }} onCall={onCall} onAddTask={(lead) => { setPeekId(null); onAddTask(lead); }} />}
+    </section>
+  );
+}
+
+function Campaigns({ leads, onStart, onView, onStage, onImport }: { leads: Lead[]; onStart: (name: string) => void; onView: (name: string) => void; onStage: (name: string) => void; onImport: () => void }) {
+  const names = campaignsOf(leads);
+  const untagged = leads.filter((lead) => !lead.campaigns?.length).length;
+  return (
+    <section className="campaigns-page">
+      <div className="campaigns-head">
+        <p>Each CSV you import goes into a campaign. Pick one to call only its leads.</p>
+        <button type="button" className={names.length ? "quiet-button" : "primary-button"} onClick={onImport}><FileUp size={16} aria-hidden="true" /> Import into a campaign</button>
+      </div>
+      {!names.length && <div className="empty-state">No campaigns yet. Import a CSV and give it a campaign name.</div>}
+      <div className="campaign-list">
+        {names.map((name) => {
+          const items = leads.filter((lead) => lead.campaigns?.includes(name));
+          const toCall = items.filter(inQueue).length;
+          return (
+            <article className="campaign-card" key={name}>
+              <header><h2>{name}</h2><span>{items.length} lead{items.length === 1 ? "" : "s"}</span></header>
+              <dl className="campaign-stages">
+                {leadStages.map((stage) => <div key={stage}><dt><button type="button" className="stretch-link" onClick={() => onStage(name)} title={`Open ${name} on the pipeline`}>{stage}</button></dt><dd>{items.filter((lead) => lead.status === stage).length}</dd></div>)}
+              </dl>
+              <div className="campaign-card__actions">
+                <button type="button" className="quiet-button" onClick={() => onView(name)}>View leads</button>
+                <button type="button" className="quiet-button" disabled={!toCall} onClick={() => onStart(name)}><PhoneCall size={16} aria-hidden="true" /> Start calling ({toCall})</button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+      {untagged > 0 && names.length > 0 && <p className="campaigns-note">{untagged} lead{untagged === 1 ? " isn't" : "s aren't"} in a campaign. Add one when you edit a lead, or import the CSV again into a campaign.</p>}
+    </section>
+  );
+}
+
+type ImportTarget = "phone" | "name" | "company" | "role" | "state" | "note" | "stage";
 const importTargets: { key: ImportTarget; label: string; hint: string; guesses: string[] }[] = [
   { key: "phone", label: "Phone", hint: "Required", guesses: ["phone", "phonenumber", "mainphone", "directphone", "telephone", "tel", "mobile", "cell", "number"] },
-  { key: "name", label: "Contact name", hint: "Optional. Leave blank for front desks and gatekeepers", guesses: ["name", "fullname", "contact", "contactname", "person", "firstname"] },
+  { key: "name", label: "Contact name", hint: "Optional. Leave blank for front desks and gatekeepers", guesses: ["name", "fullname", "contact", "contactname", "person", "firstname", "superintendent", "principal", "leader", "owner"] },
   { key: "company", label: "Company / organization", hint: "Optional", guesses: ["company", "companyname", "organization", "organisation", "account", "accountname", "business", "district", "school", "agency"] },
   { key: "role", label: "Role or title", hint: "Optional", guesses: ["role", "title", "jobtitle", "position"] },
-  { key: "timezone", label: "Time zone", hint: "Optional", guesses: ["timezone", "tz", "timezoneid"] },
+  { key: "state", label: "State / province", hint: "Optional. Sets the lead's local time and its spot on the dashboard map (US states, as NC or North Carolina)", guesses: ["state", "st", "province", "stateprovince", "stateorprovince", "statename", "region"] },
   { key: "note", label: "Notes", hint: "Optional. Becomes the lead note", guesses: ["notes", "note", "comments", "comment", "description"] },
+  { key: "stage", label: "Pipeline stage", hint: "Optional. New, Follow-up, Meeting booked, Won or Lost; anything else starts as New", guesses: ["stage", "pipelinestage", "leadstage", "status", "leadstatus"] },
 ];
 
 function parseCsv(source: string) {
@@ -1223,7 +2296,8 @@ function guessMapping(headers: string[], rows: string[][]) {
   return mapping;
 }
 
-function ImportLeads({ onClose, onSaved }: { onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+function ImportLeads({ campaigns, defaultCampaign, requireCampaign, onClose, onSaved }: { campaigns: string[]; defaultCampaign: string; requireCampaign: boolean; onClose: () => void; onSaved: (message: string, campaign: string) => Promise<void> }) {
+  const [campaign, setCampaign] = useState(defaultCampaign);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState("");
@@ -1231,6 +2305,7 @@ function ImportLeads({ onClose, onSaved }: { onClose: () => void; onSaved: (mess
   const [rows, setRows] = useState<string[][]>([]);
   const [mapping, setMapping] = useState<Record<ImportTarget, number | null> | null>(null);
   const [keepOthers, setKeepOthers] = useState(true);
+  const [cleanPhones, setCleanPhones] = useState(true);
   const readFile = async (file: File | undefined) => {
     setError(null);
     setMapping(null);
@@ -1238,7 +2313,11 @@ function ImportLeads({ onClose, onSaved }: { onClose: () => void; onSaved: (mess
     setFileName(file.name);
     const parsed = parseCsv(await file.text());
     if (parsed.length < 2) return setError("This file needs a header row and at least one lead row.");
-    const [head, ...body] = parsed;
+    // Spreadsheet exports often put title/summary rows above the real header: use the first well-filled row.
+    const filled = parsed.slice(0, 20).map((row) => row.filter(Boolean).length);
+    const headerIndex = filled.findIndex((count) => count >= Math.max(2, Math.max(...filled) * 0.6));
+    const [head, ...body] = parsed.slice(Math.max(0, headerIndex));
+    if (!body.length) return setError("This file needs a header row and at least one lead row.");
     const width = Math.max(...parsed.map((row) => row.length));
     const names = Array.from({ length: width }, (_, index) => head[index] || `Column ${index + 1}`);
     setHeaders(names);
@@ -1251,14 +2330,29 @@ function ImportLeads({ onClose, onSaved }: { onClose: () => void; onSaved: (mess
   const cell = (row: string[], target: ImportTarget) => (mapping?.[target] == null ? "" : row[mapping[target] as number] || "");
   const buildLeads = () =>
     rows.map((row) => ({
-      phone: cell(row, "phone"),
+      ...(cleanPhones ? normalizePhone(cell(row, "phone")) : { phone: cell(row, "phone"), extension: "" }),
       name: cell(row, "name"),
       company: cell(row, "company"),
       role: cell(row, "role"),
-      timezone: cell(row, "timezone"),
+      timezone: "",
       note: cell(row, "note"),
-      details: keepOthers ? Object.fromEntries(others.map(({ header, index }) => [header, row[index] || ""]).filter(([, text]) => text)) : {},
+      stage: cell(row, "stage"),
+      details: {
+        ...(keepOthers ? Object.fromEntries(others.map(({ header, index }) => [header, row[index] || ""]).filter(([, text]) => text)) : {}),
+        // Saved under one name whatever the column was called, so local time and the map always find it.
+        ...(cell(row, "state") ? { State: cell(row, "state") } : {}),
+      },
     }));
+  const unreadable = cleanPhones && mapping?.phone != null ? rows.map((row) => cell(row, "phone")).filter((value) => value.replace(/\D/g, "").length >= 7 && !normalizePhone(value).ok) : [];
+  const shownCell = (row: string[], target: ImportTarget) => {
+    if (target === "state" && cell(row, "state")) {
+      const zone = leadZone({ details: { State: cell(row, "state") } } as unknown as Lead);
+      return `${cell(row, "state")} · ${zone ? `${localTime(zone.zone)} there` : "not recognized"}`;
+    }
+    if (target !== "phone" || !cleanPhones) return cell(row, target);
+    const result = normalizePhone(cell(row, "phone"));
+    return result.ok ? formatPhone(result.phone, result.extension) : cell(row, "phone");
+  };
   const withPhone = mapping?.phone == null ? 0 : rows.filter((row) => cell(row, "phone").replace(/\D/g, "").length >= 7).length;
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1267,9 +2361,11 @@ function ImportLeads({ onClose, onSaved }: { onClose: () => void; onSaved: (mess
     setBusy(true);
     setError(null);
     try {
-      const result = await api<{ imported: number; duplicates: number; invalid: number }>("/api/leads/import", { method: "POST", body: JSON.stringify({ leads: buildLeads() }) });
-      const skipped = [result.duplicates && `${result.duplicates} already in the workspace`, result.invalid && `${result.invalid} without a usable phone number`].filter(Boolean).join(", ");
-      await onSaved(`${result.imported} leads imported${skipped ? `. Skipped ${skipped}` : ""}.`);
+      const result = await api<{ imported: number; duplicates: number; invalid: number; tagged: number }>("/api/leads/import", { method: "POST", body: JSON.stringify({ leads: buildLeads(), campaign }) });
+      const skipped = [result.duplicates && `${result.duplicates} already in the workspace${result.tagged ? ` (${result.tagged} added to ${campaign.trim()})` : ""}`, result.invalid && `${result.invalid} without a usable phone number`].filter(Boolean).join(", ");
+      await onSaved(result.imported === 0 && result.tagged
+        ? `Added ${result.tagged} leads already in your workspace to ${campaign.trim()}.`
+        : `${result.imported} lead${result.imported === 1 ? "" : "s"} imported${campaign.trim() ? ` into ${campaign.trim()}` : ""}${skipped ? `. Skipped ${skipped}` : ""}.`, campaign.trim());
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not import this CSV.");
     } finally {
@@ -1283,6 +2379,8 @@ function ImportLeads({ onClose, onSaved }: { onClose: () => void; onSaved: (mess
         <h2 id="import-leads-title">Import leads</h2>
         <p>Any CSV works. Pick the file, then tell Open Dialer v2 which column is which. Only a phone number is required.</p>
         {error && <p className="form-error" role="alert">{error}</p>}
+        <label>Campaign{requireCampaign && <small>Required</small>}<input value={campaign} onChange={(event) => setCampaign(event.target.value)} placeholder="NC school districts" list="campaign-options" autoComplete="off" required={requireCampaign} autoFocus={requireCampaign && !campaign} /></label>
+        <datalist id="campaign-options">{campaigns.map((name) => <option key={name} value={name} />)}</datalist>
         <label>CSV file<input type="file" accept=".csv,.tsv,.txt,text/csv" onChange={(event) => void readFile(event.target.files?.[0])} /></label>
         {mapping && (
           <>
@@ -1294,9 +2392,16 @@ function ImportLeads({ onClose, onSaved }: { onClose: () => void; onSaved: (mess
                     <option value="">{target.key === "phone" ? "Choose a column…" : "Not in this file"}</option>
                     {headers.map((header, index) => <option key={index} value={index}>{header}</option>)}
                   </select>
+                  {mapping[target.key] != null && (
+                    <small className="import-example">e.g. {rows.find((row) => row[mapping[target.key] as number])?.[mapping[target.key] as number] || "empty column"}</small>
+                  )}
                 </label>
               ))}
             </div>
+            <label className="import-keep">
+              <input type="checkbox" checked={cleanPhones} onChange={(event) => setCleanPhones(event.target.checked)} />
+              <span>Clean up phone numbers <small>(saved as +13365706060 and shown as (336) 570-6060; extensions like "ext. 10257" are saved separately and dialed after the call connects)</small></span>
+            </label>
             {others.length > 0 && (
               <label className="import-keep">
                 <input type="checkbox" checked={keepOthers} onChange={(event) => setKeepOthers(event.target.checked)} />
@@ -1307,11 +2412,11 @@ function ImportLeads({ onClose, onSaved }: { onClose: () => void; onSaved: (mess
               <div className="import-preview" aria-label="Import preview">
                 <table>
                   <thead><tr>{shown.map((target) => <th key={target.key}>{target.label}</th>)}</tr></thead>
-                  <tbody>{rows.slice(0, 4).map((row, rowIndex) => <tr key={rowIndex}>{shown.map((target) => <td key={target.key}>{cell(row, target.key) || "—"}</td>)}</tr>)}</tbody>
+                  <tbody>{rows.slice(0, 4).map((row, rowIndex) => <tr key={rowIndex}>{shown.map((target) => <td key={target.key}>{shownCell(row, target.key) || "—"}</td>)}</tr>)}</tbody>
                 </table>
               </div>
             )}
-            <p className="import-summary">{fileName}: {rows.length} rows, {withPhone} with a phone number{rows.length - withPhone ? `. ${rows.length - withPhone} will be skipped` : ""}.</p>
+            <p className="import-summary">{fileName}: {rows.length} rows, {withPhone} with a phone number{rows.length - withPhone ? `. ${rows.length - withPhone} will be skipped` : ""}.{unreadable.length > 0 && ` ${unreadable.length} number${unreadable.length === 1 ? "" : "s"} couldn't be read and will be kept as written: ${unreadable.slice(0, 3).join(", ")}${unreadable.length > 3 ? "…" : ""}`}</p>
           </>
         )}
         <button className="primary-button" disabled={busy || !mapping || mapping.phone === null}>{busy ? "Importing…" : <><FileUp size={17} /> {mapping ? `Import ${withPhone} leads` : "Import leads"}</>}</button>
@@ -1328,86 +2433,94 @@ function DncList({ onClose, onSaved }: { onClose: () => void; onSaved: (message:
   return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="dnc-list-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="dnc-list-title">Do-not-call list</h2><p>Paste one phone number per line. Matching leads are immediately suppressed.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Phone numbers<textarea value={numbers} onChange={(event) => setNumbers(event.target.value)} placeholder={"+15551234567\n+15557654321"} required /></label><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Suppress numbers"}</button></form></div>;
 }
 
-function ConvertLead({ lead, onClose, onSaved }: { lead: Lead; onClose: () => void; onSaved: () => Promise<void> }) {
+function CallOutcome({ lead, bookingUrl, onBook, onClose, onSaved }: { lead: Lead; bookingUrl: string; onBook: () => void; onClose: () => void; onSaved: (outcome: string) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/opportunities", { method: "POST", body: JSON.stringify({ leadId: lead.id, name: form.get("name"), value: form.get("value") }) }); await onSaved(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not convert this lead."); } finally { setBusy(false); } };
-  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="convert-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="convert-title">Convert to opportunity</h2><p>{leadLabel(lead)}{lead.name && lead.company !== "Unassigned" ? ` at ${lead.company}` : ""} will move to Pipeline in Qualification.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Opportunity name<input name="name" defaultValue={`${lead.company} opportunity`} required /></label><label>Potential value<input name="value" type="number" min="0" defaultValue="0" required /></label><button className="primary-button" disabled={busy}>{busy ? "Converting…" : "Create opportunity"}</button></form></div>;
-}
-
-function CallOutcome({ lead, onClose, onSaved }: { lead: Lead; onClose: () => void; onSaved: (outcome: string) => Promise<void> }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState("");
+  // A callback or a meeting without a time never becomes a task, so those two need one.
+  const needsDate = outcome === "Callback" || outcome === "Meeting booked";
   const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt") }) }); await onSaved(String(form.get("outcome"))); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
-  return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="outcome-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="outcome-title">Log call outcome</h2><p>Record the result for {leadLabel(lead)}. This updates the lead and call history, then moves you to the next lead.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Outcome<select name="outcome" defaultValue="" required><option value="" disabled>Choose what happened…</option><option>Interested</option><option>Meeting booked</option><option>Callback</option><option>Maybe later</option><option>No answer</option><option>Busy</option><option>Voicemail</option><option>Not interested</option><option>Wrong number</option><option>Do not call</option></select></label><label>Follow-up date and time <input name="followUpAt" type="datetime-local" /></label><label>Notes<textarea name="note" placeholder="What happened on this call?" /></label><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save outcome"}</button></form></div>;
+  return (
+    <div className="modal-backdrop">
+      <form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="outcome-title">
+        <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
+        <h2 id="outcome-title">Log call outcome</h2>
+        <p>Record the result for {leadLabel(lead)}. This updates the lead and call history, then moves you to the next lead.</p>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <label>Outcome<select name="outcome" value={outcome} onChange={(event) => setOutcome(event.target.value)} required><option value="" disabled>Choose what happened…</option><option>Interested</option><option>Meeting booked</option><option>Callback</option><option>Maybe later</option><option>No answer</option><option>Busy</option><option>Voicemail</option><option>Not interested</option><option>Wrong number</option><option>Do not call</option></select></label>
+        {outcome === "Meeting booked" && (bookingUrl
+          ? <button type="button" className="quiet-button outcome-book" onClick={onBook}><CalendarPlus size={16} aria-hidden="true" /> Open your booking page</button>
+          : <p className="outcome-hint">Add your Calendly or Cal.com link in Settings to book from here.</p>)}
+        <label>{outcome === "Meeting booked" ? "Meeting date and time" : outcome === "Callback" ? "Call back on" : "Follow-up date and time"}{needsDate && <small>Required</small>}<input name="followUpAt" type="datetime-local" required={needsDate} /></label>
+        <label>Notes<textarea name="note" placeholder="What happened on this call?" /></label>
+        <button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save outcome"}</button>
+      </form>
+    </div>
+  );
 }
 
-function ActivityLog({ activity }: { activity: State["activity"] }) {
+function ActivityLog({ activity, leads, onOpenLead }: { activity: State["activity"]; leads: Lead[]; onOpenLead: (id: string) => void }) {
+  // Log lines about a lead start with its name ("Dr. Aaron Fleming · Follow-up").
+  // shortcut: matched by name, so two leads with the same name open the first; store the lead id on events if that matters.
+  const byLabel = new Map<string, Lead>();
+  for (const lead of leads) if (!byLabel.has(leadLabel(lead))) byLabel.set(leadLabel(lead), lead);
   return (
     <section className="activity-log">
-      {activity.map((event) => (
+      {activity.map((event) => {
+        const lead = byLabel.get(event.detail.split(" · ")[0]);
+        return (
         <article key={event.id}>
           <span className="activity-mark">
             <ClipboardList size={18} />
           </span>
           <div>
             <h2>{event.action}</h2>
-            <p>{event.detail}</p>
+            <p>{lead ? <button type="button" className="text-link" onClick={() => onOpenLead(lead.id)}>{event.detail}</button> : event.detail}</p>
           </div>
           <time>{event.at}</time>
         </article>
-      ))}
+        );
+      })}
     </section>
   );
 }
 
-function QuickTour({
-  step,
-  onClose,
-  onBack,
-  onNext,
-}: {
-  step: number;
-  onClose: () => void;
-  onBack: () => void;
-  onNext: () => void;
-}) {
-  const steps = [
-    {
-      eyebrow: "YOUR WORKSPACE · 1 OF 3",
-      title: "Your calling space is ready.",
-      body: "Keep your leads, calling queue, and next actions in one calm workspace.",
-      action: "Show my leads",
-    },
-    {
-      eyebrow: "YOUR WORKSPACE · 2 OF 3",
-      title: "Start with a clean list.",
-      body: "Add leads one at a time or import any CSV. You choose which column is the phone, name, and company.",
-      action: "Next stop",
-    },
-    {
-      eyebrow: "YOUR WORKSPACE · 3 OF 3",
-      title: "Choose a lead, then call responsibly.",
-      body: "Open a lead before calling. Connect a selected Twilio line in Settings before any outbound call can be prepared.",
-      action: "Open calling queue",
-    },
+type GuideTarget = "settings" | "leads" | "queue";
+
+function setupSteps(state: State) {
+  const realCalls = state.calls.filter((call) => call.outcome !== "In progress" || "sid" in call);
+  return [
+    { done: Boolean(state.connection), title: "Connect your Twilio account", body: "Settings → Phone numbers: enter your Account SID and Auth Token. They're checked and stored encrypted on the server.", target: "settings" as GuideTarget, action: "Open Settings" },
+    { done: Boolean(state.connection?.selectedNumber), title: "Pick the number leads will see", body: "After connecting, choose one of your Twilio numbers as the caller ID.", target: "settings" as GuideTarget, action: "Open Settings" },
+    { done: true, title: "Choose how you take calls", body: "By default you talk in this app with your microphone and speaker (a headset works best). You can switch to Zoiper or your phone in Settings.", target: "settings" as GuideTarget, action: "Open Settings" },
+    { done: Boolean(state.callbackReachable), title: "Let Twilio reach this app", body: "Works automatically when the app runs on its own web address. On your computer, start a tunnel (for example cloudflared) and put its address in OPEN_DIALER_PUBLIC_URL in .env, then restart.", target: null, action: "" },
+    { done: state.leads.length > 0, title: "Add your leads", body: "Import any CSV and match its columns, or add leads one at a time. Only a phone number is required.", target: "leads" as GuideTarget, action: "Open Leads" },
+    { done: realCalls.length > 0, title: "Make your first call", body: "Open the Dashboard, pick a lead, and press Call. Log the outcome afterwards to move to the next lead.", target: "queue" as GuideTarget, action: "Open Dashboard" },
   ];
-  const current = steps[step];
+}
+
+function SetupGuide({ state, onClose, onGo }: { state: State; onClose: () => void; onGo: (target: GuideTarget) => void }) {
+  const steps = setupSteps(state);
+  const done = steps.filter((step) => step.done).length;
   return (
-    <div className="tour-backdrop" role="presentation">
-      <section className="tour-card" role="dialog" aria-modal="true" aria-labelledby="tour-title">
-        <div className="tour-card__head">
-          <span>{current.eyebrow}</span>
-          <button type="button" onClick={onClose}>Skip tour</button>
-        </div>
-        <Sparkles size={22} aria-hidden="true" />
-        <h2 id="tour-title">{current.title}</h2>
-        <p>{current.body}</p>
-        <div className="tour-card__actions">
-          {step > 0 ? <button type="button" className="quiet-button" onClick={onBack}>Back</button> : <span />}
-          <button type="button" className="primary-button" onClick={onNext}>{current.action} <ChevronRight size={16} /></button>
-        </div>
-        <button type="button" className="tour-explore" onClick={onClose}>I’ll explore on my own</button>
+    <div className="modal-backdrop">
+      <section className="lead-form setup-guide" role="dialog" aria-modal="true" aria-labelledby="setup-guide-title">
+        <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
+        <h2 id="setup-guide-title">Setup guide</h2>
+        <p>{done === steps.length ? "Everything is set up. You're ready to call." : `${done} of ${steps.length} done. Each step updates on its own once it's finished.`}</p>
+        <div className="dash-progress setup-guide__progress"><span><i style={{ width: `${Math.round((done / steps.length) * 100)}%` }} /></span></div>
+        <ol className="setup-steps">
+          {steps.map((step, index) => (
+            <li key={step.title} className={step.done ? "is-done" : undefined}>
+              <span className="setup-steps__mark" aria-hidden="true">{step.done ? <Check size={14} /> : index + 1}</span>
+              <div>
+                <b>{step.title}<span className="sr-only">{step.done ? " (done)" : " (to do)"}</span></b>
+                <small>{step.body}</small>
+              </div>
+              {!step.done && step.target && <button type="button" className="quiet-button" onClick={() => onGo(step.target!)}>{step.action}</button>}
+            </li>
+          ))}
+        </ol>
       </section>
     </div>
   );
@@ -1415,11 +2528,13 @@ function QuickTour({
 
 function Settings({
   connection,
+  bookingUrl,
   onRefresh,
   onNotice,
 }: {
   connection: Connection | null;
-  onRefresh: () => Promise<void>;
+  bookingUrl: string;
+  onRefresh: () => Promise<unknown>;
   onNotice: (message: string) => void;
 }) {
   const [accountSid, setAccountSid] = useState("");
@@ -1427,7 +2542,8 @@ function Settings({
   const [numbers, setNumbers] = useState<NumberOption[]>([]);
   const [selected, setSelected] = useState<NumberOption | null>(null);
   const [busy, setBusy] = useState(false);
-  const [bridgeNumber, setBridgeNumber] = useState(connection?.bridgeNumber || "");
+  const [answerOn, setAnswerOn] = useState<"browser" | "voip" | "sim">(usesAppPhone(connection) ? "browser" : connection!.bridgeNumber!.startsWith("sip:") ? "voip" : "sim");
+  const [bridgeNumber, setBridgeNumber] = useState(usesAppPhone(connection) ? "" : (connection?.bridgeNumber || "").replace(/^sip:/i, ""));
   const [area, setArea] = useState<SettingsArea>("calling");
   const [page, setPage] = useState<SettingsPage>("numbers");
   const validate = async (event: FormEvent) => {
@@ -1493,9 +2609,9 @@ function Settings({
     event.preventDefault();
     setBusy(true);
     try {
-      await api("/api/twilio/connection", { method: "PATCH", body: JSON.stringify({ bridgeNumber }) });
+      await api("/api/twilio/connection", { method: "PATCH", body: JSON.stringify({ bridgeNumber: answerOn === "browser" ? "browser" : answerOn === "voip" ? `sip:${bridgeNumber.trim().replace(/^sip:/i, "")}` : bridgeNumber }) });
       await onRefresh();
-      onNotice("Calling bridge saved. Calls will ring this number before connecting the lead.");
+      onNotice(answerOn === "browser" ? "Saved. You'll talk through this app's microphone and speaker." : answerOn === "voip" ? "Saved. Zoiper will ring first; answer it and the lead is dialed." : "Saved. Your phone will ring first; answer it and the lead is dialed.");
     } catch (error) {
       onNotice(error instanceof Error ? error.message : "Could not save the calling bridge.");
     } finally {
@@ -1506,17 +2622,18 @@ function Settings({
     setArea(nextArea);
     setPage(nextPage);
   };
-  const sections: Record<SettingsArea, { id: SettingsPage; label: string }[]> = {
+  const sections: Record<SettingsArea, { id: SettingsPage; label: string; icon: typeof Phone }[]> = {
     calling: [
-      { id: "numbers", label: "Phone numbers" },
+      { id: "numbers", label: "Phone numbers", icon: Phone },
     ],
     workspace: [
-      { id: "team", label: "Team" },
-      { id: "fields", label: "Custom fields" },
+      { id: "team", label: "Team", icon: Users },
+      { id: "fields", label: "Custom fields", icon: SlidersHorizontal },
+      { id: "booking", label: "Booking link", icon: CalendarPlus },
     ],
     account: [
-      { id: "profile", label: "Profile" },
-      { id: "privacy", label: "Privacy" },
+      { id: "profile", label: "Profile", icon: UserRound },
+      { id: "privacy", label: "Privacy", icon: ShieldCheck },
     ],
   };
   return (
@@ -1532,7 +2649,7 @@ function Settings({
         <aside className="settings-nav" aria-label={`${area} settings`}>
           <span>{area} settings</span>
           {sections[area].map((item) => (
-            <button key={item.id} type="button" className={page === item.id ? "is-active" : ""} onClick={() => setPage(item.id)}>{item.label}</button>
+            <button key={item.id} type="button" className={page === item.id ? "is-active" : ""} onClick={() => setPage(item.id)}><item.icon size={16} aria-hidden="true" />{item.label}</button>
           ))}
         </aside>
         <div className="settings-content">
@@ -1563,18 +2680,44 @@ function Settings({
                 <dd>{connection.selectedNumber}</dd>
               </div>
               <div>
-                <dt>Operator bridge</dt>
-                <dd>{connection.bridgeNumber || "Not configured"}</dd>
+                <dt>You answer on</dt>
+                <dd>{usesAppPhone(connection) ? "This app (microphone and speaker)" : connection.bridgeNumber!.startsWith("sip:") ? `Calling app (${connection.bridgeNumber!.slice(4)})` : `Phone ${connection.bridgeNumber}`}</dd>
               </div>
             </dl>
+            <AccountCheck />
             <form className="bridge-form" onSubmit={saveBridge}>
               <label>
-                Phone to ring before each call
-                <input value={bridgeNumber} onChange={(event) => setBridgeNumber(event.target.value)} placeholder="+15551234567" inputMode="tel" required />
+                How will you take calls?
+                <select value={answerOn} onChange={(event) => { setAnswerOn(event.target.value as "browser" | "voip" | "sim"); setBridgeNumber(""); }}>
+                  <option value="browser">In this app (microphone and speaker)</option>
+                  <option value="voip">On a calling app like Zoiper (VoIP)</option>
+                  <option value="sim">On my phone (SIM card)</option>
+                </select>
               </label>
-              <button className="primary-button" type="submit" disabled={busy}>Save calling bridge</button>
+              {answerOn === "browser" ? (
+                <p className="bridge-form__hint">Press Call and talk straight away through your headset or computer's microphone and speaker. Your browser asks for microphone access the first time.</p>
+              ) : (
+              <label>
+                {answerOn === "voip" ? "Your Zoiper address" : "Your phone number"}
+                <input
+                  value={bridgeNumber}
+                  onChange={(event) => setBridgeNumber(event.target.value)}
+                  placeholder={answerOn === "voip" ? "bayu@yourname.sip.twilio.com" : "+62 812 3456 7890"}
+                  inputMode={answerOn === "voip" ? "email" : "tel"}
+                  autoComplete="off"
+                  spellCheck={false}
+                  required
+                />
+                <small>
+                  {answerOn === "voip"
+                    ? "In Zoiper, open Settings → Accounts. It's your username and domain joined with @. Keep Zoiper open while you call."
+                    : "Include the country code, like +62 for Indonesia. Your phone rings first; answer it and the lead is dialed."}
+                </small>
+              </label>
+              )}
+              <button className="primary-button" type="submit" disabled={busy}>Save</button>
             </form>
-            <button className="quiet-button" onClick={remove}>
+            <button className="quiet-button danger-button" onClick={remove}>
               Remove connection
             </button>
           </div>
@@ -1678,10 +2821,88 @@ function Settings({
       </article>
           </section>
         ) : (
-          <SettingsPanel page={page} connection={connection} onNotice={onNotice} />
+          <SettingsPanel page={page} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} onRefresh={onRefresh} />
         )}
         </div>
       </div>
+    </section>
+  );
+}
+
+// Shows Twilio's own explanation for a failed call (read from its alerts log).
+function TwilioWhy({ callId }: { callId: string }) {
+  const [state, setState] = useState<{ busy: boolean; alerts?: { code: string; message: string; moreInfo: string }[]; error?: string }>({ busy: false });
+  useEffect(() => setState({ busy: false }), [callId]);
+  const ask = async () => {
+    setState({ busy: true });
+    try {
+      const result = await api<{ alerts: { code: string; message: string; moreInfo: string }[] }>(`/api/calls/${callId}/why`);
+      setState({ busy: false, alerts: result.alerts });
+    } catch (cause) {
+      setState({ busy: false, error: cause instanceof Error ? cause.message : "Could not ask Twilio." });
+    }
+  };
+  return (
+    <div className="twilio-why">
+      <button type="button" onClick={() => void ask()} disabled={state.busy}>{state.busy ? "Asking Twilio…" : state.alerts ? "Ask again" : "Ask Twilio why"}</button>
+      {state.error && <p>{state.error}</p>}
+      {state.alerts && (state.alerts.length
+        ? state.alerts.map((alert, index) => <p key={index}><b>Twilio {alert.code}:</b> {alert.message}{alert.moreInfo && <> (<a href={alert.moreInfo} target="_blank" rel="noreferrer">details</a>)</>}</p>)
+        : <p>Twilio has no alert for this call yet. Alerts can take a minute to appear; try again shortly.</p>)}
+    </div>
+  );
+}
+
+type AccountCheckResult = {
+  account: { type?: string; status?: string; name?: string; error?: string };
+  verifiedNumbers: { numbers?: string[]; error?: string };
+  countries: Record<"US", { allowed?: boolean; error?: string }>;
+};
+
+// Read-only check of the connected Twilio account, for people who have its credentials but no Console access.
+function AccountCheck() {
+  const [result, setResult] = useState<AccountCheckResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(await api<AccountCheckResult>("/api/twilio/account-check"));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not check the account.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const trial = result?.account.type === "Trial";
+  const country = (code: "US", name: string) => {
+    const item = result?.countries[code];
+    return <li key={code}><b>Calls to {name}</b><span>{item?.error ? `Couldn't read (${item.error})` : item?.allowed ? "Allowed" : "Not allowed. Ask the account owner to enable it under Voice → Settings → Geographic permissions"}</span></li>;
+  };
+  return (
+    <section className="account-check" aria-label="Calling account check">
+      <div className="account-check__head">
+        <b>Calling account check</b>
+        <button type="button" className="quiet-button" onClick={() => void run()} disabled={busy}>{busy ? "Checking…" : result ? "Check again" : "Check account"}</button>
+      </div>
+      <p>Looks up whether this Twilio account can call US numbers. Read-only: nothing in the account is changed.</p>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      {result && (
+        <ul>
+          <li>
+            <b>Account type</b>
+            <span>{result.account.error ? `Couldn't read (${result.account.error})` : `${result.account.type}${result.account.status && result.account.status !== "active" ? ` (${result.account.status})` : ""}${trial ? ". Trial accounts can only call the verified numbers below." : ". Can call any number its permissions allow."}`}</span>
+          </li>
+          <li>
+            <b>Verified caller IDs</b>
+            <span>{result.verifiedNumbers.error ? `Couldn't read (${result.verifiedNumbers.error})` : trial
+              ? (result.verifiedNumbers.numbers?.length ? `${result.verifiedNumbers.numbers.join(", ")}. On a trial account these are the only numbers you can call.` : "None. On a trial account no number can be called until the owner verifies one.")
+              : `${result.verifiedNumbers.numbers?.length ? `${result.verifiedNumbers.numbers.join(", ")}. ` : ""}Not needed on a full account: these are other numbers the company may show as caller ID, not a limit on who you can call.`}</span>
+          </li>
+          {country("US", "the US")}
+        </ul>
+      )}
     </section>
   );
 }
@@ -1690,11 +2911,16 @@ function SettingsPanel({
   page,
   connection,
   onNotice,
+  bookingUrl,
+  onRefresh,
 }: {
   page: Exclude<SettingsPage, "numbers">;
   connection: Connection | null;
   onNotice: (message: string) => void;
+  bookingUrl: string;
+  onRefresh: () => Promise<unknown>;
 }) {
+  const [booking, setBooking] = useState(bookingUrl);
   const [teamName, setTeamName] = useState(() => localStorage.getItem("open-dialer-team-name") || "");
   const [fieldName, setFieldName] = useState("");
   const [fields, setFields] = useState<string[]>(() => JSON.parse(localStorage.getItem("open-dialer-lead-fields") || "[]"));
@@ -1703,6 +2929,34 @@ function SettingsPanel({
     company: localStorage.getItem("open-dialer-company") || "",
     phone: localStorage.getItem("open-dialer-phone") || "",
   }));
+  if (page === "booking") {
+    const save = async (event: FormEvent) => {
+      event.preventDefault();
+      try {
+        await api("/api/settings", { method: "PATCH", body: JSON.stringify({ bookingUrl: booking }) });
+        await onRefresh();
+        onNotice(booking.trim() ? "Booking link saved. Book a call opens it during a call." : "Booking link removed.");
+      } catch (error) {
+        onNotice(error instanceof Error ? error.message : "Couldn't save the booking link.");
+      }
+    };
+    return (
+      <section className="settings-panel">
+        <h2>Booking link</h2>
+        <p>Paste your Calendly or Cal.com scheduling link. During a call, Book a call opens it so you can pick a time with the lead.</p>
+        <form className="settings-form" onSubmit={save}>
+          <label>
+            Calendly or Cal.com link
+            <input value={booking} onChange={(event) => setBooking(event.target.value)} placeholder="https://calendly.com/your-name/30min" inputMode="url" autoComplete="off" spellCheck={false} />
+          </label>
+          <div className="settings-form-actions">
+            <button className="primary-button" type="submit">Save booking link</button>
+            {bookingUrl && <button type="button" className="quiet-button" onClick={() => openBooking(bookingUrl, "").catch((error) => onNotice(error instanceof Error ? error.message : "Couldn't open the booking page."))}>Preview</button>}
+          </div>
+        </form>
+      </section>
+    );
+  }
   if (page === "team") {
     return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Team</h2><p>Name your workspace now. Member invitations and role management stay off until multi-user authentication is enabled.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); localStorage.setItem("open-dialer-team-name", teamName); onNotice("Workspace name saved in this browser."); }}><label>Workspace name<input value={teamName} onChange={(event) => setTeamName(event.target.value)} placeholder="Your company or team" /></label><button className="primary-button" type="submit">Save workspace</button></form></section>;
   }
@@ -1717,12 +2971,18 @@ function SettingsPanel({
 
 function LeadForm({
   lead,
+  campaigns = [],
+  defaultCampaign = "",
   onClose,
   onSaved,
   onDeleted,
+  onImport,
 }: {
   lead?: Lead;
+  campaigns?: string[];
+  defaultCampaign?: string;
   onClose: () => void;
+  onImport?: () => void;
   onSaved: () => Promise<void>;
   onDeleted?: () => Promise<void>;
 }) {
@@ -1737,7 +2997,13 @@ function LeadForm({
     try {
       await api(editing ? `/api/leads/${lead!.id}` : "/api/leads", {
         method: editing ? "PATCH" : "POST",
-        body: JSON.stringify(Object.fromEntries(form)),
+        body: JSON.stringify((() => {
+          const body: Record<string, unknown> = Object.fromEntries(form);
+          // Editing takes a comma-separated list of campaigns; adding takes one.
+          if (typeof body.campaigns === "string") body.campaigns = body.campaigns.split(",").map((name) => name.trim()).filter(Boolean);
+          if (body.value === "") delete body.value;
+          return body;
+        })()),
       });
       await onSaved();
     } catch (cause) {
@@ -1766,6 +3032,11 @@ function LeadForm({
         </button>
         <h2 id="add-lead-title">{editing ? "Edit lead" : "Add a lead"}</h2>
         <p>{editing ? "Fix anything that is wrong. Only the phone number is required." : "Only the phone number is required."}</p>
+        {!editing && onImport && (
+          <button type="button" className="lead-form__import" onClick={onImport}>
+            <FileUp size={16} aria-hidden="true" /> Adding a lot? Import a CSV instead
+          </button>
+        )}
         {error && (
           <p className="form-error" role="alert">
             {error}
@@ -1774,6 +3045,10 @@ function LeadForm({
         <label>
           Phone
           <input name="phone" type="tel" required placeholder="+1 555 0100" defaultValue={lead?.phone} />
+        </label>
+        <label>
+          Extension (optional)
+          <input name="extension" inputMode="numeric" placeholder="e.g. 10257" defaultValue={lead?.extension} />
         </label>
         <label>
           Contact name (optional)
@@ -1787,6 +3062,24 @@ function LeadForm({
           Role
           <input name="role" placeholder="e.g. Receptionist, Superintendent" defaultValue={blank(lead?.role, "Contact")} />
         </label>
+        {editing ? (
+          <>
+            <label>
+              Campaigns (separate with commas)
+              <input name="campaigns" defaultValue={(lead?.campaigns || []).join(", ")} placeholder="NC school districts" />
+            </label>
+            <label>
+              Deal value (optional)
+              <input name="value" type="number" min="0" step="1" inputMode="numeric" defaultValue={lead?.value ?? ""} placeholder="0" />
+            </label>
+          </>
+        ) : (
+          <label>
+            Campaign (optional)
+            <input name="campaign" defaultValue={defaultCampaign} placeholder="NC school districts" list="lead-campaign-options" autoComplete="off" />
+            <datalist id="lead-campaign-options">{campaigns.map((name) => <option key={name} value={name} />)}</datalist>
+          </label>
+        )}
         <label>
           Time zone
           <input name="timezone" placeholder="America/New_York" defaultValue={blank(lead?.timezone, "Unknown")} list="timezone-options" />
