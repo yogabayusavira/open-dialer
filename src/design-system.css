@@ -339,11 +339,6 @@ html[data-theme="light"] {
 .dash-banner__actions { display: flex; gap: var(--space-2); }
 .dash-banner__actions button { display: inline-flex; align-items: center; gap: var(--space-2); min-height: 44px; }
 .dash-banner__body { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: var(--space-5); padding-top: var(--space-5); border-top: 1px solid var(--color-border); }
-.dash-window { display: flex; align-items: flex-start; gap: var(--space-3); min-width: 0; }
-.dash-window svg { flex: none; margin-top: 2px; color: var(--color-accent-text); }
-.dash-window b { display: block; color: var(--color-text); font-size: var(--font-size-title); font-weight: 600; font-variant-numeric: tabular-nums; line-height: var(--line-height-tight); }
-.dash-window span { display: block; margin-top: var(--space-2); color: var(--color-text-muted); font-size: var(--font-size-body); line-height: var(--line-height-body); }
-.dash-window.is-closed svg, .dash-window.is-closed span { color: var(--color-danger); }
 .dash-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4); margin: 0; }
 .dash-stats div { min-width: 0; padding-left: var(--space-4); border-left: 1px solid var(--color-border); }
 .dash-stats dt { color: var(--color-text-muted); font-size: var(--font-size-label); font-weight: 600; letter-spacing: 0; text-transform: none; }
@@ -466,7 +461,6 @@ html[data-theme="light"] .calls-empty button { color: var(--color-link); }
 .lead-status.is-ready svg { color: var(--color-positive); }
 .setup-steps li.is-done .setup-steps__mark { border-color: var(--color-positive-border); background: var(--color-positive-subtle); color: var(--color-positive); }
 .in-call-bar__dot.is-live { background: var(--color-positive); box-shadow: 0 0 0 4px var(--color-positive-subtle); }
-.dash-window:not(.is-closed) svg { color: var(--color-positive); }
 html[data-theme="light"] .calls-limit { border-color: var(--color-border); background: var(--color-surface-raised); color: var(--color-text-muted); }
 html[data-theme="light"] .calls-limit strong { color: var(--color-text); }
 
@@ -627,6 +621,9 @@ html[data-theme="light"] .dash-banner .quiet-button:hover { background: var(--co
 .brand-logo { display: block; width: 144px; margin-left: -2px; /* the image has a little built-in margin; this lines the phone up with the nav icons */ aspect-ratio: 480 / 172; background: url("/logo-purple.png") left center / contain no-repeat; }
 html[data-theme="light"] .brand-logo { background-image: url("/logo.png"); }
 html[data-theme="light"] .login-card .brand-logo { background-image: url("/logo-ink.png"); }
+/* Centered on the sign-in card; the sidebar's -2px nav alignment doesn't apply here. */
+.login-card .brand { justify-content: center; padding: 0; }
+.login-card .brand-logo { margin-left: 0; background-position: center; }
 
 /* Convert is a quiet action on every row; amber stays for the one main action per screen. */
 .lead-row-actions .convert-button { border: 1px solid var(--color-border-strong); background: var(--color-surface); color: var(--color-text); }
@@ -643,9 +640,6 @@ b, strong { font-weight: 600; }
 .settings-form label { color: var(--color-text); }
 :where(h1, h2, h3, h4) { font-weight: 600; }
 /* Banner left column: lead time at the top, metrics + progress pinned to the bottom so it matches the map's height. */
-.dash-banner__body { align-items: stretch; }
-.dash-banner__main { grid-template-rows: auto 1fr auto; }
-.dash-banner__main > .dash-stats { align-self: end; }
 /* Sign-in screen follows the theme tokens (it was hardcoded dark, so light mode showed a white field on a dark card). */
 .login-page { background: var(--color-canvas); }
 .login-card { border-color: var(--color-border); background: var(--color-surface); box-shadow: var(--shadow-card); }
@@ -966,3 +960,94 @@ html[data-theme="light"] { --fu-1: #2b6cb0; --fu-2: #b7791f; --fu-3: #c2410c; --
 /* Workspace avatar: Guramo's notionists face on a light disc, in both themes. */
 .account-summary__avatar { overflow: hidden; padding: 0 !important; border-radius: 50% !important; }
 .account-summary__avatar img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+/* Accounts: sign-up switch, team list, profile. */
+.field-hint { color: var(--color-text-faint); font-size: var(--font-size-label); font-weight: 500; }
+.login-switch { margin: 0; color: var(--color-text-muted); font-size: var(--font-size-meta); text-align: center; }
+.settings-form select, .team-list select, .lead-bulk-assign { min-height: 36px; padding: 0 var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-size: var(--font-size-meta); }
+.settings-form select { min-height: 40px; }
+.settings-panel h3 { margin: var(--space-5) 0 var(--space-2); color: var(--color-text); font-size: var(--font-size-body); }
+.team-list { display: grid; gap: 0; margin: var(--space-3) 0 0; padding: 0; list-style: none; border: 1px solid var(--color-border); border-radius: var(--radius-surface); }
+.team-list li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); padding: var(--space-3) var(--space-4); }
+.team-list li + li { border-top: 1px solid var(--color-border); }
+.team-list .account-summary__avatar { display: inline-grid; flex: none; width: 32px; height: 32px; }
+.team-list li > span:nth-child(2) { display: grid; flex: 1; min-width: 160px; }
+.team-list b { color: var(--color-text); font-size: var(--font-size-body); }
+.team-list small { color: var(--color-text-muted); font-size: var(--font-size-meta); }
+.team-list em { color: var(--color-text-muted); font-size: var(--font-size-meta); font-style: normal; }
+.danger-link { color: var(--color-danger); }
+.team-issued { margin-top: var(--space-3); }
+.team-issued span { flex: 1; }
+.team-issued code { padding: 1px 6px; border-radius: 4px; background: var(--color-surface); color: var(--color-text); font-size: var(--font-size-body); user-select: all; }
+.team-add { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); align-items: end; max-width: none; }
+.profile-sign-out { display: inline-flex; align-items: center; gap: var(--space-2); margin-top: var(--space-5); }
+.lead-assignee { display: block; margin-top: 2px; color: var(--color-text-faint); font-size: var(--font-size-label); }
+.team-list .text-link { font-size: var(--font-size-meta); }
+.team-issued code { display: block; margin-top: var(--space-1); overflow-wrap: anywhere; user-select: all; }
+.login-sent { margin: 0; padding: var(--space-3); border-radius: var(--radius-control); background: var(--color-surface-raised); color: var(--color-text); font-size: var(--font-size-meta); }
+
+.calls-chart__empty { position: absolute; inset: 0 0 34px; display: grid; place-items: center; margin: 0; color: var(--color-text-muted); font-size: var(--font-size-meta); text-align: center; pointer-events: none; }
+.calls-chart__plot svg { height: auto; }
+
+/* Analytics page */
+.analytics-page { display: grid; gap: var(--space-5); }
+.analytics-page .calls-chart { margin-top: 0; }
+.analytics-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--space-4); }
+.analytics-totals { display: flex; flex-wrap: wrap; gap: var(--space-6, 32px); margin: 0; }
+.analytics-totals dt { color: var(--color-text-muted); font-size: var(--font-size-meta); font-weight: 600; }
+.analytics-totals dd { margin: var(--space-1) 0 0; color: var(--color-text); font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.segmented { display: inline-flex; padding: 3px; border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-surface); }
+.segmented button { min-height: 32px; padding: 0 var(--space-3); border: 0; border-radius: calc(var(--radius-control) - 2px); background: none; color: var(--color-text-muted); font: inherit; font-size: var(--font-size-meta); font-weight: 600; cursor: pointer; }
+.segmented button.is-active { background: var(--color-surface-raised); color: var(--color-text); box-shadow: 0 0 0 1px var(--color-border-strong); }
+.analytics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr)); gap: var(--space-4); }
+.analytics-card { display: grid; align-content: start; gap: var(--space-3); padding: var(--space-5); border: 1px solid var(--color-border); border-radius: var(--radius-surface); background: var(--color-surface); box-shadow: var(--shadow-card); }
+.analytics-card h2 { margin: 0; color: var(--color-text); font-size: var(--font-size-body); }
+.analytics-bars { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.analytics-bars li { display: grid; grid-template-columns: 120px minmax(0, 1fr) 36px; align-items: center; gap: var(--space-3); font-size: var(--font-size-meta); }
+.analytics-bars span { color: var(--color-text); }
+.analytics-bars i { height: 10px; border-radius: 999px; background: var(--color-surface-raised); }
+.analytics-bars b { display: block; height: 100%; min-width: 4px; border-radius: 999px; background: var(--chart-conversation); }
+.analytics-bars em { color: var(--color-text); font-style: normal; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.analytics-empty { margin: 0; color: var(--color-text-muted); font-size: var(--font-size-meta); }
+.analytics-table { width: 100%; border-collapse: collapse; font-size: var(--font-size-meta); }
+.analytics-table th { padding: var(--space-2) 0; border-bottom: 1px solid var(--color-border); color: var(--color-text-muted); font-weight: 600; text-align: left; }
+.analytics-table td { padding: var(--space-2) 0; border-bottom: 1px solid var(--color-border); color: var(--color-text); font-variant-numeric: tabular-nums; }
+.analytics-table :is(th, td):not(:first-child) { text-align: right; }
+
+/* Banner: 14 days of calls in one slim row above the four stats. Empty days keep a faint track. */
+.call-strip { display: grid; gap: var(--space-2); }
+.call-strip p { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-1) var(--space-3); margin: 0; color: var(--color-text-muted); font-size: var(--font-size-label); font-weight: 500; }
+.call-strip p .text-link { font-size: inherit; }
+.call-strip__bars { display: grid; grid-template-columns: repeat(14, minmax(0, 1fr)); gap: 4px; height: 24px; border-bottom: 1px solid var(--color-border); }
+.call-strip__bars i { display: flex; align-items: flex-end; }
+.call-strip__bars b { display: block; width: 100%; border-radius: 2px 2px 0 0; background: var(--color-border-strong); }
+.call-strip__bars i.is-today b { background: var(--color-text-muted); }
+
+/* Banner hierarchy: the date and zone times are quiet context; the four numbers are the loudest text;
+   the map with its daylight strip is the one place the accent lives. */
+.dash-banner__head { align-items: center; }
+.dash-banner h1.dash-date { margin: 0; color: var(--color-text); font-size: var(--font-size-body); font-weight: 500; letter-spacing: 0; line-height: 1.4; }
+.dash-date span { color: var(--color-text-muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.zone-clocks { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-5); margin: 0; padding: 0; list-style: none; color: var(--color-text-muted); font-size: var(--font-size-meta); }
+.zone-clocks li { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.zone-clocks i { width: 6px; height: 6px; border-radius: 50%; background: var(--color-text-faint); }
+.zone-clocks li.is-open i { background: var(--color-positive); }
+.zone-clocks b { color: var(--color-text); font-weight: 500; font-variant-numeric: tabular-nums; }
+.zone-clocks li.is-open span { color: var(--color-positive); }
+.zone-clocks li.is-current b { text-decoration: underline; text-decoration-color: var(--color-border-strong); text-underline-offset: 3px; }
+.dash-banner__body { align-items: stretch; padding-top: 0; border-top: 0; }
+/* Zones line up with the top of the map, the numbers with its bottom. */
+.dash-banner__main { grid-template-rows: auto 1fr auto auto; gap: var(--space-5); }
+.dash-banner__main > .call-strip { align-self: end; }
+.dash-stats dt { font-size: var(--font-size-meta); font-weight: 500; }
+.dash-stats dd { margin-top: var(--space-1); font-size: 28px; font-weight: 500; line-height: 1.15; }
+.dash-progress > span { height: 2px; background: var(--color-border); }
+.dash-progress i { background: var(--color-text-muted); }
+html[data-theme="light"] .dash-banner .dash-banner__main .dash-progress i { background: var(--color-text-muted); }
+.dash-where figcaption { display: grid; gap: 2px; }
+.dash-where figcaption b { color: var(--color-text); font-weight: 500; }
+.dash-where figcaption .is-open { color: var(--color-positive); }
+.dash-next b { color: var(--color-text); font-weight: 600; }
+/* The map's width sets its height; this keeps it level with the left column. */
+.dash-banner__body { grid-template-columns: minmax(0, 1fr) 224px; }
+@media (max-width: 640px) { .dash-banner__body { grid-template-columns: minmax(0, 1fr); } .dash-where { max-width: 260px; } }

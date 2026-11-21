@@ -4,8 +4,10 @@ import {
   createHash,
   createHmac,
   randomBytes,
+  scryptSync,
   timingSafeEqual,
 } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   createReadStream,
   existsSync,
@@ -27,8 +29,11 @@ const distDir = join(root, "dist");
 const databaseUrl = process.env.DATABASE_URL?.trim();
 const database = databaseUrl ? new pg.Pool({ connectionString: databaseUrl }) : null;
 let databaseReady;
-const sessions = new Map();
 const loginAttempts = new Map();
+// Each request runs with its signed-in user and their company's workspace id; storage reads and writes use it.
+const requestContext = new AsyncLocalStorage();
+// The workspace that existed before accounts keeps its original row id, so its data didn't have to move.
+const legacyWorkspace = "workspace";
 const sessionLifetimeMs = 12 * 60 * 60 * 1000;
 const rememberedSessionLifetimeMs = 30 * 24 * 60 * 60 * 1000;
 const loginWindowMs = 15 * 60 * 1000;
@@ -184,10 +189,19 @@ function readFileState() {
   }
 }
 
+function currentWorkspace() {
+  const ws = requestContext.getStore()?.ws;
+  if (!ws) throw new Error("Sign in to access this workspace.");
+  return ws;
+}
+function workspaceFile(ws) {
+  return ws === legacyWorkspace ? storePath : join(storeDir, `${ws}.json`);
+}
 async function readState() {
+  const ws = currentWorkspace();
   const client = await databaseClient();
   if (client) {
-    const query = () => client.query("SELECT payload FROM open_dialer_state WHERE id = $1", ["workspace"]);
+    const query = () => client.query("SELECT payload FROM open_dialer_state WHERE id = $1", [ws]);
     // A garbled read over the network surfaces as a JSON parse error; retry once before failing.
     const result = await query().catch((error) => {
       if (!(error instanceof SyntaxError)) throw error;
@@ -195,12 +209,16 @@ async function readState() {
       return query();
     });
     if (result.rows[0]) return normalizeState(result.rows[0].payload);
+    if (ws !== legacyWorkspace) return normalizeState({ leads: [], activity: [] });
     const legacyState = readFileState();
     if (legacyState) {
       await writeState(legacyState);
       return legacyState;
     }
     return structuredClone(defaultState);
+  }
+  if (ws !== legacyWorkspace) {
+    try { return normalizeState(JSON.parse(readFileSync(workspaceFile(ws), "utf8"))); } catch { return normalizeState({ leads: [], activity: [] }); }
   }
   return readFileState() || structuredClone(defaultState);
 }
@@ -225,18 +243,24 @@ async function writeBlob(id, payload) {
   writeFileSync(blobPath(id), JSON.stringify(payload), { mode: 0o600 });
 }
 let stateQueue = Promise.resolve();
-// Runs read-change-save steps one at a time, so requests arriving together (like Twilio's call reports)
-// can't overwrite each other's changes. Return false from `change` to skip saving.
+// Runs changes one at a time, so two users (or Twilio's call reports) can't overwrite each other's saves.
+// Every changing API request runs inside this; nested calls from the same request run straight through.
 // shortcut: in-process only; several server instances would need a database row lock.
+function exclusive(fn) {
+  const store = requestContext.getStore();
+  if (store?.locked) return fn();
+  const run = stateQueue.then(() => requestContext.run({ ...store, locked: true }, fn));
+  stateQueue = run.catch(() => {});
+  return run;
+}
+// Return false from `change` to skip saving.
 function updateState(change) {
-  const run = stateQueue.then(async () => {
+  return exclusive(async () => {
     const state = await readState();
     const result = await change(state);
     if (result !== false) await writeState(state);
     return result;
   });
-  stateQueue = run.catch(() => {});
-  return run;
 }
 async function writeState(state) {
   const client = await databaseClient();
@@ -248,12 +272,139 @@ async function writeState(state) {
         ON CONFLICT (id) DO UPDATE
         SET payload = EXCLUDED.payload, updated_at = NOW()
       `,
-      ["workspace", JSON.stringify(state)],
+      [currentWorkspace(), JSON.stringify(state)],
     );
     return;
   }
   mkdirSync(storeDir, { recursive: true });
-  writeFileSync(storePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+  writeFileSync(workspaceFile(currentWorkspace()), JSON.stringify(state, null, 2), { mode: 0o600 });
+}
+// Users and companies, kept in one record of their own. Passwords are stored only as scrypt hashes.
+async function readAccounts() {
+  const stored = await readBlob("accounts");
+  return { users: Array.isArray(stored?.users) ? stored.users : [], workspaces: Array.isArray(stored?.workspaces) ? stored.workspaces : [] };
+}
+function updateAccounts(change) {
+  return exclusive(async () => {
+    const accounts = await readAccounts();
+    const result = await change(accounts);
+    if (result !== false) await writeBlob("accounts", accounts);
+    return result;
+  });
+}
+function hashPassword(password) {
+  const salt = randomBytes(16);
+  return `scrypt$${salt.toString("base64")}$${scryptSync(password, salt, 64).toString("base64")}`;
+}
+function checkPassword(password, stored) {
+  const [kind, salt, hash] = String(stored || "").split("$");
+  if (kind !== "scrypt" || !salt || !hash) return false;
+  return timingSafeEqual(scryptSync(String(password), Buffer.from(salt, "base64"), 64), Buffer.from(hash, "base64"));
+}
+function validPassword(password) {
+  return typeof password === "string" && password.length >= 10 && password.length <= 200;
+}
+function cleanEmail(value) {
+  const email = String(value || "").trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 200 ? email : "";
+}
+function publicUser(user, withEmail = true) {
+  return { id: user.id, name: user.name, role: user.role, ...(withEmail ? { email: user.email, pending: !user.passwordHash } : {}), ...(user.admin ? { admin: true } : {}) };
+}
+// Sign-in links (invites and password resets) go in the URL; only their hash is stored.
+const linkLifetimeMs = { invite: 7 * 24 * 60 * 60 * 1000, reset: 60 * 60 * 1000 };
+function tokenHash(token) {
+  return createHash("sha256").update(String(token || "")).digest("hex");
+}
+function giveLink(user, kind) {
+  const token = randomBytes(32).toString("base64url");
+  user.link = { hash: tokenHash(token), kind, expiresAt: Date.now() + linkLifetimeMs[kind] };
+  return token;
+}
+function userForLink(accounts, token) {
+  const hash = tokenHash(token);
+  return accounts.users.find((item) => item.link && item.link.expiresAt > Date.now() && safeEqual(item.link.hash, hash)) || null;
+}
+// Links in emails use the configured public address, never the request's Host header.
+function appUrl(req) {
+  const configured = process.env.OPEN_DIALER_PUBLIC_URL?.trim().replace(/\/$/, "");
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") throw new Error("Set OPEN_DIALER_PUBLIC_URL so sign-in links point at this app.");
+  return `http://${req.headers.host}`;
+}
+function emailReady() {
+  return Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL);
+}
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+}
+// Sends one email through Resend. Returns false when email isn't set up, so the caller can show the link instead.
+async function sendEmail(to, subject, lines, button) {
+  if (!emailReady()) return false;
+  const html = `<div style="font-family:system-ui,sans-serif;font-size:15px;line-height:1.5;color:#111">${lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}<p><a href="${escapeHtml(button.url)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#4a0d72;color:#fff;text-decoration:none;font-weight:600">${escapeHtml(button.label)}</a></p><p style="color:#666;font-size:13px">Or paste this link into your browser: ${escapeHtml(button.url)}</p></div>`;
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { authorization: `Bearer ${process.env.RESEND_API_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify({ from: process.env.RESEND_FROM_EMAIL, to: [to], subject, html, text: `${lines.join("\n\n")}\n\n${button.label}: ${button.url}` }),
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    throw new Error(`The email didn't send (Resend: ${detail.message || response.status}).`);
+  }
+  return true;
+}
+async function sendInvite(req, user, token, invitedBy, company) {
+  const url = `${appUrl(req)}/#welcome/${token}`;
+  return emailOrLink(url, () => sendEmail(user.email, `${invitedBy} invited you to ${company} on Open Dialer`, [`Hi ${user.name},`, `${invitedBy} added you to ${company} on Open Dialer. Set a password to sign in. This link works for 7 days.`], { label: "Set your password", url }));
+}
+async function sendReset(req, user, token) {
+  const url = `${appUrl(req)}/#welcome/${token}`;
+  return emailOrLink(url, () => sendEmail(user.email, "Reset your Open Dialer password", [`Hi ${user.name},`, "Use this link to choose a new password. It works for 1 hour. If you didn't ask for this, you can ignore this email."], { label: "Choose a new password", url }));
+}
+// If the email can't go out (not set up, or Resend refuses), hand back the link so the owner can pass it on.
+async function emailOrLink(url, send) {
+  try {
+    if (await send()) return { emailed: true };
+    return { emailed: false, link: url };
+  } catch (error) {
+    console.error(`[open-dialer] ${error.message}`);
+    return { emailed: false, link: url, emailError: error.message };
+  }
+}
+function currentUser() {
+  return requestContext.getStore()?.user || null;
+}
+function isOwner() {
+  return currentUser()?.role === "owner";
+}
+// Callers only see leads assigned to them; owners see the whole workspace.
+function canSee(lead) {
+  return Boolean(lead) && (isOwner() || lead.assignedTo === currentUser()?.id);
+}
+function findLead(state, id) {
+  const lead = state.leads.find((item) => item.id === id);
+  return canSee(lead) ? lead : undefined;
+}
+// What one user gets from GET /api/state.
+function visibleState(state) {
+  if (isOwner()) return state;
+  const leadIds = new Set(state.leads.filter(canSee).map((lead) => lead.id));
+  const campaigns = new Set(state.leads.filter(canSee).flatMap((lead) => lead.campaigns || []));
+  return {
+    ...state,
+    leads: state.leads.filter(canSee),
+    calls: state.calls.filter((call) => leadIds.has(call.leadId)),
+    opportunities: state.opportunities.filter((item) => leadIds.has(item.leadId)),
+    tasks: state.tasks.filter((task) => task.userId === currentUser().id),
+    campaignSettings: Object.fromEntries(Object.entries(state.campaignSettings).filter(([name]) => campaigns.has(name))),
+    activity: [],
+    dncNumbers: [],
+  };
+}
+// Blob ids for the original workspace stay as they were; other companies' are prefixed with their id.
+function scopedBlob(id) {
+  const ws = currentWorkspace();
+  return ws === legacyWorkspace ? id : `${ws}:${id}`;
 }
 function safeState(state) {
   const { authToken, tokenCiphertext, iv, tag, apiKeySecret, ...connection } =
@@ -393,15 +544,16 @@ function publicOrigin(req) {
   return `${protocol}://${req.headers.host}`;
 }
 function voiceToken(leadId, expiresAt) {
-  const payload = `${leadId}.${expiresAt}`;
+  const payload = `${currentWorkspace()}.${leadId}.${expiresAt}`;
   return `${payload}.${createHmac("sha256", encryptionKey()).update(payload).digest("base64url")}`;
 }
-function validVoiceToken(token, leadId) {
-  const [tokenLeadId, expiresAt, signature] = String(token || "").split(".");
-  if (tokenLeadId !== leadId || !expiresAt || Number(expiresAt) < Date.now() || Number(expiresAt) > Date.now() + 11 * 60 * 1000 || !signature) return false;
-  const payload = `${tokenLeadId}.${expiresAt}`;
+// Returns the token's workspace when it is valid for this lead, otherwise null.
+function voiceTokenWorkspace(token, leadId) {
+  const [ws, tokenLeadId, expiresAt, signature] = String(token || "").split(".");
+  if (!ws || tokenLeadId !== leadId || !expiresAt || Number(expiresAt) < Date.now() || Number(expiresAt) > Date.now() + 11 * 60 * 1000 || !signature) return null;
+  const payload = `${ws}.${tokenLeadId}.${expiresAt}`;
   const expected = createHmac("sha256", encryptionKey()).update(payload).digest("base64url");
-  return safeEqual(signature, expected);
+  return safeEqual(signature, expected) ? ws : null;
 }
 function twilioAuthHeader(connection) {
   return `Basic ${Buffer.from(`${connection.accountSid}:${unseal(connection)}`).toString("base64")}`;
@@ -445,8 +597,15 @@ function voiceAccessToken({ accountSid, keySid, keySecret, appSid, identity }) {
   return `${header}.${payload}.${signature}`;
 }
 const operatorIdentity = "operator";
-function statusToken(leadId) {
-  return createHmac("sha256", encryptionKey()).update(`call-status:${leadId}`).digest("base64url");
+function statusToken(ws, leadId) {
+  return createHmac("sha256", encryptionKey()).update(`call-status:${ws}:${leadId}`).digest("base64url");
+}
+function statusUrlFor(req, leadId) {
+  const url = new URL("/api/twilio/voice/status", publicOrigin(req));
+  url.searchParams.set("ws", currentWorkspace());
+  url.searchParams.set("leadId", leadId);
+  url.searchParams.set("token", statusToken(currentWorkspace(), leadId));
+  return url;
 }
 function getFormBody(req) {
   return new Promise((resolve, reject) => {
@@ -525,9 +684,6 @@ function getBody(req) {
     req.on("error", reject);
   });
 }
-function configuredAdminPassword() {
-  return process.env.OPEN_DIALER_ADMIN_PASSWORD || null;
-}
 function cookies(req) {
   return Object.fromEntries(
     (req.headers.cookie || "")
@@ -541,52 +697,27 @@ function safeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && timingSafeEqual(a, b);
 }
-function isAuthenticated(req) {
-  const password = configuredAdminPassword();
-  if (!password) return process.env.NODE_ENV !== "production";
-  const token = cookies(req).open_dialer_session;
-  const session = token && sessions.get(token);
-  if (session && session.expiresAt > Date.now()) return true;
-  if (token) sessions.delete(token);
-  const remembered = cookies(req).open_dialer_remember;
-  const [expiresAt, signature] = remembered?.split(".") || [];
-  if (!/^\d{13}$/.test(expiresAt || "") || !signature) return false;
-  if (Number(expiresAt) <= Date.now()) return false;
-  const expected = createHmac("sha256", password)
-    .update(`open-dialer-remember:${expiresAt}`)
-    .digest("base64url");
-  return safeEqual(signature, expected);
+function sessionSignature(payload) {
+  return createHmac("sha256", encryptionKey()).update(`open-dialer-session:${payload}`).digest("base64url");
+}
+async function sessionUser(req) {
+  const [userId, expiresAt, version, signature] = String(cookies(req).open_dialer_session || "").split(".");
+  if (!userId || !/^\d{13}$/.test(expiresAt || "") || Number(expiresAt) <= Date.now() || !signature) return null;
+  if (!safeEqual(signature, sessionSignature(`${userId}.${expiresAt}.${version}`))) return null;
+  const user = (await readAccounts()).users.find((item) => item.id === userId);
+  return user && String(user.sessionVersion || 0) === version ? user : null;
 }
 function cookieAttributes(maxAge) {
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
   return `HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure}`;
 }
-function setSession(res, remember = false) {
-  if (remember) {
-    const expiresAt = String(Date.now() + rememberedSessionLifetimeMs);
-    const signature = createHmac("sha256", configuredAdminPassword())
-      .update(`open-dialer-remember:${expiresAt}`)
-      .digest("base64url");
-    res.setHeader("set-cookie", [
-      `open_dialer_remember=${expiresAt}.${signature}; ${cookieAttributes(rememberedSessionLifetimeMs / 1000)}`,
-      `open_dialer_session=; ${cookieAttributes(0)}`,
-    ]);
-    return;
-  }
-  const token = randomBytes(32).toString("base64url");
-  sessions.set(token, { expiresAt: Date.now() + sessionLifetimeMs });
-  res.setHeader("set-cookie", [
-    `open_dialer_session=${token}; ${cookieAttributes(sessionLifetimeMs / 1000)}`,
-    `open_dialer_remember=; ${cookieAttributes(0)}`,
-  ]);
+function setSession(res, user, remember = false) {
+  const lifetime = remember ? rememberedSessionLifetimeMs : sessionLifetimeMs;
+  const payload = `${user.id}.${Date.now() + lifetime}.${user.sessionVersion || 0}`;
+  res.setHeader("set-cookie", `open_dialer_session=${payload}.${sessionSignature(payload)}; ${cookieAttributes(lifetime / 1000)}`);
 }
-function clearSession(req, res) {
-  const token = cookies(req).open_dialer_session;
-  if (token) sessions.delete(token);
-  res.setHeader("set-cookie", [
-    `open_dialer_session=; ${cookieAttributes(0)}`,
-    `open_dialer_remember=; ${cookieAttributes(0)}`,
-  ]);
+function clearSession(res) {
+  res.setHeader("set-cookie", [`open_dialer_session=; ${cookieAttributes(0)}`, `open_dialer_remember=; ${cookieAttributes(0)}`]);
 }
 function requestKey(req) {
   return req.socket.remoteAddress || "unknown";
@@ -651,19 +782,40 @@ createServer(async (req, res) => {
       req.url || "/",
       `http://${req.headers.host || "localhost"}`,
     );
+    const store = { ws: null, user: null };
+    if (url.pathname.startsWith("/api/") && !url.pathname.startsWith("/api/twilio/voice/")) {
+      store.user = await sessionUser(req);
+      store.ws = store.user?.workspace || null;
+    }
+    // Every request that changes something waits its turn, so two users can't overwrite each other.
+    const changes = url.pathname.startsWith("/api/") && req.method !== "GET" && !url.pathname.startsWith("/api/twilio/voice/");
+    await requestContext.run(store, () => (changes ? exclusive(() => route(req, res, url)) : route(req, res, url)));
+  } catch (error) {
+    json(res, 400, {
+      error:
+        error instanceof Error ? error.message : "Unexpected server error.",
+    });
+  }
+}).listen(port, "0.0.0.0", () => console.log(`Open Dialer v2 listening on ${port}`));
+
+async function route(req, res, url) {
     if (url.pathname === "/api/twilio/voice/connect" && req.method === "GET") {
       const leadId = url.searchParams.get("leadId");
-      const token = url.searchParams.get("token");
+      const ws = voiceTokenWorkspace(url.searchParams.get("token"), leadId);
+      if (!ws) return twiml(res, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Hangup/></Response>");
+      requestContext.getStore().ws = ws;
       const state = await readState();
       const lead = state.leads.find((item) => item.id === leadId);
-      if (!lead || lead.dnc || !validVoiceToken(token, lead.id))
+      if (!lead || lead.dnc)
         return twiml(res, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Hangup/></Response>");
       return twiml(res, `<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId="${escapeXml(state.connection?.selectedNumber || "")}"><Number${lead.extension ? ` sendDigits="wwww${extensionDigits(lead.extension)}"` : ""}>${escapeXml(lead.phone)}</Number></Dial></Response>`);
     }
     if (url.pathname === "/api/twilio/voice/status" && req.method === "POST") {
       const leadId = url.searchParams.get("leadId") || "";
       const token = url.searchParams.get("token") || "";
-      if (!leadId || !safeEqual(token, statusToken(leadId))) return json(res, 403, { error: "Invalid status token." });
+      const ws = url.searchParams.get("ws") || "";
+      if (!leadId || !ws || !safeEqual(token, statusToken(ws, leadId))) return json(res, 403, { error: "Invalid status token." });
+      requestContext.getStore().ws = ws;
       const report = await getFormBody(req);
       const status = String(report.CallStatus || "");
       const sipCode = Number(report.SipResponseCode) || null;
@@ -693,63 +845,205 @@ createServer(async (req, res) => {
     if (url.pathname === "/api/twilio/voice/client" && req.method === "POST") {
       const params = await getFormBody(req);
       const hangup = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
+      const ws = voiceTokenWorkspace(params.token, params.leadId);
+      if (!ws) return twiml(res, hangup);
+      requestContext.getStore().ws = ws;
       const state = await readState();
       const lead = state.leads.find((item) => item.id === params.leadId);
-      if (!lead || lead.dnc || !validVoiceToken(params.token, lead.id)) return twiml(res, hangup);
+      if (!lead || lead.dnc) return twiml(res, hangup);
       await updateState((fresh) => {
         if (fresh.calls.some((item) => item.sid === params.CallSid)) return false;
-        fresh.calls.unshift({ id: /^call_[\w]+$/.test(params.callId || "") ? params.callId : `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling from the app.", at: new Date().toISOString(), sid: params.CallSid });
+        fresh.calls.unshift({ id: /^call_[\w]+$/.test(params.callId || "") ? params.callId : `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling from the app.", at: new Date().toISOString(), sid: params.CallSid, ...(/^user_\w+$/.test(params.userId || "") ? { userId: params.userId } : {}) });
         activity(fresh, "Call started", `${leadLabel(lead)} · from the app`);
       });
-      const statusUrl = new URL("/api/twilio/voice/status", publicOrigin(req));
-      statusUrl.searchParams.set("leadId", lead.id);
-      statusUrl.searchParams.set("token", statusToken(lead.id));
+      const statusUrl = statusUrlFor(req, lead.id);
       const digits = lead.extension ? ` sendDigits="wwww${extensionDigits(lead.extension)}"` : "";
       return twiml(res, `<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId="${escapeXml(state.connection?.selectedNumber || "")}" answerOnBridge="true"><Number${digits} statusCallback="${escapeXml(statusUrl.toString())}" statusCallbackMethod="POST" statusCallbackEvent="initiated ringing answered completed">${escapeXml(lead.phone)}</Number></Dial></Response>`);
     }
-    if (url.pathname === "/api/session" && req.method === "GET")
-      return json(res, 200, {
-        requiresAuth: Boolean(configuredAdminPassword()),
-        authenticated: isAuthenticated(req),
-      });
+    if (url.pathname === "/api/session" && req.method === "GET") {
+      const user = currentUser();
+      return json(res, 200, { authenticated: Boolean(user) });
+    }
     if (url.pathname === "/api/session" && req.method === "POST") {
-      const password = configuredAdminPassword();
-      if (!password)
-        return json(res, 400, {
-          error:
-            "Set OPEN_DIALER_ADMIN_PASSWORD before using application sign-in.",
-        });
-      if (!canAttemptLogin(req))
-        return json(res, 429, {
-          error: "Too many sign-in attempts. Try again in 15 minutes.",
-        });
+      if (!canAttemptLogin(req)) return json(res, 429, { error: "Too many attempts. Try again in 15 minutes." });
       const body = await getBody(req);
-      if (!safeEqual(body.password || "", password)) {
+      const user = (await readAccounts()).users.find((item) => item.email === cleanEmail(body.email));
+      if (!user || !checkPassword(body.password, user.passwordHash)) {
         recordFailedLogin(req);
-        return json(res, 401, { error: "Incorrect Open Dialer v2 password." });
+        return json(res, 401, { error: "That email and password don't match an account." });
       }
       clearFailedLogins(req);
-      setSession(res, body.remember === true);
+      setSession(res, user, body.remember === true);
+      return json(res, 204, {});
+    }
+    // Accounts are invite-only. Forgot password emails a reset link; the answer never says whether the email exists.
+    if (url.pathname === "/api/password/forgot" && req.method === "POST") {
+      if (!canAttemptLogin(req)) return json(res, 429, { error: "Too many attempts. Try again in 15 minutes." });
+      recordFailedLogin(req);
+      const email = cleanEmail((await getBody(req)).email);
+      if (!emailReady()) return json(res, 503, { error: "Email isn't set up yet. Ask your company's owner for a new sign-in link." });
+      const found = await updateAccounts((accounts) => {
+        const user = accounts.users.find((item) => item.email === email && item.passwordHash);
+        return user ? { user: { ...user }, token: giveLink(user, "reset") } : false;
+      });
+      if (found) await sendReset(req, found.user, found.token).catch((error) => console.error(`[open-dialer] reset email failed: ${error.message}`));
+      return json(res, 200, { message: "If that email has an account, a reset link is on its way." });
+    }
+    // The page behind an invite or reset link: who it's for, then setting the password.
+    if (url.pathname === "/api/welcome" && (req.method === "GET" || req.method === "POST")) {
+      const body = req.method === "POST" ? await getBody(req) : {};
+      const token = req.method === "GET" ? url.searchParams.get("token") : body.token;
+      if (req.method === "GET") {
+        const accounts = await readAccounts();
+        const user = userForLink(accounts, token);
+        if (!user) return json(res, 404, { error: "This link has expired or was already used. Ask for a new one." });
+        return json(res, 200, { name: user.name, email: user.email, kind: user.link.kind, company: accounts.workspaces.find((item) => item.id === user.workspace)?.name || "" });
+      }
+      if (!validPassword(body.password)) return json(res, 400, { error: "Use a password of at least 10 characters." });
+      const user = await updateAccounts((accounts) => {
+        const found = userForLink(accounts, token);
+        if (!found) return false;
+        found.passwordHash = hashPassword(body.password);
+        found.sessionVersion = (found.sessionVersion || 0) + 1;
+        delete found.link;
+        return found;
+      });
+      if (!user) return json(res, 404, { error: "This link has expired or was already used. Ask for a new one." });
+      setSession(res, user, true);
       return json(res, 204, {});
     }
     if (url.pathname === "/api/session" && req.method === "DELETE") {
-      clearSession(req, res);
+      clearSession(res);
       return json(res, 204, {});
     }
-    if (
-      url.pathname.startsWith("/api/") &&
-      process.env.NODE_ENV === "production" &&
-      !configuredAdminPassword()
-    )
-      return json(res, 503, {
-        error:
-          "OPEN_DIALER_ADMIN_PASSWORD must be configured before production use.",
-      });
-    if (url.pathname.startsWith("/api/") && !isAuthenticated(req))
+    if (url.pathname.startsWith("/api/") && !currentUser())
       return json(res, 401, { error: "Sign in to access this workspace." });
-    if (url.pathname === "/api/state" && req.method === "GET")
+    // Things only a company's owner can change: calling setup, the team, imports, deleting and scripts.
+    const ownerOnly = [
+      ["POST", /^\/api\/twilio\/(validate|connection)$/], ["DELETE", /^\/api\/twilio\/connection$/], ["PATCH", /^\/api\/twilio\/connection$/], ["GET", /^\/api\/twilio\/account-check$/],
+      ["PATCH", /^\/api\/settings$/], ["POST", /^\/api\/leads\/(import|delete|assign)$/], ["DELETE", /^\/api\/leads\/[^/]+$/], ["DELETE", /^\/api\/dnc\/[^/]+$/], ["POST", /^\/api\/dnc$/],
+      ["PUT", /^\/api\/campaigns\/script$/], ["POST", /^\/api\/campaigns\/script-pdf$/], ["DELETE", /^\/api\/campaigns\/script-pdf$/],
+      ["POST", /^\/api\/team$/], ["PATCH", /^\/api\/team\/[^/]+$/], ["DELETE", /^\/api\/team\/[^/]+$/], ["PATCH", /^\/api\/workspace$/],
+    ];
+    if (!isOwner() && ownerOnly.some(([method, path]) => method === req.method && path.test(url.pathname)))
+      return json(res, 403, { error: "Only your company's owner can do that." });
+    // App admins (set on the account record) bring on new companies: a workspace plus an invited owner.
+    if (url.pathname === "/api/companies" && req.method === "POST") {
+      if (!currentUser().admin) return json(res, 403, { error: "Only an Open Dialer admin can add companies." });
+      const body = await getBody(req);
+      const company = cleanText(body.company, 160);
+      const name = cleanText(body.name, 120);
+      const email = cleanEmail(body.email);
+      if (!company || !name || !email) return json(res, 400, { error: "Enter the company, the owner's name and a valid email." });
+      const created = await updateAccounts((accounts) => {
+        if (accounts.users.some((item) => item.email === email)) return false;
+        const ws = `ws_${randomBytes(8).toString("hex")}`;
+        accounts.workspaces.push({ id: ws, name: company, createdAt: new Date().toISOString() });
+        const user = { id: `user_${randomBytes(8).toString("hex")}`, email, name, role: "owner", workspace: ws, sessionVersion: 0, createdAt: new Date().toISOString() };
+        const token = giveLink(user, "invite");
+        accounts.users.push(user);
+        return { user: { ...user }, token };
+      });
+      if (!created) return json(res, 409, { error: "That email already has an Open Dialer account." });
+      return json(res, 201, { user: publicUser(created.user), ...(await sendInvite(req, created.user, created.token, currentUser().name, company)) });
+    }
+    if (url.pathname === "/api/account" && req.method === "PATCH") {
+      const { name, currentPassword, newPassword: next } = await getBody(req);
+      const me = currentUser();
+      if (next !== undefined) {
+        if (!checkPassword(currentPassword, me.passwordHash)) return json(res, 400, { error: "Your current password isn't right." });
+        if (!validPassword(next)) return json(res, 400, { error: "Use a new password of at least 10 characters." });
+      }
+      const updated = await updateAccounts((accounts) => {
+        const user = accounts.users.find((item) => item.id === me.id);
+        if (typeof name === "string" && cleanText(name, 120)) user.name = cleanText(name, 120);
+        if (next !== undefined) {
+          user.passwordHash = hashPassword(next);
+          user.sessionVersion = (user.sessionVersion || 0) + 1;
+        }
+        return user;
+      });
+      // A new password signs out every other browser; keep this one signed in.
+      if (next !== undefined) setSession(res, updated, true);
+      return json(res, 200, publicUser(updated));
+    }
+    if (url.pathname === "/api/workspace" && req.method === "PATCH") {
+      const name = cleanText((await getBody(req)).name, 160);
+      if (!name) return json(res, 400, { error: "Enter your company's name." });
+      await updateAccounts((accounts) => { accounts.workspaces.find((item) => item.id === currentWorkspace()).name = name; });
+      return json(res, 200, { name });
+    }
+    if (url.pathname === "/api/team" && req.method === "POST") {
+      const body = await getBody(req);
+      const email = cleanEmail(body.email);
+      const name = cleanText(body.name, 120);
+      if (!name || !email) return json(res, 400, { error: "Enter their name and a valid email address." });
+      const created = await updateAccounts((accounts) => {
+        if (accounts.users.some((item) => item.email === email)) return false;
+        const user = { id: `user_${randomBytes(8).toString("hex")}`, email, name, role: body.role === "owner" ? "owner" : "caller", workspace: currentWorkspace(), sessionVersion: 0, createdAt: new Date().toISOString() };
+        const token = giveLink(user, "invite");
+        accounts.users.push(user);
+        return { user: { ...user }, token, company: accounts.workspaces.find((item) => item.id === currentWorkspace())?.name || "your team" };
+      });
+      if (!created) return json(res, 409, { error: "That email already has an Open Dialer account." });
+      return json(res, 201, { user: publicUser(created.user), ...(await sendInvite(req, created.user, created.token, currentUser().name, created.company)) });
+    }
+    if (url.pathname.match(/^\/api\/team\/[^/]+$/) && (req.method === "PATCH" || req.method === "DELETE")) {
+      const id = url.pathname.split("/").pop();
+      if (id === currentUser().id) return json(res, 400, { error: "Change your own account under Profile." });
+      const body = req.method === "PATCH" ? await getBody(req) : {};
+      // sendLink: a fresh invite (not signed in yet) or a password reset link, by email when it's set up.
+      let token = null;
+      let company = "";
+      const result = await updateAccounts((accounts) => {
+        const user = accounts.users.find((item) => item.id === id && item.workspace === currentWorkspace());
+        if (!user) return false;
+        if (req.method === "DELETE") accounts.users = accounts.users.filter((item) => item !== user);
+        if (body.role === "owner" || body.role === "caller") user.role = body.role;
+        if (body.sendLink === true) token = giveLink(user, user.passwordHash ? "reset" : "invite");
+        company = accounts.workspaces.find((item) => item.id === currentWorkspace())?.name || "your team";
+        return { ...user };
+      });
+      if (!result) return json(res, 404, { error: "That person isn't on your team." });
+      if (req.method === "DELETE")
+        // Their leads go back to the owner's unassigned pile.
+        await updateState((state) => { for (const lead of state.leads) if (lead.assignedTo === id) delete lead.assignedTo; });
+      const sent = token ? await (result.passwordHash ? sendReset(req, result, token) : sendInvite(req, result, token, currentUser().name, company)) : {};
+      return json(res, 200, { user: publicUser(result), ...sent });
+    }
+    if (url.pathname === "/api/leads/assign" && req.method === "POST") {
+      const { ids, userId } = await getBody(req);
+      if (!Array.isArray(ids) || !ids.length) return json(res, 400, { error: "Select at least one lead." });
+      const accounts = await readAccounts();
+      const assignee = userId ? accounts.users.find((item) => item.id === userId && item.workspace === currentWorkspace()) : null;
+      if (userId && !assignee) return json(res, 400, { error: "That person isn't on your team." });
+      const wanted = new Set(ids);
+      let changed = 0;
+      await updateState((state) => {
+        for (const lead of state.leads) {
+          if (!wanted.has(lead.id)) continue;
+          if (assignee) lead.assignedTo = assignee.id;
+          else delete lead.assignedTo;
+          changed += 1;
+        }
+        activity(state, "Leads assigned", `${changed} lead${changed === 1 ? "" : "s"} ${assignee ? `assigned to ${assignee.name}` : "unassigned"}`);
+      });
+      return json(res, 200, { assigned: changed });
+    }
+    if (url.pathname === "/api/state" && req.method === "GET") {
+      const accounts = await readAccounts();
+      const me = currentUser();
       // callbackReachable tells the setup guide whether Twilio could fetch the call instructions from this app.
-      return json(res, 200, { ...safeState(await readState()), callbackReachable: !/\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(publicOrigin(req)) });
+      return json(res, 200, {
+        ...safeState(visibleState(await readState())),
+        callbackReachable: !/\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(publicOrigin(req)),
+        me: publicUser(me),
+        workspace: { id: me.workspace, name: accounts.workspaces.find((item) => item.id === me.workspace)?.name || "Workspace" },
+        team: accounts.users.filter((item) => item.workspace === me.workspace).map((item) => publicUser(item, isOwner())),
+        emailReady: emailReady(),
+        ...(me.admin ? { companies: accounts.workspaces.map((ws) => ({ id: ws.id, name: ws.name, people: accounts.users.filter((item) => item.workspace === ws.id).map((item) => publicUser(item)) })) } : {}),
+      });
+    }
     if (url.pathname === "/api/leads" && req.method === "POST") {
       const body = await getBody(req);
       if (!phoneKey(body.phone))
@@ -767,6 +1061,7 @@ createServer(async (req, res) => {
         timezone: body.timezone?.trim() || "Unknown",
         status: "New",
         campaigns: campaignName(body.campaign) ? [campaignName(body.campaign)] : [],
+        ...(isOwner() ? {} : { assignedTo: currentUser().id }),
         dnc: false,
         note: "Added manually.",
         due: "Unscheduled",
@@ -795,9 +1090,9 @@ createServer(async (req, res) => {
     }
     if (url.pathname === "/api/campaigns/script-pdf") {
       const name = campaignName(req.method === "GET" || req.method === "DELETE" ? url.searchParams.get("campaign") : "");
-      const blobId = (campaign) => `script-pdf:${campaign}`;
+      const blobId = (campaign) => scopedBlob(`script-pdf:${campaign}`);
       if (req.method === "GET") {
-        const file = name && (await readBlob(blobId(name)));
+        const file = name && (isOwner() || (await readState()).leads.some((lead) => canSee(lead) && lead.campaigns.includes(name))) && (await readBlob(blobId(name)));
         if (!file) return json(res, 404, { error: "No script PDF for this campaign." });
         // Shown inline in the app's viewer; never cached, since it can be replaced.
         res.writeHead(200, { "content-type": "application/pdf", "content-disposition": `inline; filename="${String(file.name).replace(/[^\w .-]/g, "_")}"`, "cache-control": "no-store" });
@@ -833,8 +1128,8 @@ createServer(async (req, res) => {
       const text = cleanText(title, 200);
       if (!text) return json(res, 400, { error: "Write what the task is." });
       const state = await readState();
-      if (leadId && !state.leads.some((lead) => lead.id === leadId)) return json(res, 400, { error: "That lead no longer exists." });
-      const task = { id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, title: text, details: cleanText(details, 4000), due: cleanText(due, 40), leadId: leadId || null, createdAt: new Date().toISOString(), doneAt: null };
+      if (leadId && !findLead(state, leadId)) return json(res, 400, { error: "That lead no longer exists." });
+      const task = { id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, title: text, details: cleanText(details, 4000), due: cleanText(due, 40), leadId: leadId || null, userId: currentUser().id, createdAt: new Date().toISOString(), doneAt: null };
       state.tasks.unshift(task);
       activity(state, "Task added", text);
       await writeState(state);
@@ -843,7 +1138,7 @@ createServer(async (req, res) => {
     if (url.pathname.match(/^\/api\/tasks\/[^/]+$/) && (req.method === "PATCH" || req.method === "DELETE")) {
       const id = url.pathname.split("/")[3];
       const state = await readState();
-      const task = state.tasks.find((item) => item.id === id);
+      const task = state.tasks.find((item) => item.id === id && (isOwner() || item.userId === currentUser().id));
       if (!task) return json(res, 404, { error: "Task not found." });
       if (req.method === "DELETE") {
         state.tasks = state.tasks.filter((item) => item.id !== id);
@@ -857,7 +1152,7 @@ createServer(async (req, res) => {
           // Edit: title, details, due and lead together, as the task dialog sends them.
           const text = cleanText(title, 200);
           if (!text) return json(res, 400, { error: "Write what the task is." });
-          if (leadId && !state.leads.some((lead) => lead.id === leadId)) return json(res, 400, { error: "That lead no longer exists." });
+          if (leadId && !findLead(state, leadId)) return json(res, 400, { error: "That lead no longer exists." });
           Object.assign(task, { title: text, details: cleanText(details, 4000), due: cleanText(due, 40), leadId: leadId || null });
           activity(state, "Task updated", task.title);
         }
@@ -874,7 +1169,7 @@ createServer(async (req, res) => {
       const state = await readState();
       let added = 0;
       for (const lead of state.leads)
-        if (wanted.has(lead.id) && !lead.campaigns.includes(tag)) { lead.campaigns.push(tag); added += 1; }
+        if (wanted.has(lead.id) && canSee(lead) && !lead.campaigns.includes(tag)) { lead.campaigns.push(tag); added += 1; }
       if (added) {
         activity(state, "Leads tagged", `${added} leads added to ${tag}`);
         await writeState(state);
@@ -986,9 +1281,7 @@ createServer(async (req, res) => {
     if (url.pathname.match(/^\/api\/leads\/[^/]+$/) && req.method === "PATCH") {
       const body = await getBody(req);
       const state = await readState();
-      const lead = state.leads.find(
-        (item) => item.id === url.pathname.split("/").pop(),
-      );
+      const lead = findLead(state, url.pathname.split("/").pop());
       if (!lead) return json(res, 404, { error: "Lead not found." });
       if (typeof body.phone === "string") {
         const key = phoneKey(body.phone);
@@ -1030,7 +1323,7 @@ createServer(async (req, res) => {
     if (url.pathname.match(/^\/api\/leads\/[^/]+\/task$/) && req.method === "POST") {
       const { done } = await getBody(req);
       const state = await readState();
-      const lead = state.leads.find((item) => item.id === url.pathname.split("/")[3]);
+      const lead = findLead(state, url.pathname.split("/")[3]);
       if (!lead) return json(res, 404, { error: "Lead not found." });
       if (done === true && !lead.taskDone) {
         lead.taskDone = { at: new Date().toISOString(), due: lead.due };
@@ -1057,11 +1350,11 @@ createServer(async (req, res) => {
     if (url.pathname === "/api/calls/record" && req.method === "POST") {
       const { leadId, outcome, note, followUpAt } = await getBody(req);
       const state = await readState();
-      const lead = state.leads.find((item) => item.id === leadId);
+      const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
       const outcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call"];
       if (!outcomes.includes(outcome)) return json(res, 400, { error: "Choose a valid call outcome." });
-      const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString() };
+      const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString(), userId: currentUser().id };
       state.calls.unshift(call);
       enterStage(lead, stageAfterOutcome(lead.status, outcome));
       if (lead.status === "Follow-up" && followUpReasons[outcome]) lead.followUpReason = followUpReasons[outcome];
@@ -1148,7 +1441,7 @@ createServer(async (req, res) => {
     if (url.pathname.match(/^\/api\/calls\/[^/]+\/why$/) && req.method === "GET") {
       const state = await readState();
       const call = state.calls.find((item) => item.id === url.pathname.split("/")[3]);
-      if (!call) return json(res, 404, { error: "Call not found." });
+      if (!call || !findLead(state, call.leadId)) return json(res, 404, { error: "Call not found." });
       if (!state.connection) return json(res, 409, { error: "Connect your Twilio account in Settings first." });
       const sids = [call.leadLegSid, call.sid].filter(Boolean);
       if (!sids.length) return json(res, 409, { error: "Twilio hasn't reported this call yet." });
@@ -1230,19 +1523,19 @@ createServer(async (req, res) => {
     if (url.pathname === "/api/calls/browser-start" && req.method === "POST") {
       const { leadId } = await getBody(req);
       const state = await readState();
-      const lead = state.leads.find((item) => item.id === leadId);
+      const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
       if (lead.dnc) return json(res, 409, { error: "This contact is suppressed and cannot be called." });
       if (!state.connection?.selectedNumber) return json(res, 409, { error: "Connect Twilio and pick an outbound number in Settings first." });
       // The call record is created when Twilio actually starts the call (voice/client), so a blocked
       // microphone or failed connection never leaves a call stuck "In progress".
       const callId = `call_${Date.now()}_${randomBytes(3).toString("hex")}`;
-      return json(res, 201, { callId, leadId: lead.id, token: voiceToken(lead.id, Date.now() + 10 * 60 * 1000) });
+      return json(res, 201, { callId, leadId: lead.id, userId: currentUser().id, token: voiceToken(lead.id, Date.now() + 10 * 60 * 1000) });
     }
     if (url.pathname === "/api/calls/start" && req.method === "POST") {
       const { leadId } = await getBody(req);
       const state = await readState();
-      const lead = state.leads.find((item) => item.id === leadId);
+      const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
       if (lead.dnc) return json(res, 409, { error: "This contact is suppressed and cannot be called." });
       if (!state.connection?.bridgeNumber || state.connection.bridgeNumber === "browser")
@@ -1259,9 +1552,7 @@ createServer(async (req, res) => {
         Url: voiceUrl.toString(),
         Method: "GET",
       });
-      const statusUrl = new URL("/api/twilio/voice/status", publicOrigin(req));
-      statusUrl.searchParams.set("leadId", lead.id);
-      statusUrl.searchParams.set("token", statusToken(lead.id));
+      const statusUrl = statusUrlFor(req, lead.id);
       body.append("StatusCallback", statusUrl.toString());
       body.append("StatusCallbackMethod", "POST");
       for (const event of ["initiated", "ringing", "answered", "completed"]) body.append("StatusCallbackEvent", event);
@@ -1276,7 +1567,7 @@ createServer(async (req, res) => {
       }
       const remote = await response.json();
       await updateState((fresh) => {
-        fresh.calls.unshift({ id: `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling bridge started.", at: new Date().toISOString(), sid: remote.sid });
+        fresh.calls.unshift({ id: `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling bridge started.", at: new Date().toISOString(), sid: remote.sid, userId: currentUser().id });
         activity(fresh, "Call bridge started", `${leadLabel(lead)} · answer your bridge call to connect`);
       });
       return json(res, 201, { sid: remote.sid });
@@ -1298,10 +1589,4 @@ createServer(async (req, res) => {
     json(res, 404, {
       error: "Build the application before running the production server.",
     });
-  } catch (error) {
-    json(res, 400, {
-      error:
-        error instanceof Error ? error.message : "Unexpected server error.",
-    });
-  }
-}).listen(port, "0.0.0.0", () => console.log(`Open Dialer v2 listening on ${port}`));
+}

@@ -13,6 +13,11 @@ import {
   Filter,
   LoaderCircle,
   LockKeyhole,
+  KeyRound,
+  Mail,
+  Building2,
+  ChartColumn,
+  LogOut,
   Phone,
   PhoneCall,
   Plus,
@@ -66,6 +71,7 @@ type Lead = {
   taskDone?: { at: string; due: string };
   followUpSince?: string;
   followUpReason?: string;
+  assignedTo?: string;
 };
 type Connection = {
   accountSid: string;
@@ -80,6 +86,7 @@ type CallRecord = {
   outcome: string;
   note: string;
   at: string;
+  userId?: string;
 };
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
@@ -94,10 +101,18 @@ type State = {
   dncNumbers: string[];
   callbackReachable?: boolean;
   settings?: { bookingUrl?: string };
+  me: Member;
+  workspace: { id: string; name: string };
+  team: Member[];
+  emailReady?: boolean;
+  companies?: { id: string; name: string; people: Member[] }[];
 };
+type Member = { id: string; name: string; role: "owner" | "caller"; email?: string; pending?: boolean; admin?: boolean };
+// What the server says after it makes a sign-in link: emailed, or the link to pass on yourself.
+type LinkResult = { emailed?: boolean; link?: string; emailError?: string };
 type NumberOption = { sid: string; number: string; label: string };
-type Session = { requiresAuth: boolean; authenticated: boolean };
-type Screen = "queue" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "settings";
+type Session = { authenticated: boolean };
+type Screen = "queue" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "analytics" | "settings";
 type SettingsArea = "calling" | "workspace" | "account";
 type SettingsPage =
   | "numbers"
@@ -105,7 +120,8 @@ type SettingsPage =
   | "fields"
   | "profile"
   | "privacy"
-  | "booking";
+  | "booking"
+  | "companies";
 
 class ApiError extends Error {
   constructor(
@@ -123,6 +139,7 @@ const nav = [
   { id: "calls", key: "calls", label: "Calls", icon: Phone },
   { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock },
   { id: "pipeline", key: "pipeline", label: "Pipeline", icon: SlidersHorizontal },
+  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartColumn },
   { id: "logs", key: "activity", label: "Logs", icon: ClipboardList },
 ] as const;
 
@@ -439,25 +456,78 @@ function exportLeads(leads: Lead[], fileName: string) {
   URL.revokeObjectURL(href);
 }
 
+// Sign in. Accounts are invite-only; "Forgot password" emails a reset link.
 function Login({ onSignedIn }: { onSignedIn: () => void }) {
-  const [password, setPassword] = useState("");
-  const [remember, setRemember] = useState(false);
+  const [mode, setMode] = useState<"signin" | "forgot">("signin");
+  const [remember, setRemember] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const fields = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      if (mode === "forgot") {
+        setSent((await api<{ message: string }>("/api/password/forgot", { method: "POST", body: JSON.stringify(fields) })).message);
+      } else {
+        await api("/api/session", { method: "POST", body: JSON.stringify({ ...fields, remember }) });
+        onSignedIn();
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not sign in.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const forgot = mode === "forgot";
+  return (
+    <main className="login-page">
+      <form className="login-card" onSubmit={submit} key={mode}>
+        <Brand />
+        <h1>{forgot ? "Reset your password" : "Sign in"}</h1>
+        <p>{forgot ? "Enter your email and we'll send you a link to choose a new password." : "Sign in with your email and password. New here? Ask your company's owner for an invite."}</p>
+        <label>Email<input name="email" type="email" autoComplete="email" required /></label>
+        {!forgot && (
+          <>
+            <label>Password<input name="password" type="password" autoComplete="current-password" required /></label>
+            <label className="login-remember">
+              <input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />
+              <span>Keep me signed in for 30 days</span>
+            </label>
+          </>
+        )}
+        {error && <p className="form-error">{error}</p>}
+        {sent && <p className="login-sent" role="status">{sent}</p>}
+        <button className="primary-button" type="submit" disabled={busy || Boolean(sent)}>
+          {busy ? <LoaderCircle className="spin" size={17} /> : forgot ? <Mail size={17} /> : <LockKeyhole size={17} />} {forgot ? "Send reset link" : "Sign in"}
+        </button>
+        <p className="login-switch">
+          <button type="button" className="text-link" onClick={() => { setMode(forgot ? "signin" : "forgot"); setError(null); setSent(null); }}>{forgot ? "Back to sign in" : "Forgot your password?"}</button>
+        </p>
+      </form>
+    </main>
+  );
+}
+
+// Opened from an invite or reset email (#welcome/<token>): set a password and you're signed in.
+function Welcome({ token, onDone }: { token: string; onDone: () => void }) {
+  const [info, setInfo] = useState<{ name: string; email: string; kind: "invite" | "reset"; company: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const submit = async (event: FormEvent) => {
+  useEffect(() => {
+    api<{ name: string; email: string; kind: "invite" | "reset"; company: string }>(`/api/welcome?token=${encodeURIComponent(token)}`).then(setInfo, (cause) => setError(cause instanceof Error ? cause.message : "This link doesn't work."));
+  }, [token]);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      await api("/api/session", {
-        method: "POST",
-        body: JSON.stringify({ password, remember }),
-      });
-      setPassword("");
-      onSignedIn();
+      await api("/api/welcome", { method: "POST", body: JSON.stringify({ token, password: new FormData(event.currentTarget).get("password") }) });
+      onDone();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not sign in.");
-    } finally {
+      setError(cause instanceof Error ? cause.message : "Couldn't save your password.");
       setBusy(false);
     }
   };
@@ -465,38 +535,19 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
     <main className="login-page">
       <form className="login-card" onSubmit={submit}>
         <Brand />
-        <h1>Operator sign-in</h1>
-        <p>
-          Enter the application password configured in Dokploy to access this
-          workspace.
-        </p>
-        <label>
-          Application password
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="current-password"
-            required
-          />
-        </label>
-        <label className="login-remember">
-          <input
-            type="checkbox"
-            checked={remember}
-            onChange={(event) => setRemember(event.target.checked)}
-          />
-          <span>Remember me for 30 days</span>
-        </label>
+        <h1>{info?.kind === "reset" ? "Choose a new password" : info ? `Welcome, ${info.name}` : "Open Dialer"}</h1>
+        {info && <p>{info.kind === "reset" ? `For ${info.email}.` : `You've been invited to ${info.company}. Set a password for ${info.email} to sign in.`}</p>}
+        {!info && !error && <p><LoaderCircle className="spin" size={16} /> Checking your link…</p>}
+        {info && (
+          <label>
+            New password
+            <input name="password" type="password" autoComplete="new-password" minLength={10} required autoFocus />
+            <small className="field-hint">At least 10 characters.</small>
+          </label>
+        )}
         {error && <p className="form-error">{error}</p>}
-        <button className="primary-button" type="submit" disabled={busy}>
-          {busy ? (
-            <LoaderCircle className="spin" size={17} />
-          ) : (
-            <LockKeyhole size={17} />
-          )}{" "}
-          Sign in
-        </button>
+        {info && <button className="primary-button" type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <LockKeyhole size={17} />} {info.kind === "reset" ? "Save and sign in" : "Set password and sign in"}</button>}
+        {error && !info && <p className="login-switch"><a className="text-link" href="#">Go to sign in</a></p>}
       </form>
     </main>
   );
@@ -504,7 +555,7 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
 
 // The current screen (and the open lead on the dashboard) lives in the address, e.g. #dashboard/lead_123,
 // so reload, back/forward and bookmarks keep it.
-const screenHashes: Record<Screen, string> = { queue: "dashboard", campaigns: "campaigns", leads: "leads", calls: "calls", followups: "tasks", activity: "activity", pipeline: "pipeline", settings: "settings" };
+const screenHashes: Record<Screen, string> = { queue: "dashboard", campaigns: "campaigns", leads: "leads", calls: "calls", followups: "tasks", activity: "activity", pipeline: "pipeline", analytics: "analytics", settings: "settings" };
 // The logo is the owner's artwork; which color version shows is set in CSS by theme.
 function Brand() {
   return (
@@ -534,6 +585,8 @@ function App() {
   }, [screen, selectedId]);
   useEffect(() => {
     const onBack = () => {
+      // An invite or reset link opened in a tab that already has the app.
+      if (hashParts().page === "welcome") return setWelcomeToken(hashParts().lead);
       setScreen(screenFromHash());
       const lead = hashParts().lead;
       if (lead) setSelectedId(lead);
@@ -562,12 +615,16 @@ function App() {
   const [editLead, setEditLead] = useState<Lead | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [needsLogin, setNeedsLogin] = useState(false);
+  const [welcomeToken, setWelcomeToken] = useState(() => (hashParts().page === "welcome" ? hashParts().lead : null));
   const [loadError, setLoadError] = useState<string | null>(null);
   const [lightMode, setLightMode] = useState(() => localStorage.getItem("open-dialer-theme") === "light");
 
   const refresh = async () => {
     try {
-      const next = await api<State>("/api/state");
+      const next = await api<State>("/api/state").catch((error) => {
+        if (error instanceof ApiError && error.status === 401) setNeedsLogin(true);
+        throw error;
+      });
       if (!Array.isArray(next.leads) || !Array.isArray(next.activity)) {
         throw new Error("The Open Dialer v2 API is unavailable. Check that the service is running with node server.mjs.");
       }
@@ -591,7 +648,7 @@ function App() {
   useEffect(() => {
     void api<Session>("/api/session")
       .then((session) => {
-        if (session.requiresAuth && !session.authenticated) {
+        if (!session.authenticated) {
           setNeedsLogin(true);
           return;
         }
@@ -664,9 +721,9 @@ function App() {
     hungUpByMe.current = false;
     setActiveCall({ lead, call: null, status: "connecting", muted: false, startedAt: null });
     try {
-      const start = await api<{ callId: string; leadId: string; token: string }>("/api/calls/browser-start", { method: "POST", body: JSON.stringify({ leadId: lead.id }) });
+      const start = await api<{ callId: string; leadId: string; token: string; userId: string }>("/api/calls/browser-start", { method: "POST", body: JSON.stringify({ leadId: lead.id }) });
       const phone = await getPhone(state?.connection?.accountSid || "");
-      const call = await phone.connect({ params: { leadId: start.leadId, callId: start.callId, token: start.token } });
+      const call = await phone.connect({ params: { leadId: start.leadId, callId: start.callId, token: start.token, userId: start.userId } });
       setActiveCall((current) => current && { ...current, call });
       const end = (message?: string, isError = false) => {
         setActiveCall(null);
@@ -798,6 +855,23 @@ function App() {
       return false;
     }
   };
+  const assignLeads = async (ids: string[], userId: string) => {
+    try {
+      const result = await api<{ assigned: number }>("/api/leads/assign", { method: "POST", body: JSON.stringify({ ids, userId: userId || null }) });
+      await refresh();
+      const who = state?.team.find((member) => member.id === userId)?.name;
+      setNotice(`${result.assigned} lead${result.assigned === 1 ? "" : "s"} ${who ? `assigned to ${who}` : "unassigned"}.`);
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not assign those leads.");
+      return false;
+    }
+  };
+  const signOut = async () => {
+    await api("/api/session", { method: "DELETE" }).catch(() => {});
+    setState(null);
+    setNeedsLogin(true);
+  };
   const deleteLeads = async (ids: string[]) => {
     try {
       const result = await api<{ deleted: number }>("/api/leads/delete", { method: "POST", body: JSON.stringify({ ids }) });
@@ -808,6 +882,19 @@ function App() {
       setNotice(error instanceof Error ? error.message : "Could not delete those leads.");
     }
   };
+  if (welcomeToken)
+    return (
+      <Welcome
+        token={welcomeToken}
+        onDone={() => {
+          window.history.replaceState(null, "", "#dashboard");
+          setWelcomeToken(null);
+          setNeedsLogin(false);
+          setScreen("queue");
+          void refresh();
+        }}
+      />
+    );
   if (needsLogin)
     return (
       <Login
@@ -897,11 +984,11 @@ function App() {
             <span>Settings</span>
           </button>
           <button className="account-summary" type="button" onClick={() => setScreen("settings")}>
-            {/* Notion-style face, the same DiceBear "notionists" avatar Guramo uses; the seed is a fixed word, nothing personal. */}
-            <span className="account-summary__avatar"><img src="https://api.dicebear.com/7.x/notionists/svg?seed=open-dialer" alt="" /></span>
+            {/* Notion-style face, the same DiceBear "notionists" avatar Guramo uses; seeded with the random user id, nothing personal. */}
+            <span className="account-summary__avatar"><img src={`https://api.dicebear.com/7.x/notionists/svg?seed=${encodeURIComponent(state.me.id)}`} alt="" /></span>
             <span>
-              <b>Open Dialer v2 workspace</b>
-              <small>Account &amp; billing</small>
+              <b>{state.me.name}</b>
+              <small>{state.workspace.name}</small>
             </span>
             <ChevronRight size={15} />
           </button>
@@ -921,7 +1008,7 @@ function App() {
             )}
           </div>
           <div className="top-actions">
-            {(screen === "leads" || screen === "pipeline") && picker}
+            {(screen === "leads" || screen === "pipeline" || screen === "analytics") && picker}
             <button
               className="quick-tour-button"
               onClick={() => setGuideOpen(true)}
@@ -1043,6 +1130,8 @@ function App() {
             onEdit={setEditLead}
             onDelete={deleteLeads}
             onTag={tagLeads}
+            team={state.me.role === "owner" ? state.team : []}
+            onAssign={assignLeads}
             campaigns={campaigns}
             initialSegment={leadsView}
             onCampaign={setCampaign}
@@ -1086,6 +1175,7 @@ function App() {
             }}
           />
         )}
+        {screen === "analytics" && <Analytics calls={scoped.calls} team={state.team} isOwner={state.me.role === "owner"} onOpenCalls={() => setScreen("calls")} />}
         {screen === "campaigns" && (
           <Campaigns
             leads={state.leads}
@@ -1099,6 +1189,12 @@ function App() {
         )}
         {screen === "settings" && (
           <Settings
+            me={state.me}
+            workspace={state.workspace}
+            team={state.team}
+            emailReady={Boolean(state.emailReady)}
+            companies={state.companies || []}
+            onSignOut={signOut}
             connection={state.connection}
             bookingUrl={state.settings?.bookingUrl || ""}
             onRefresh={refresh}
@@ -1426,6 +1522,59 @@ function zoneClock(zone: string, now: Date) {
 
 const conversationOutcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "Not interested"];
 
+// Calling hours are 8 AM to 9 PM in the lead's own time.
+function hoursNote(clock: { hour: number; minute: number }) {
+  if (clock.hour >= 8 && clock.hour < 21) {
+    const left = 21 * 60 - (clock.hour * 60 + clock.minute);
+    return { open: true, text: left <= 90 ? `open ${left} more min` : "open until 9 PM" };
+  }
+  const until = ((8 * 60 - (clock.hour * 60 + clock.minute)) + 24 * 60) % (24 * 60);
+  return { open: false, text: until < 60 ? `opens in ${until} min` : `opens in ${Math.round(until / 60)} h` };
+}
+// "America/New_York" → "Eastern"; cached because the banner re-renders every 30 seconds.
+const zoneNames = new Map<string, string>();
+function zoneName(zone: string) {
+  if (!zoneNames.has(zone)) {
+    let name = zone.split("/").pop()!.replace(/_/g, " ");
+    try {
+      name = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "longGeneric" }).formatToParts(new Date()).find((part) => part.type === "timeZoneName")?.value.replace(/( Standard)? Time$/, "") || name;
+    } catch { /* unknown zone: keep the city name */ }
+    zoneNames.set(zone, name);
+  }
+  return zoneNames.get(zone)!;
+}
+// One clock per time zone that has leads still to work, biggest first, plus your own time.
+function ZoneClocks({ leads, current, now }: { leads: Lead[]; current: string | null; now: Date }) {
+  const zones = new Map<string, { zone: string; count: number }>();
+  for (const lead of leads) {
+    if (lead.dnc || ["Won", "Lost"].includes(lead.status)) continue;
+    const found = leadZone(lead);
+    if (!found) continue;
+    const name = zoneName(found.zone);
+    const entry = zones.get(name) || { zone: found.zone, count: 0 };
+    entry.count += 1;
+    zones.set(name, entry);
+  }
+  const rows = [...zones].sort((left, right) => right[1].count - left[1].count);
+  const shown = rows.slice(0, 4);
+  const currentName = current ? zoneName(current) : null;
+  return (
+    <ul className="zone-clocks" aria-label="Local times where your leads are">
+      {shown.map(([name, { zone, count }]) => {
+        const clock = zoneClock(zone, now);
+        if (!clock) return null;
+        const note = hoursNote(clock);
+        return (
+          <li key={name} className={`${note.open ? "is-open" : ""}${name === currentName ? " is-current" : ""}`} title={`${count} lead${count === 1 ? "" : "s"} in ${name} time`}>
+            <i aria-hidden="true" />{name} <b>{clock.label}</b> <span>{note.text}</span>
+          </li>
+        );
+      })}
+      {rows.length > shown.length && <li title={rows.slice(shown.length).map(([name]) => name).join(", ")}>+{rows.length - shown.length} more</li>}
+    </ul>
+  );
+}
+
 // A dial leaves one or two records (Twilio's, plus the outcome you log); records for the same lead within
 // two minutes are one call. A call counts as a conversation if any of its records is one.
 function callAttempts(calls: CallRecord[]) {
@@ -1509,13 +1658,73 @@ const stageLegends: Record<string, [string, string][]> = {
   Lost: [["tried", "Said no"], ["done", "No reply"], ["bad", "Do not call"]],
 };
 
-// Calls per day for the last two weeks, with the conversations in each day.
-const chartDays = 14;
-function CallsChart({ calls, onOpenCalls }: { calls: CallRecord[]; onOpenCalls: () => void }) {
-  const [hover, setHover] = useState<number | null>(null);
+// Analytics: calls per day, how calls ended, and (for owners) who made them, over 7, 14 or 30 days.
+const outcomeOrder = ["Meeting booked", "Interested", "Callback", "Maybe later", "Not interested", "Voicemail", "No answer", "Busy", "Wrong number", "Do not call", "Didn't connect", "Call ended"];
+function Analytics({ calls, team, isOwner, onOpenCalls }: { calls: CallRecord[]; team: Member[]; isOwner: boolean; onOpenCalls: () => void }) {
+  const [range, setRange] = useState(() => { try { return Number(localStorage.getItem("open-dialer-analytics-range")) || 14; } catch { return 14; } });
+  useEffect(() => { try { localStorage.setItem("open-dialer-analytics-range", String(range)); } catch { /* private mode */ } }, [range]);
   const today = new Date();
-  const days = Array.from({ length: chartDays }, (_, index) => {
-    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (chartDays - 1 - index));
+  const since = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (range - 1)).toISOString();
+  const inRange = calls.filter((call) => call.at >= since);
+  const attempts = callAttempts(inRange);
+  const conversations = attempts.filter((attempt) => attempt.conversation).length;
+  // How each call ended: the outcome you logged, else what Twilio reported.
+  const outcomes = new Map<string, number>();
+  for (const call of inRange) if (call.outcome !== "In progress") outcomes.set(call.outcome, (outcomes.get(call.outcome) || 0) + 1);
+  const rank = (outcome: string) => (outcomeOrder.includes(outcome) ? outcomeOrder.indexOf(outcome) : 99);
+  const outcomeRows = [...outcomes].sort((left, right) => rank(left[0]) - rank(right[0]) || right[1] - left[1]);
+  const outcomePeak = Math.max(1, ...outcomeRows.map(([, count]) => count));
+  // Per person, counted as calls (a dial plus its logged result is one call), like the chart.
+  const callerRows = [...new Set(inRange.map((call) => call.userId || ""))].map((id) => {
+    const mine = callAttempts(inRange.filter((call) => (call.userId || "") === id));
+    return { id, name: team.find((member) => member.id === id)?.name || (id ? "Removed teammate" : "Not recorded"), calls: mine.length, conversations: mine.filter((attempt) => attempt.conversation).length };
+  }).sort((left, right) => right.calls - left.calls);
+  return (
+    <section className="analytics-page">
+      <div className="analytics-head">
+        <dl className="analytics-totals">
+          <div><dt>Calls</dt><dd>{attempts.length}</dd></div>
+          <div><dt>Conversations</dt><dd>{conversations}</dd></div>
+          <div><dt>Connect rate</dt><dd>{attempts.length ? `${Math.round((conversations / attempts.length) * 100)}%` : "–"}</dd></div>
+        </dl>
+        <div className="segmented" role="group" aria-label="Date range">
+          {[7, 14, 30].map((days) => <button key={days} type="button" className={range === days ? "is-active" : ""} aria-pressed={range === days} onClick={() => setRange(days)}>{days} days</button>)}
+        </div>
+      </div>
+      <CallsChart key={range} calls={calls} range={range} onOpenCalls={onOpenCalls} />
+      <div className="analytics-grid">
+        <section className="analytics-card">
+          <h2>How calls ended</h2>
+          {outcomeRows.length ? (
+            <ul className="analytics-bars">
+              {outcomeRows.map(([outcome, count]) => (
+                <li key={outcome}><span>{outcome}</span><i aria-hidden="true"><b style={{ width: `${(count / outcomePeak) * 100}%` }} /></i><em>{count}</em></li>
+              ))}
+            </ul>
+          ) : <p className="analytics-empty">No call results in the last {range} days.</p>}
+        </section>
+        {isOwner && (
+          <section className="analytics-card">
+            <h2>Calls by person</h2>
+            {callerRows.length ? (
+              <table className="analytics-table">
+                <thead><tr><th scope="col">Person</th><th scope="col">Calls</th><th scope="col">Conversations</th></tr></thead>
+                <tbody>{callerRows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.calls}</td><td>{row.conversations}</td></tr>)}</tbody>
+              </table>
+            ) : <p className="analytics-empty">No calls in the last {range} days.</p>}
+            {callerRows.some((row) => !row.id) && <p className="field-hint">"Not recorded" is calls from before accounts, which don't say who made them.</p>}
+          </section>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// Calls and conversations for each of the last `count` days, oldest first.
+function dailyCalls(calls: CallRecord[], count: number) {
+  const today = new Date();
+  const days = Array.from({ length: count }, (_, index) => {
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (count - 1 - index));
     return { date, key: date.toDateString(), calls: 0, conversations: 0 };
   });
   const byKey = new Map(days.map((day) => [day.key, day]));
@@ -1525,14 +1734,30 @@ function CallsChart({ calls, onOpenCalls }: { calls: CallRecord[]; onOpenCalls: 
     day.calls += 1;
     if (attempt.conversation) day.conversations += 1;
   }
+  return days;
+}
+
+// Calls per day, with the conversations in each day.
+function CallsChart({ calls, range: chartDays = 14, onOpenCalls }: { calls: CallRecord[]; range?: number; onOpenCalls: () => void }) {
+  const [hover, setHover] = useState<number | null>(null);
+  // Drawn at the box's real width, so labels keep their shape instead of stretching.
+  const plot = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(640);
+  useEffect(() => {
+    const observer = new ResizeObserver(([entry]) => setWidth(Math.max(280, Math.round(entry.contentRect.width))));
+    if (plot.current) observer.observe(plot.current);
+    return () => observer.disconnect();
+  }, []);
+  const days = dailyCalls(calls, chartDays);
+  const total = days.reduce((sum, day) => sum + day.calls, 0);
   const todayCount = days[chartDays - 1].calls;
   const yesterday = days[chartDays - 2].calls;
   const average = Math.round(days.slice(0, -1).reduce((sum, day) => sum + day.calls, 0) / (chartDays - 1));
   // Scale to a round top so the gridlines land on whole numbers.
   const peak = Math.max(4, ...days.map((day) => day.calls));
   const top = peak <= 10 ? Math.ceil(peak / 2) * 2 : Math.ceil(peak / 10) * 10;
-  const width = 640;
   const height = 160;
+  const tickEvery = chartDays <= 14 ? 2 : 5;
   const slot = width / chartDays;
   const bar = Math.min(28, slot - 8);
   const y = (value: number) => height - (value / top) * height;
@@ -1555,8 +1780,9 @@ function CallsChart({ calls, onOpenCalls }: { calls: CallRecord[]; onOpenCalls: 
         </ul>
         <button type="button" className="quiet-button" onClick={onOpenCalls}>See calls</button>
       </header>
-      <div className="calls-chart__plot">
-        <svg viewBox={`0 -14 ${width} ${height + 34}`} role="img" aria-hidden="true" preserveAspectRatio="none">
+      <div className="calls-chart__plot" ref={plot}>
+        {!total && <p className="calls-chart__empty">No calls logged in the last {chartDays} days. Calls you make or log in the app show up here.</p>}
+        <svg viewBox={`0 -14 ${width} ${height + 34}`} role="img" aria-hidden="true">
           {[0.5, 1].map((share) => (
             <g key={share} className="calls-chart__grid">
               <line x1="0" x2={width} y1={y(top * share)} y2={y(top * share)} />
@@ -1575,7 +1801,7 @@ function CallsChart({ calls, onOpenCalls }: { calls: CallRecord[]; onOpenCalls: 
                 {day.conversations > 0 && <path className="is-conversation" d={other > 0 ? `M${x},${height}V${conversationTop}H${x + bar}V${height}Z` : roundTop(x, conversationTop, height)} />}
                 {other > 0 && <path className="is-other" d={roundTop(x, totalTop, conversationTop - (day.conversations > 0 ? 2 : 0))} />}
                 {(isToday || hover === index) && day.calls > 0 && <text className="calls-chart__value" x={x + bar / 2} y={totalTop - 6}>{day.calls}</text>}
-                {(index % 2 === 1 || isToday) && <text className="calls-chart__tick" x={x + bar / 2} y={height + 18}>{isToday ? "Today" : label(day.date)}</text>}
+                {(chartDays - 1 - index) % tickEvery === 0 && <text className="calls-chart__tick" x={x + bar / 2} y={height + 18}>{isToday ? "Today" : label(day.date)}</text>}
                 {/* Hit target: the whole column, taller and wider than the bar. */}
                 <rect className="calls-chart__hit" x={index * slot} y={-14} width={slot} height={height + 34} onMouseEnter={() => setHover(index)} onMouseLeave={() => setHover(null)} />
               </g>
@@ -1596,6 +1822,26 @@ function CallsChart({ calls, onOpenCalls }: { calls: CallRecord[]; onOpenCalls: 
         <tbody>{days.map((day) => <tr key={day.key}><td>{label(day.date)}</td><td>{day.calls}</td><td>{day.conversations}</td></tr>)}</tbody>
       </table>
     </section>
+  );
+}
+
+// The last 14 days as a slim bar row above the day's numbers; today is the highlighted bar. Hover a bar for its count.
+function CallStrip({ calls, onOpen }: { calls: CallRecord[]; onOpen: () => void }) {
+  const days = dailyCalls(calls, 14);
+  const peak = Math.max(1, ...days.map((day) => day.calls));
+  const average = Math.round(days.slice(0, -1).reduce((sum, day) => sum + day.calls, 0) / 13);
+  const label = (date: Date) => new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(date);
+  return (
+    <div className="call-strip">
+      <p><span>Calls, last 14 days</span><span>{average} a day on average · <button type="button" className="text-link" onClick={onOpen}>See calls</button></span></p>
+      <div className="call-strip__bars" role="img" aria-label={`Calls per day over the last 14 days: ${days.map((day) => day.calls).join(", ")}`}>
+        {days.map((day, index) => (
+          <i key={day.key} className={index === days.length - 1 ? "is-today" : ""} title={`${index === days.length - 1 ? "Today" : label(day.date)}: ${day.calls} call${day.calls === 1 ? "" : "s"}`}>
+            <b style={{ height: `${day.calls ? 15 + (day.calls / peak) * 85 : 0}%` }} />
+          </i>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1624,10 +1870,7 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
   return (
     <section className="dash-banner" aria-label="Today">
       <div className="dash-banner__head">
-        <div>
-          <h1>{new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long" }).format(now)}</h1>
-          <p>{new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(now)} your time</p>
-        </div>
+        <h1 className="dash-date">{new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long" }).format(now)}<span> · {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(now)} your time</span></h1>
         <div className="dash-banner__actions">
           {picker}
           {setupDone < setup.length && <button className="quiet-button" onClick={onGuide}><BadgeCheck size={16} /> Setup {setupDone}/{setup.length}</button>}
@@ -1637,28 +1880,14 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
       </div>
       <div className="dash-banner__body">
         <div className="dash-banner__main">
-        <div className={`dash-window${inHours === false ? " is-closed" : ""}`}>
-          <CalendarClock size={20} aria-hidden="true" />
-          <div>
-            {clock && zone ? (
-              <>
-                <b>{clock.label} in {zone.place}</b>
-                <span>{inHours ? "Inside calling hours (8 AM to 9 PM their time)" : clock.hour < 8 ? "Too early to call. Calling hours start at 8 AM their time" : "Too late to call. Calling hours ended at 9 PM their time"} · {leadLabel(selected)}</span>
-              </>
-            ) : (
-              <>
-                <b>Local time unknown</b>
-                <span>{leadLabel(selected)} has no time zone or state. Add one with Edit to check calling hours.</span>
-              </>
-            )}
-          </div>
-        </div>
+        <ZoneClocks leads={state.leads} current={zone ? zone.zone : null} now={now} />
+        <CallStrip calls={state.calls} onOpen={() => onGo("calls-today")} />
         <dl className="dash-stats">
           {/* Each number opens the list behind it; the label is a button stretched over the whole tile. */}
-          <div><dt><PhoneOutgoing size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("calls-today")}>Calls today</button></dt><dd>{attemptsToday.length}</dd></div>
-          <div><dt><MessageSquare size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("conversations")}>Conversations</button></dt><dd>{attemptsToday.filter((attempt) => attempt.conversation).length}</dd></div>
-          <div><dt><Clock size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("followups")}>Follow-ups due</button></dt><dd>{followUpsDue}</dd></div>
-          <div><dt><ListTodo size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("to-call")}>Left to call</button></dt><dd>{toCall}</dd></div>
+          <div><dt><button type="button" className="stretch-link" onClick={() => onGo("calls-today")}>Calls today</button></dt><dd>{attemptsToday.length}</dd></div>
+          <div><dt><button type="button" className="stretch-link" onClick={() => onGo("conversations")}>Conversations</button></dt><dd>{attemptsToday.filter((attempt) => attempt.conversation).length}</dd></div>
+          <div><dt><button type="button" className="stretch-link" onClick={() => onGo("followups")}>Follow-ups due</button></dt><dd>{followUpsDue}</dd></div>
+          <div><dt><button type="button" className="stretch-link" onClick={() => onGo("to-call")}>Left to call</button></dt><dd>{toCall}</dd></div>
         </dl>
         <div className="dash-progress">
           <span><i style={{ width: `${progressTotal ? Math.round((calledLeads.size / progressTotal) * 100) : 0}%` }} /></span>
@@ -1668,7 +1897,10 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
         <figure className="dash-where">
           <StateTileMap leads={state.leads.filter((lead) => !lead.dnc)} current={leadStateCode(selected)} zone={zone ? zone.zone : null} />
           <DaylightStrip hour={clock ? clock.hour : null} minute={clock ? clock.minute : 0} />
-          <figcaption>{zone ? `${leadLabel(selected)} · ${zone.place}` : "Add a state to see where this lead is"}</figcaption>
+          <figcaption>
+            <b>{leadLabel(selected)}</b>
+            {clock && zone ? <span className={inHours ? "is-open" : ""}>{zone.place} · {clock.label}, {hoursNote(clock).text}</span> : <span>No state yet. Add one with Edit to check calling hours.</span>}
+          </figcaption>
         </figure>
       </div>
     </section>
@@ -1732,7 +1964,6 @@ function Queue({
           document.querySelector(".call-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
         }}
       />
-      <CallsChart calls={state.calls} onOpenCalls={() => onGo("calls-today")} />
       <section className="queue-layout">
         <aside className="call-list" aria-label="Calling queue">
           {upcoming.map((lead) => (
@@ -1895,6 +2126,8 @@ function LeadList({
   onEdit,
   onDelete,
   onTag,
+  team,
+  onAssign,
   campaigns,
   initialSegment,
   onCampaign,
@@ -1905,6 +2138,8 @@ function LeadList({
   onEdit: (lead: Lead) => void;
   onDelete: (ids: string[]) => Promise<void>;
   onTag: (ids: string[], campaign: string) => Promise<boolean>;
+  team: Member[];
+  onAssign: (ids: string[], userId: string) => Promise<boolean>;
   campaigns: string[];
   initialSegment: "all" | "to-call" | "try-again" | "follow-up" | "closed";
   onCampaign: (name: string) => void;
@@ -2019,6 +2254,13 @@ function LeadList({
             <datalist id="bulk-campaign-options">{campaigns.map((name) => <option key={name} value={name} />)}</datalist>
             <button type="submit" className="toolbar-button" disabled={!tagName.trim()}><Tag size={16} aria-hidden="true" /> Add to campaign</button>
           </form>
+          {team.length > 1 && (
+            <select className="lead-bulk-assign" value="" aria-label="Assign the selected leads" onChange={(event) => { const value = event.target.value; if (value) void onAssign(picked.map((lead) => lead.id), value === "none" ? "" : value).then((done) => done && setChecked(new Set())); }}>
+              <option value="">Assign to…</option>
+              {team.map((member) => <option key={member.id} value={member.id}>{member.name}{member.role === "owner" ? " (owner)" : ""}</option>)}
+              <option value="none">No one (owners only)</option>
+            </select>
+          )}
           <button type="button" className="toolbar-button" onClick={() => exportLeads(picked, "open-dialer-selected-leads.csv")}>Export selected</button>
           <button type="button" className="toolbar-button danger-button" onClick={() => void removePicked()}>Delete selected</button>
           <button type="button" className="toolbar-button" onClick={() => setChecked(new Set())}>Clear</button>
@@ -2092,7 +2334,7 @@ function LeadList({
                   <FollowUpTag lead={lead} calls={calls} />
                 </td>
                 <td><span className="next-step">{latest ? <>{latest.outcome}<small>{new Date(latest.at).toLocaleDateString()}</small></> : "Not yet"}</span></td>
-                <td>{lead.campaigns?.length ? <span className="campaign-tags">{lead.campaigns.map((name, index) => <span key={name}>{index > 0 && ", "}<button type="button" className="text-link" onClick={() => onCampaign(name)} title={`Show only ${name}`}>{name}</button></span>)}</span> : <span className="empty-cell">—</span>}</td>
+                <td>{lead.campaigns?.length ? <span className="campaign-tags">{lead.campaigns.map((name, index) => <span key={name}>{index > 0 && ", "}<button type="button" className="text-link" onClick={() => onCampaign(name)} title={`Show only ${name}`}>{name}</button></span>)}</span> : <span className="empty-cell">—</span>}{team.length > 1 && <small className="lead-assignee">{team.find((member) => member.id === lead.assignedTo)?.name || "Unassigned"}</small>}</td>
                 <td className="lead-row-actions">
                   <button type="button" onClick={() => onEdit(lead)}>Edit</button>
                   <button type="button" onClick={() => onOpen(lead.id)}>View</button>
@@ -3265,11 +3507,23 @@ function SetupGuide({ state, onClose, onGo }: { state: State; onClose: () => voi
 }
 
 function Settings({
+  me,
+  workspace,
+  team,
+  emailReady,
+  companies,
+  onSignOut,
   connection,
   bookingUrl,
   onRefresh,
   onNotice,
 }: {
+  me: Member;
+  workspace: { id: string; name: string };
+  team: Member[];
+  emailReady: boolean;
+  companies: { id: string; name: string; people: Member[] }[];
+  onSignOut: () => void;
   connection: Connection | null;
   bookingUrl: string;
   onRefresh: () => Promise<unknown>;
@@ -3282,8 +3536,9 @@ function Settings({
   const [busy, setBusy] = useState(false);
   const [answerOn, setAnswerOn] = useState<"browser" | "voip" | "sim">(usesAppPhone(connection) ? "browser" : connection!.bridgeNumber!.startsWith("sip:") ? "voip" : "sim");
   const [bridgeNumber, setBridgeNumber] = useState(usesAppPhone(connection) ? "" : (connection?.bridgeNumber || "").replace(/^sip:/i, ""));
-  const [area, setArea] = useState<SettingsArea>("calling");
-  const [page, setPage] = useState<SettingsPage>("numbers");
+  const owner = me.role === "owner";
+  const [area, setArea] = useState<SettingsArea>(owner ? "calling" : "account");
+  const [page, setPage] = useState<SettingsPage>(owner ? "numbers" : "profile");
   const validate = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
@@ -3368,6 +3623,7 @@ function Settings({
       { id: "team", label: "Team", icon: Users },
       { id: "fields", label: "Custom fields", icon: SlidersHorizontal },
       { id: "booking", label: "Booking link", icon: CalendarPlus },
+      ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : []),
     ],
     account: [
       { id: "profile", label: "Profile", icon: UserRound },
@@ -3377,7 +3633,7 @@ function Settings({
   return (
     <section className="settings-page">
       <div className="settings-tabs" role="tablist" aria-label="Settings sections">
-        {(["calling", "workspace", "account"] as SettingsArea[]).map((item) => (
+        {((owner ? ["calling", "workspace", "account"] : ["account"]) as SettingsArea[]).map((item) => (
           <button key={item} type="button" role="tab" aria-selected={area === item} className={area === item ? "is-active" : ""} onClick={() => selectPage(item, sections[item][0].id)}>
             {item}
           </button>
@@ -3552,14 +3808,13 @@ function Settings({
             <Check /> Save the phone number that should ring before each outbound call
           </span>
           <span>
-            <Check /> Add application authentication before inviting other
-            operators
+            <Check /> Invite your callers under Workspace, Team
           </span>
         </div>
       </article>
           </section>
         ) : (
-          <SettingsPanel page={page} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} onRefresh={onRefresh} />
+          <SettingsPanel page={page} me={me} workspace={workspace} team={team} emailReady={emailReady} companies={companies} onSignOut={onSignOut} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} onRefresh={onRefresh} />
         )}
         </div>
       </div>
@@ -3647,26 +3902,34 @@ function AccountCheck() {
 
 function SettingsPanel({
   page,
+  me,
+  workspace,
+  team,
+  emailReady,
+  companies,
+  onSignOut,
   connection,
   onNotice,
   bookingUrl,
   onRefresh,
 }: {
   page: Exclude<SettingsPage, "numbers">;
+  me: Member;
+  workspace: { id: string; name: string };
+  team: Member[];
+  emailReady: boolean;
+  companies: { id: string; name: string; people: Member[] }[];
+  onSignOut: () => void;
   connection: Connection | null;
   onNotice: (message: string) => void;
   bookingUrl: string;
   onRefresh: () => Promise<unknown>;
 }) {
   const [booking, setBooking] = useState(bookingUrl);
-  const [teamName, setTeamName] = useState(() => localStorage.getItem("open-dialer-team-name") || "");
+
   const [fieldName, setFieldName] = useState("");
   const [fields, setFields] = useState<string[]>(() => JSON.parse(localStorage.getItem("open-dialer-lead-fields") || "[]"));
-  const [profile, setProfile] = useState(() => ({
-    firstName: localStorage.getItem("open-dialer-first-name") || "",
-    company: localStorage.getItem("open-dialer-company") || "",
-    phone: localStorage.getItem("open-dialer-phone") || "",
-  }));
+
   if (page === "booking") {
     const save = async (event: FormEvent) => {
       event.preventDefault();
@@ -3695,16 +3958,178 @@ function SettingsPanel({
       </section>
     );
   }
-  if (page === "team") {
-    return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Team</h2><p>Name your workspace now. Member invitations and role management stay off until multi-user authentication is enabled.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); localStorage.setItem("open-dialer-team-name", teamName); onNotice("Workspace name saved in this browser."); }}><label>Workspace name<input value={teamName} onChange={(event) => setTeamName(event.target.value)} placeholder="Your company or team" /></label><button className="primary-button" type="submit">Save workspace</button></form></section>;
-  }
+  if (page === "team") return <TeamSettings me={me} workspace={workspace} team={team} emailReady={emailReady} onRefresh={onRefresh} onNotice={onNotice} />;
+  if (page === "companies") return <CompaniesSettings companies={companies} emailReady={emailReady} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "fields") {
     return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Custom fields</h2><p>Capture the fields your team actually needs on every lead.</p><form className="inline-form" onSubmit={(event) => { event.preventDefault(); const value = fieldName.trim(); if (!value || fields.includes(value)) return; const next = [...fields, value]; setFields(next); localStorage.setItem("open-dialer-lead-fields", JSON.stringify(next)); setFieldName(""); }}><input value={fieldName} onChange={(event) => setFieldName(event.target.value)} placeholder="e.g. Territory" /><button className="primary-button" type="submit">Add field</button></form><div className="field-pills">{fields.length ? fields.map((field) => <button key={field} type="button" onClick={() => { const next = fields.filter((item) => item !== field); setFields(next); localStorage.setItem("open-dialer-lead-fields", JSON.stringify(next)); }}>{field} <X size={13} /></button>) : <span>No custom fields yet.</span>}</div></section>;
   }
-  if (page === "profile") {
-    return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Profile</h2><p>Your personal and company details for this Open Dialer v2 workspace.</p><form className="settings-form" onSubmit={(event) => { event.preventDefault(); localStorage.setItem("open-dialer-first-name", profile.firstName); localStorage.setItem("open-dialer-company", profile.company); localStorage.setItem("open-dialer-phone", profile.phone); onNotice("Profile saved in this browser."); }}><label>First name<input value={profile.firstName} onChange={(event) => setProfile({ ...profile, firstName: event.target.value })} /></label><label>Business phone<input value={profile.phone} onChange={(event) => setProfile({ ...profile, phone: event.target.value })} /></label><label>Company<input value={profile.company} onChange={(event) => setProfile({ ...profile, company: event.target.value })} /></label><button className="primary-button" type="submit">Save profile</button></form></section>;
-  }
+  if (page === "profile") return <ProfileSettings me={me} onRefresh={onRefresh} onNotice={onNotice} onSignOut={onSignOut} />;
   return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Privacy</h2><p>Telephony credentials are encrypted server-side. This browser stores only non-sensitive workspace preferences such as your profile and custom field names.</p><div className="settings-callout"><ShieldCheck size={20} /><span>Never enter Twilio credentials into a third-party integration field.</span></div></section>;
+}
+
+// Shows a sign-in link the server couldn't email, with a copy button.
+function LinkCallout({ who, link, onClose }: { who: string; link: string; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="settings-callout team-issued" role="status">
+      <KeyRound size={20} aria-hidden="true" />
+      <span>Send {who} this sign-in link yourself. It works once.<code>{link}</code></span>
+      <button type="button" className="quiet-button" onClick={() => void navigator.clipboard.writeText(link).then(() => setCopied(true))}>{copied ? "Copied" : "Copy link"}</button>
+      <button type="button" className="icon-button" onClick={onClose} aria-label="Hide link"><X size={16} /></button>
+    </div>
+  );
+}
+const linkNotice = (result: LinkResult, who: string, email: string, what: string) => (result.emailed ? `${what} emailed to ${email}.` : result.emailError ? `${result.emailError} Copy the link below and send it to ${who} yourself.` : `${what} ready for ${who}. Copy the link below.`);
+
+// Owner only: the company name and who can sign in. People are invited by email and set their own password.
+function TeamSettings({ me, workspace, team, emailReady, onRefresh, onNotice }: { me: Member; workspace: { id: string; name: string }; team: Member[]; emailReady: boolean; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
+  const [company, setCompany] = useState(workspace.name);
+  const [issued, setIssued] = useState<{ who: string; link: string } | null>(null);
+  const run = async <T,>(work: () => Promise<T>, done: (result: T) => string) => {
+    try {
+      const result = await work();
+      await onRefresh();
+      onNotice(done(result));
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "That didn't work.");
+    }
+  };
+  const showLink = (who: string, result: LinkResult) => setIssued(result.link ? { who, link: result.link } : null);
+  const add = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const fields = Object.fromEntries(new FormData(form));
+    await run(async () => {
+      const result = await api<{ user: Member } & LinkResult>("/api/team", { method: "POST", body: JSON.stringify(fields) });
+      showLink(result.user.name, result);
+      form.reset();
+      return result;
+    }, (result) => linkNotice(result, result.user.name, result.user.email || "", "Invite"));
+  };
+  const sendLink = (member: Member) => {
+    if (!member.pending && !window.confirm(`Send ${member.name} a link to choose a new password? Their current password keeps working until they use it.`)) return;
+    void run(async () => {
+      const result = await api<{ user: Member } & LinkResult>(`/api/team/${member.id}`, { method: "PATCH", body: JSON.stringify({ sendLink: true }) });
+      showLink(member.name, result);
+      return result;
+    }, (result) => linkNotice(result, member.name, member.email || "", member.pending ? "New invite" : "Reset link"));
+  };
+  const remove = (member: Member) => {
+    if (!window.confirm(`Remove ${member.name}? They can't sign in anymore and their leads go back to unassigned.`)) return;
+    void run(() => api(`/api/team/${member.id}`, { method: "DELETE" }), () => `${member.name} removed.`);
+  };
+  return (
+    <section className="settings-panel">
+      <span className="panel-kicker">Workspace</span>
+      <h2>Team</h2>
+      <form className="inline-form" onSubmit={(event) => { event.preventDefault(); void run(() => api("/api/workspace", { method: "PATCH", body: JSON.stringify({ name: company }) }), () => "Company name saved."); }}>
+        <input value={company} onChange={(event) => setCompany(event.target.value)} aria-label="Company name" required />
+        <button className="quiet-button" type="submit" disabled={company.trim() === workspace.name}>Save name</button>
+      </form>
+      <p>Owners see every lead and change settings. Callers only see the leads you assign to them on the Leads page.</p>
+      <ul className="team-list">
+        {team.map((member) => (
+          <li key={member.id}>
+            <span className="account-summary__avatar"><img src={`https://api.dicebear.com/7.x/notionists/svg?seed=${encodeURIComponent(member.id)}`} alt="" /></span>
+            <span><b>{member.name}{member.id === me.id ? " (you)" : ""}</b><small>{member.email}{member.pending ? " · invite not accepted yet" : ""}</small></span>
+            {member.id === me.id ? <em>{member.role === "owner" ? "Owner" : "Caller"}</em> : (
+              <>
+                <select value={member.role} aria-label={`${member.name}'s role`} onChange={(event) => void run(() => api(`/api/team/${member.id}`, { method: "PATCH", body: JSON.stringify({ role: event.target.value }) }), () => `${member.name} is now ${event.target.value === "owner" ? "an owner" : "a caller"}.`)}>
+                  <option value="caller">Caller</option>
+                  <option value="owner">Owner</option>
+                </select>
+                <button type="button" className="text-link" onClick={() => sendLink(member)}>{member.pending ? "Resend invite" : "Send reset link"}</button>
+                <button type="button" className="text-link danger-link" onClick={() => remove(member)}>Remove</button>
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+      {issued && <LinkCallout who={issued.who} link={issued.link} onClose={() => setIssued(null)} />}
+      <h3>Invite someone</h3>
+      {!emailReady && <p className="field-hint">Email isn't set up on this server yet, so you'll get a link to send them yourself.</p>}
+      <form className="settings-form team-add" onSubmit={(event) => void add(event)}>
+        <label>Name<input name="name" autoComplete="off" required /></label>
+        <label>Email<input name="email" type="email" autoComplete="off" required /></label>
+        <label>Role<select name="role" defaultValue="caller"><option value="caller">Caller</option><option value="owner">Owner</option></select></label>
+        <button className="primary-button" type="submit"><Mail size={16} aria-hidden="true" /> Send invite</button>
+      </form>
+    </section>
+  );
+}
+
+// App admins only: every company on this server, and inviting a new one (its owner gets the invite).
+function CompaniesSettings({ companies, emailReady, onRefresh, onNotice }: { companies: { id: string; name: string; people: Member[] }[]; emailReady: boolean; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
+  const [issued, setIssued] = useState<{ who: string; link: string } | null>(null);
+  const add = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    try {
+      const result = await api<{ user: Member } & LinkResult>("/api/companies", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form))) });
+      setIssued(result.link ? { who: result.user.name, link: result.link } : null);
+      form.reset();
+      await onRefresh();
+      onNotice(linkNotice(result, result.user.name, result.user.email || "", "Owner invite"));
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Couldn't add that company.");
+    }
+  };
+  return (
+    <section className="settings-panel">
+      <span className="panel-kicker">Admin</span>
+      <h2>Companies</h2>
+      <p>Each company has its own workspace. Nobody can see another company's leads, calls or scripts.</p>
+      <ul className="team-list">
+        {companies.map((company) => (
+          <li key={company.id}>
+            <span><b>{company.name}</b><small>{company.people.map((person) => `${person.name} (${person.role}${person.pending ? ", invited" : ""})`).join(", ") || "No one yet"}</small></span>
+          </li>
+        ))}
+      </ul>
+      {issued && <LinkCallout who={issued.who} link={issued.link} onClose={() => setIssued(null)} />}
+      <h3>Add a company</h3>
+      {!emailReady && <p className="field-hint">Email isn't set up on this server yet, so you'll get a link to send the owner yourself.</p>}
+      <form className="settings-form team-add" onSubmit={(event) => void add(event)}>
+        <label>Company<input name="company" autoComplete="off" required /></label>
+        <label>Owner's name<input name="name" autoComplete="off" required /></label>
+        <label>Owner's email<input name="email" type="email" autoComplete="off" required /></label>
+        <button className="primary-button" type="submit"><Mail size={16} aria-hidden="true" /> Invite owner</button>
+      </form>
+    </section>
+  );
+}
+
+// Your own name and password, and signing out.
+function ProfileSettings({ me, onRefresh, onNotice, onSignOut }: { me: Member; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void; onSignOut: () => void }) {
+  const [name, setName] = useState(me.name);
+  const save = async (body: Record<string, unknown>, done: string, form?: HTMLFormElement) => {
+    try {
+      await api("/api/account", { method: "PATCH", body: JSON.stringify(body) });
+      await onRefresh();
+      form?.reset();
+      onNotice(done);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Couldn't save that.");
+    }
+  };
+  return (
+    <section className="settings-panel">
+      <span className="panel-kicker">Account</span>
+      <h2>Profile</h2>
+      <p>Signed in as <b>{me.email}</b>, {me.role === "owner" ? "owner" : "caller"}.</p>
+      <form className="settings-form" onSubmit={(event) => { event.preventDefault(); void save({ name }, "Name saved."); }}>
+        <label>Your name<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label>
+        <button className="primary-button" type="submit" disabled={name.trim() === me.name}>Save name</button>
+      </form>
+      <h3>Change password</h3>
+      <form className="settings-form" onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fields = Object.fromEntries(new FormData(form)); void save(fields, "Password changed. Other browsers are signed out.", form); }}>
+        <label>Current password<input name="currentPassword" type="password" autoComplete="current-password" required /></label>
+        <label>New password<input name="newPassword" type="password" autoComplete="new-password" minLength={10} required /><small className="field-hint">At least 10 characters.</small></label>
+        <button className="primary-button" type="submit">Change password</button>
+      </form>
+      <button type="button" className="quiet-button profile-sign-out" onClick={onSignOut}><LogOut size={16} aria-hidden="true" /> Sign out</button>
+    </section>
+  );
 }
 
 function LeadForm({
