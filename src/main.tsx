@@ -37,6 +37,8 @@ import {
   UserRound,
   Tag,
   MoreHorizontal,
+  ChevronDown,
+  FileText,
   Trash2,
   Pause,
   Play,
@@ -62,6 +64,8 @@ type Lead = {
   campaigns?: string[];
   value?: number;
   taskDone?: { at: string; due: string };
+  followUpSince?: string;
+  followUpReason?: string;
 };
 type Connection = {
   accountSid: string;
@@ -79,8 +83,10 @@ type CallRecord = {
 };
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
+type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string } };
 type State = {
   tasks?: Task[];
+  campaignSettings?: Record<string, CampaignSettings>;
   leads: Lead[];
   activity: { id: string; at: string; action: string; detail: string }[];
   connection: Connection | null;
@@ -761,6 +767,8 @@ function App() {
       await refresh();
     }
   };
+  const [scriptFor, setScriptFor] = useState<string | null>(null);
+  const [pdfFor, setPdfFor] = useState<string | null>(null);
   // The task dialog: "new" to add one, or the task being viewed and edited.
   const [taskDialog, setTaskDialog] = useState<{ task?: Task; leadId?: string } | null>(null);
   const saveTask = async (fields: TaskFields, task?: Task) => {
@@ -889,7 +897,8 @@ function App() {
             <span>Settings</span>
           </button>
           <button className="account-summary" type="button" onClick={() => setScreen("settings")}>
-            <span className="account-summary__avatar">O</span>
+            {/* Notion-style face, the same DiceBear "notionists" avatar Guramo uses; the seed is a fixed word, nothing personal. */}
+            <span className="account-summary__avatar"><img src="https://api.dicebear.com/7.x/notionists/svg?seed=open-dialer" alt="" /></span>
             <span>
               <b>Open Dialer v2 workspace</b>
               <small>Account &amp; billing</small>
@@ -990,6 +999,8 @@ function App() {
             onAddLead={() => setShowLeadForm(true)}
             onGuide={() => setGuideOpen(true)}
             onAddTask={(lead) => setTaskDialog({ leadId: lead.id })}
+            onOpenPdf={setPdfFor}
+            onEditScript={setScriptFor}
             onGo={(target) => {
               if (target === "followups") return setScreen("followups");
               if (target === "to-call") { setLeadsView("to-call"); return setScreen("leads"); }
@@ -1048,8 +1059,10 @@ function App() {
           <FollowUps
             leads={followUps}
             allLeads={state.leads}
+            calls={state.calls}
             tasks={state.tasks || []}
             onOpenTask={(task) => setTaskDialog({ task })}
+            onQuickAdd={(fields) => saveTask(fields)}
             onChangeTask={changeTask}
             done={state.leads.filter((lead) => lead.taskDone).sort((left, right) => right.taskDone!.at.localeCompare(left.taskDone!.at)).slice(0, 12)}
             onToggle={setTaskDone}
@@ -1079,6 +1092,8 @@ function App() {
             onStart={startCampaign}
             onView={(name) => { setCampaign(name); setScreen("leads"); }}
             onStage={(name) => { setCampaign(name); setScreen("pipeline"); }}
+            settings={state.campaignSettings || {}}
+            onScript={setScriptFor}
             onImport={() => setImportOpen("campaign")}
           />
         )}
@@ -1091,6 +1106,16 @@ function App() {
           />
         )}
       </section>
+      {scriptFor && (
+        <ScriptDialog
+          campaign={scriptFor}
+          settings={state.campaignSettings?.[scriptFor] || {}}
+          onViewPdf={() => setPdfFor(scriptFor)}
+          onClose={() => setScriptFor(null)}
+          onChanged={async (message, close) => { await refresh(); setNotice(message); if (close) setScriptFor(null); }}
+        />
+      )}
+      {pdfFor && <PdfViewer campaign={pdfFor} name={state.campaignSettings?.[pdfFor]?.pdf?.name || "Script"} onClose={() => setPdfFor(null)} />}
       {taskDialog && (
         <TaskDialog
           task={taskDialog.task}
@@ -1401,6 +1426,179 @@ function zoneClock(zone: string, now: Date) {
 
 const conversationOutcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "Not interested"];
 
+// A dial leaves one or two records (Twilio's, plus the outcome you log); records for the same lead within
+// two minutes are one call. A call counts as a conversation if any of its records is one.
+function callAttempts(calls: CallRecord[]) {
+  const attempts: { leadId: string; at: string; conversation: boolean }[] = [];
+  const last = new Map<string, { at: number; index: number }>();
+  for (const call of [...calls].sort((left, right) => left.at.localeCompare(right.at))) {
+    const at = new Date(call.at).getTime();
+    const previous = last.get(call.leadId);
+    if (previous && at - previous.at <= 120_000) {
+      if (conversationOutcomes.includes(call.outcome)) attempts[previous.index].conversation = true;
+      last.set(call.leadId, { at, index: previous.index });
+      continue;
+    }
+    attempts.push({ leadId: call.leadId, at: call.at, conversation: conversationOutcomes.includes(call.outcome) });
+    last.set(call.leadId, { at, index: attempts.length - 1 });
+  }
+  return attempts;
+}
+
+// Where a lead in Follow-up stands: which follow-up is next (1 to 3) and why it's being followed up.
+const followUpLimit = 3;
+function followUpInfo(lead: Lead, calls: CallRecord[]) {
+  if (lead.status !== "Follow-up" || lead.dnc) return null;
+  const since = lead.followUpSince || "";
+  const done = callAttempts(calls.filter((call) => call.leadId === lead.id && call.at > since)).length;
+  return { done, step: Math.min(done + 1, followUpLimit), exhausted: done >= followUpLimit, reason: lead.followUpReason || "" };
+}
+
+// A row of dots before a short status line: filled dots carry the color, empty ones show what's left.
+function Dots({ tones }: { tones: string[] }) {
+  return <span className="dots" aria-hidden="true">{tones.map((tone, index) => <i key={index} className={`dot dot--${tone}`} />)}</span>;
+}
+
+function FollowUpTag({ lead, calls }: { lead: Lead; calls: CallRecord[] }) {
+  const info = followUpInfo(lead, calls);
+  if (!info) return null;
+  const tones = info.exhausted ? ["done", "done", "done"] : [1, 2, 3].map((step) => (step <= info.step ? `fu${step}` : "empty"));
+  return (
+    <span className="stage-line">
+      <Dots tones={tones} />
+      {info.exhausted ? `${followUpLimit} follow-ups, no reply` : `Follow-up ${info.step} of ${followUpLimit}`}
+      {info.reason && <em>{info.reason}</em>}
+    </span>
+  );
+}
+
+// What a pipeline card's dot line says for each stage. Follow-up uses FollowUpTag.
+const lostOutcomes = ["Not interested", "Wrong number", "Do not call"];
+function lostReason(lead: Lead, calls: CallRecord[]) {
+  if (lead.dnc) return "Do not call";
+  if (lead.followUpSince && callAttempts(calls.filter((call) => call.leadId === lead.id && call.at > lead.followUpSince!)).length >= followUpLimit) return "No reply";
+  return calls.find((call) => call.leadId === lead.id && lostOutcomes.includes(call.outcome))?.outcome || "Lost";
+}
+function StageLine({ lead, calls }: { lead: Lead; calls: CallRecord[] }) {
+  if (lead.status === "Follow-up") return <FollowUpTag lead={lead} calls={calls} />;
+  if (lead.status === "New") {
+    const tries = callAttempts(calls.filter((call) => call.leadId === lead.id)).length;
+    if (resting(callStats(calls).get(lead.id))) return <span className="stage-line"><Dots tones={["tried", "tried", "tried"]} />Resting after {restAfterMisses} misses</span>;
+    return <span className="stage-line"><Dots tones={[1, 2, 3].map((n) => (n <= tries ? "tried" : "empty"))} />{tries ? `${tries} ${tries === 1 ? "try" : "tries"}, no answer` : "Not called yet"}</span>;
+  }
+  if (lead.status === "Meeting booked") {
+    if (!/^\d{4}-\d{2}-\d{2}/.test(lead.due)) return <span className="stage-line"><Dots tones={["empty"]} />No meeting time</span>;
+    const at = new Date(lead.due);
+    const today = new Date().toDateString() === at.toDateString();
+    const past = at.getTime() < Date.now() && !today;
+    return <span className="stage-line"><Dots tones={[past ? "bad" : today ? "warn" : "good"]} />{past ? `Was ${dueLabel(lead.due).text}, no result` : dueLabel(lead.due).text}</span>;
+  }
+  if (lead.status === "Won") return <span className="stage-line"><Dots tones={[lead.value ? "good" : "empty"]} />{lead.value ? `$${lead.value.toLocaleString()}` : "No deal value yet"}</span>;
+  const reason = lostReason(lead, calls);
+  return <span className="stage-line"><Dots tones={[reason === "Do not call" ? "bad" : reason === "No reply" ? "done" : "tried"]} />{reason}</span>;
+}
+
+const campaignStageTone: Record<string, string> = { New: "tried", "Follow-up": "fu1", "Meeting booked": "fu2", Won: "good", Lost: "bad" };
+
+// One legend per column, in the same dot style as the cards.
+const stageLegends: Record<string, [string, string][]> = {
+  New: [["empty", "Not called"], ["tried", "Each try"]],
+  "Follow-up": [["fu1", "1st"], ["fu2", "2nd"], ["fu3", "3rd"], ["done", "No reply"]],
+  "Meeting booked": [["good", "Upcoming"], ["warn", "Today"], ["bad", "Past, no result"]],
+  Won: [["good", "Deal value"], ["empty", "No value yet"]],
+  Lost: [["tried", "Said no"], ["done", "No reply"], ["bad", "Do not call"]],
+};
+
+// Calls per day for the last two weeks, with the conversations in each day.
+const chartDays = 14;
+function CallsChart({ calls, onOpenCalls }: { calls: CallRecord[]; onOpenCalls: () => void }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const today = new Date();
+  const days = Array.from({ length: chartDays }, (_, index) => {
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (chartDays - 1 - index));
+    return { date, key: date.toDateString(), calls: 0, conversations: 0 };
+  });
+  const byKey = new Map(days.map((day) => [day.key, day]));
+  for (const attempt of callAttempts(calls)) {
+    const day = byKey.get(new Date(attempt.at).toDateString());
+    if (!day) continue;
+    day.calls += 1;
+    if (attempt.conversation) day.conversations += 1;
+  }
+  const todayCount = days[chartDays - 1].calls;
+  const yesterday = days[chartDays - 2].calls;
+  const average = Math.round(days.slice(0, -1).reduce((sum, day) => sum + day.calls, 0) / (chartDays - 1));
+  // Scale to a round top so the gridlines land on whole numbers.
+  const peak = Math.max(4, ...days.map((day) => day.calls));
+  const top = peak <= 10 ? Math.ceil(peak / 2) * 2 : Math.ceil(peak / 10) * 10;
+  const width = 640;
+  const height = 160;
+  const slot = width / chartDays;
+  const bar = Math.min(28, slot - 8);
+  const y = (value: number) => height - (value / top) * height;
+  const label = (date: Date) => new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+  // A rounded top on the highest segment, square at the baseline.
+  const roundTop = (x: number, y0: number, y1: number) => {
+    const r = Math.min(4, (y1 - y0) / 2, bar / 2);
+    return `M${x},${y1}V${y0 + r}Q${x},${y0} ${x + r},${y0}H${x + bar - r}Q${x + bar},${y0} ${x + bar},${y0 + r}V${y1}Z`;
+  };
+  return (
+    <section className="calls-chart" aria-label={`Calls per day, last ${chartDays} days`}>
+      <header>
+        <div>
+          <h2>Calls per day</h2>
+          <p><b>{todayCount}</b> today · <b>{yesterday}</b> yesterday · <b>{average}</b> a day on average over the last {chartDays - 1} days</p>
+        </div>
+        <ul className="calls-chart__legend" aria-label="Legend">
+          <li><i className="is-conversation" aria-hidden="true" /> Conversations</li>
+          <li><i className="is-other" aria-hidden="true" /> Other calls</li>
+        </ul>
+        <button type="button" className="quiet-button" onClick={onOpenCalls}>See calls</button>
+      </header>
+      <div className="calls-chart__plot">
+        <svg viewBox={`0 -14 ${width} ${height + 34}`} role="img" aria-hidden="true" preserveAspectRatio="none">
+          {[0.5, 1].map((share) => (
+            <g key={share} className="calls-chart__grid">
+              <line x1="0" x2={width} y1={y(top * share)} y2={y(top * share)} />
+              <text x="0" y={y(top * share) - 4}>{top * share}</text>
+            </g>
+          ))}
+          <line className="calls-chart__base" x1="0" x2={width} y1={height} y2={height} />
+          {days.map((day, index) => {
+            const x = index * slot + (slot - bar) / 2;
+            const isToday = index === chartDays - 1;
+            const conversationTop = y(day.conversations);
+            const totalTop = y(day.calls);
+            const other = day.calls - day.conversations;
+            return (
+              <g key={day.key} className={`calls-chart__day${isToday ? " is-today" : ""}${hover === index ? " is-hover" : ""}`}>
+                {day.conversations > 0 && <path className="is-conversation" d={other > 0 ? `M${x},${height}V${conversationTop}H${x + bar}V${height}Z` : roundTop(x, conversationTop, height)} />}
+                {other > 0 && <path className="is-other" d={roundTop(x, totalTop, conversationTop - (day.conversations > 0 ? 2 : 0))} />}
+                {(isToday || hover === index) && day.calls > 0 && <text className="calls-chart__value" x={x + bar / 2} y={totalTop - 6}>{day.calls}</text>}
+                {(index % 2 === 1 || isToday) && <text className="calls-chart__tick" x={x + bar / 2} y={height + 18}>{isToday ? "Today" : label(day.date)}</text>}
+                {/* Hit target: the whole column, taller and wider than the bar. */}
+                <rect className="calls-chart__hit" x={index * slot} y={-14} width={slot} height={height + 34} onMouseEnter={() => setHover(index)} onMouseLeave={() => setHover(null)} />
+              </g>
+            );
+          })}
+        </svg>
+        {hover !== null && (
+          <div className="calls-chart__tip" style={{ left: `${((hover + 0.5) / chartDays) * 100}%` }}>
+            <b>{hover === chartDays - 1 ? "Today" : new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(days[hover].date)}</b>
+            <span>{days[hover].calls} call{days[hover].calls === 1 ? "" : "s"}</span>
+            <span>{days[hover].conversations} conversation{days[hover].conversations === 1 ? "" : "s"}</span>
+          </div>
+        )}
+      </div>
+      <table className="sr-only">
+        <caption>Calls per day</caption>
+        <thead><tr><th scope="col">Day</th><th scope="col">Calls</th><th scope="col">Conversations</th></tr></thead>
+        <tbody>{days.map((day) => <tr key={day.key}><td>{label(day.date)}</td><td>{day.calls}</td><td>{day.conversations}</td></tr>)}</tbody>
+      </table>
+    </section>
+  );
+}
+
 type StatTarget = "calls-today" | "conversations" | "followups" | "to-call";
 
 function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide, onGo }: { state: State; selected: Lead; picker: ReactNode; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void }) {
@@ -1414,6 +1612,7 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const endOfDay = startOfDay + 86_400_000;
   const callsToday = state.calls.filter((call) => new Date(call.at).getTime() >= startOfDay);
+  const attemptsToday = callAttempts(callsToday);
   const followUpsDue = state.leads.filter((lead) => lead.status === "Follow-up" && !lead.dnc && (!/^\d{4}-\d{2}-\d{2}/.test(lead.due) || new Date(lead.due).getTime() < endOfDay)).length;
   const toCall = state.leads.filter(inQueue).length;
   // Today's progress: distinct leads called today out of everything that was in today's queue.
@@ -1456,8 +1655,8 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
         </div>
         <dl className="dash-stats">
           {/* Each number opens the list behind it; the label is a button stretched over the whole tile. */}
-          <div><dt><PhoneOutgoing size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("calls-today")}>Calls today</button></dt><dd>{callsToday.length}</dd></div>
-          <div><dt><MessageSquare size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("conversations")}>Conversations</button></dt><dd>{callsToday.filter((call) => conversationOutcomes.includes(call.outcome)).length}</dd></div>
+          <div><dt><PhoneOutgoing size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("calls-today")}>Calls today</button></dt><dd>{attemptsToday.length}</dd></div>
+          <div><dt><MessageSquare size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("conversations")}>Conversations</button></dt><dd>{attemptsToday.filter((attempt) => attempt.conversation).length}</dd></div>
           <div><dt><Clock size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("followups")}>Follow-ups due</button></dt><dd>{followUpsDue}</dd></div>
           <div><dt><ListTodo size={16} aria-hidden="true" /><button type="button" className="stretch-link" onClick={() => onGo("to-call")}>Left to call</button></dt><dd>{toCall}</dd></div>
         </dl>
@@ -1490,9 +1689,13 @@ function Queue({
   onGuide,
   onAddTask,
   onGo,
+  onOpenPdf,
+  onEditScript,
   calling,
   picker,
 }: {
+  onOpenPdf: (campaign: string) => void;
+  onEditScript: (campaign: string) => void;
   calling: boolean;
   picker: ReactNode;
   onAddLead: () => void;
@@ -1511,6 +1714,9 @@ function Queue({
 }) {
   const upcoming = callQueue(state.leads, state.calls);
   const groups = groupDetails(selected.details);
+  // The script of the lead's first campaign that has one.
+  const scriptCampaign = selected.campaigns?.find((name) => state.campaignSettings?.[name]?.script || state.campaignSettings?.[name]?.pdf);
+  const script = scriptCampaign ? state.campaignSettings![scriptCampaign] : undefined;
   return (
     <div className="queue-page">
       <DashboardBanner
@@ -1526,6 +1732,7 @@ function Queue({
           document.querySelector(".call-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
         }}
       />
+      <CallsChart calls={state.calls} onOpenCalls={() => onGo("calls-today")} />
       <section className="queue-layout">
         <aside className="call-list" aria-label="Calling queue">
           {upcoming.map((lead) => (
@@ -1584,7 +1791,11 @@ function Queue({
                 <select className="status-select" value={selected.status} disabled={selected.dnc} onChange={(event) => onStatus(selected, event.target.value)} aria-label="Pipeline stage">
                   {leadStages.map((stage) => <option key={stage}>{stage}</option>)}
                 </select>
+                <FollowUpTag lead={selected} calls={state.calls} />
               </div>
+              {followUpInfo(selected, state.calls)?.exhausted && (
+                <p className="fu-nudge">{followUpLimit} follow-ups with no reply. <button type="button" className="text-link" onClick={() => onStatus(selected, "Lost")}>Move to Lost</button></p>
+              )}
             </div>
             <div className="dial-strip__actions">
               <button className="call-button" onClick={() => onPrepare(selected)} disabled={selected.dnc || calling}>
@@ -1644,6 +1855,19 @@ function Queue({
             ))}
             {!realNote(selected) && !groups.say.length && <p className="call-script__empty">No talking points yet. <button type="button" className="text-link" onClick={() => onEdit(selected)}>Add a note</button></p>}
           </section>
+          {scriptCampaign && script && (
+            <details className="call-more call-script-full" open>
+              <summary><ChevronRight size={16} aria-hidden="true" /> Script <small>{scriptCampaign}</small></summary>
+              <div className="call-script-full__body">
+                <div className="call-script-full__tools">
+                  {script.pdf && <button type="button" className="quiet-button" onClick={() => onOpenPdf(scriptCampaign)}><FileText size={16} aria-hidden="true" /> Open {script.pdf.name}</button>}
+                  <button type="button" className="quiet-button" onClick={() => onEditScript(scriptCampaign)}>Edit script</button>
+                </div>
+                {script.script && <ScriptView text={script.script} lead={selected} />}
+                {script.pdf && !script.script && <PdfPages campaign={scriptCampaign} />}
+              </div>
+            </details>
+          )}
           {groups.research.length > 0 && (
             <details className="call-more">
               <summary><ChevronRight size={16} aria-hidden="true" /> Research <small>{groups.research.length}</small></summary>
@@ -1865,6 +2089,7 @@ function LeadList({
                       </select>
                     )}
                   </span>
+                  <FollowUpTag lead={lead} calls={calls} />
                 </td>
                 <td><span className="next-step">{latest ? <>{latest.outcome}<small>{new Date(latest.at).toLocaleDateString()}</small></> : "Not yet"}</span></td>
                 <td>{lead.campaigns?.length ? <span className="campaign-tags">{lead.campaigns.map((name, index) => <span key={name}>{index > 0 && ", "}<button type="button" className="text-link" onClick={() => onCampaign(name)} title={`Show only ${name}`}>{name}</button></span>)}</span> : <span className="empty-cell">—</span>}</td>
@@ -1912,8 +2137,10 @@ function dueLabel(due: string) {
 function FollowUps({
   leads,
   allLeads,
+  calls,
   tasks,
   onOpenTask,
+  onQuickAdd,
   onChangeTask,
   done,
   onToggle,
@@ -1921,14 +2148,36 @@ function FollowUps({
 }: {
   leads: Lead[];
   allLeads: Lead[];
+  calls: CallRecord[];
   tasks: Task[];
   onOpenTask: (task: Task) => void;
+  onQuickAdd: (fields: TaskFields) => Promise<void>;
   onChangeTask: (task: Task, change: { done: boolean } | "delete") => void;
   done: Lead[];
   onToggle: (lead: Lead, done: boolean) => void;
   onSelect: (id: string) => void;
 }) {
   const leadOption = (lead: Lead) => `${leadLabel(lead)} · ${lead.company}`;
+  const [addOpen, setAddOpen] = useState(() => { try { return localStorage.getItem("open-dialer-task-add") !== "folded"; } catch { return true; } });
+  const toggleAdd = () => setAddOpen((open) => { try { localStorage.setItem("open-dialer-task-add", open ? "folded" : "open"); } catch {} return !open; });
+  const [title, setTitle] = useState("");
+  const [due, setDue] = useState("");
+  const [leadText, setLeadText] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const quickAdd = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const lead = leadText.trim() ? allLeads.find((item) => leadOption(item) === leadText.trim()) : null;
+    if (leadText.trim() && !lead) return setFormError("Pick the lead from the list, or leave it empty.");
+    setFormError(null);
+    try {
+      await onQuickAdd({ title, details: "", due, leadId: lead?.id || null });
+      setTitle("");
+      setDue("");
+      setLeadText("");
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : "Could not add the task.");
+    }
+  };
   // Dated first, soonest on top; undated after.
   const soonest = (left: string, right: string) => (/^\d{4}-/.test(left) ? new Date(left).getTime() : Infinity) - (/^\d{4}-/.test(right) ? new Date(right).getTime() : Infinity);
   const open = [...leads].sort((left, right) => soonest(left.due, right.due));
@@ -1948,7 +2197,25 @@ function FollowUps({
     <section className="tasks-page">
       <div className="tasks-main">
         <div className="tasks-open">
-          <header><h2>To do</h2><span>{mine.length + open.length}</span></header>
+          <header>
+            <h2>To do</h2>
+            <span className="tasks-open__tools">
+              <span>{mine.length + open.length}</span>
+              <button type="button" className="icon-button" onClick={toggleAdd} aria-expanded={addOpen} aria-label={addOpen ? "Hide the add row" : "Show the add row"} title={addOpen ? "Hide the add row" : "Show the add row"}>
+                <ChevronDown size={18} className={addOpen ? "is-flipped" : undefined} />
+              </button>
+            </span>
+          </header>
+          {addOpen && (
+            <form className="task-add" onSubmit={(event) => void quickAdd(event)}>
+              <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Add a task" aria-label="Task" maxLength={200} required />
+              <input type="datetime-local" value={due} onChange={(event) => setDue(event.target.value)} aria-label="Due (optional)" />
+              <input value={leadText} onChange={(event) => setLeadText(event.target.value)} placeholder="Lead (optional)" aria-label="Lead (optional)" list="task-lead-options" autoComplete="off" />
+              <datalist id="task-lead-options">{allLeads.map((lead) => <option key={lead.id} value={leadOption(lead)} />)}</datalist>
+              <button type="submit" className="primary-button" disabled={!title.trim()}><Plus size={16} aria-hidden="true" /> Add</button>
+              {formError && <p className="form-error" role="alert">{formError}</p>}
+            </form>
+          )}
           {mine.map((task) => {
             const lead = task.leadId ? leadById.get(task.leadId) : undefined;
             const when = task.due ? dueLabel(task.due) : null;
@@ -1983,6 +2250,7 @@ function FollowUps({
                       <button type="button" className="task-item__body" onClick={() => onSelect(lead.id)}>
                         <b>{leadLabel(lead)}</b>
                         <small>{[leadSubtitle(lead), realNote(lead)].filter(Boolean).join(" · ")}</small>
+                        <FollowUpTag lead={lead} calls={calls} />
                       </button>
                       <span className={`task-item__due${when.overdue ? " is-overdue" : ""}`}><CalendarClock size={16} aria-hidden="true" />{when.text}</span>
                       <button type="button" className="icon-button" onClick={() => onSelect(lead.id)} aria-label={`Open ${leadLabel(lead)}`}><ChevronRight size={18} /></button>
@@ -2057,6 +2325,455 @@ function LeadPeek({ lead, calls, onClose, onMove, onEdit, onCall, onAddTask }: {
           <button type="button" className="quiet-button" onClick={() => onEdit(lead)}>Edit</button>
           <button type="button" className="primary-button" onClick={() => onCall(lead.id)} disabled={lead.dnc}><Phone size={16} aria-hidden="true" />Open in dialer</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---- Call scripts ----
+// Pasted scripts use a few plain-text markers and render like the district call script:
+//   # Section            ## Branch heading        > What you say (a "say this" box)
+//   Label:               Note: call-flow note     Example: a muted example
+//   - list item          lines indented by 2 spaces sit inside a branch
+//   **bold**             [Name], [District Name], [fact] fill in from the lead on a call
+const scriptHelp = "# Section · ## Branch · > What you say · Label: · Note: · Example: · - list · indent 2 spaces for a branch · [Name] fills in";
+
+// What a [placeholder] becomes for this lead, or null to leave it marked.
+function scriptSlot(key: string, lead?: Lead) {
+  if (!lead) return null;
+  const k = key.trim().toLowerCase();
+  const detail = (pattern: RegExp) => Object.entries(lead.details || {}).find(([label, value]) => pattern.test(label) && value?.trim())?.[1] || null;
+  if (k === "first name") return lead.name ? lead.name.replace(/^(dr|mr|mrs|ms|mx)\.?\s+/i, "").split(/\s+/)[0] : null;
+  if (/^(name|contact|contact name|their name|full name)$/.test(k)) return lead.name || null;
+  if (/^(district|district name|company|organization|school system|school district)$/.test(k)) return lead.company && lead.company !== "Unassigned" ? lead.company : null;
+  if (k === "state") return leadState(lead)?.[1] || null;
+  if (k.includes("fact")) return detail(/fact/i);
+  return Object.entries(lead.details || {}).find(([label]) => label.trim().toLowerCase() === k)?.[1] || null;
+}
+
+function ScriptInline({ text, lead }: { text: string; lead?: Lead }) {
+  return (
+    <>
+      {text.split(/(\*\*[^*]+\*\*|\[[^\]]+\])/).map((part, index) => {
+        if (/^\*\*[^*]+\*\*$/.test(part)) return <strong key={index}>{part.slice(2, -2)}</strong>;
+        if (/^\[[^\]]+\]$/.test(part)) {
+          const value = scriptSlot(part.slice(1, -1), lead);
+          return <mark key={index} className={value ? "script-fill" : "script-slot"}>{value || part}</mark>;
+        }
+        return part;
+      })}
+    </>
+  );
+}
+
+function ScriptView({ text, lead }: { text: string; lead?: Lead }) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const blocks: ReactNode[] = [];
+  let list: string[] = [];
+  const flushList = () => {
+    if (list.length) blocks.push(<ul key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}><ScriptInline text={item} lead={lead} /></li>)}</ul>);
+    list = [];
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index];
+    // A run of indented lines is a branch: rendered the same way, inside an indented rule.
+    if (/^(\s{2,}|\t)\S/.test(raw)) {
+      flushList();
+      const branch: string[] = [];
+      while (index < lines.length && (/^(\s{2,}|\t)\S/.test(lines[index]) || (!lines[index].trim() && /^(\s{2,}|\t)\S/.test(lines[index + 1] || "")))) branch.push(lines[index++].replace(/^(\s{2}|\t)/, ""));
+      index -= 1;
+      blocks.push(<div className="script-branch" key={`branch-${index}`}><ScriptView text={branch.join("\n")} lead={lead} /></div>);
+      continue;
+    }
+    const line = raw.trim();
+    if (/^[-*]\s+/.test(line)) { list.push(line.replace(/^[-*]\s+/, "")); continue; }
+    flushList();
+    if (!line) continue;
+    const key = `line-${index}`;
+    if (/^##\s+/.test(line)) blocks.push(<h4 className="script-sub" key={key}><ScriptInline text={line.replace(/^##\s+/, "")} lead={lead} /></h4>);
+    else if (/^#\s+/.test(line)) blocks.push(<h3 className="script-section" key={key}><ScriptInline text={line.replace(/^#\s+/, "")} lead={lead} /></h3>);
+    else if (/^>\s?/.test(line)) blocks.push(<blockquote className="script-say" key={key}><ScriptInline text={line.replace(/^>\s?/, "")} lead={lead} /></blockquote>);
+    else if (/^["“].+["”]$/.test(line)) blocks.push(<blockquote className="script-say" key={key}><ScriptInline text={line.slice(1, -1)} lead={lead} /></blockquote>);
+    else if (/^(note|flow):\s*/i.test(line)) blocks.push(<blockquote className="script-note" key={key}><ScriptInline text={line.replace(/^(note|flow):\s*/i, "")} lead={lead} /></blockquote>);
+    else if (/^example:\s*/i.test(line)) blocks.push(<p className="script-example" key={key}><ScriptInline text={line} lead={lead} /></p>);
+    else if (line.endsWith(":") && line.length <= 70 && !/[.!?]\s/.test(line)) blocks.push(<p className="script-label" key={key}><ScriptInline text={line.slice(0, -1)} lead={lead} /></p>);
+    else blocks.push(<p key={key}><ScriptInline text={line} lead={lead} /></p>);
+  }
+  flushList();
+  return <div className="script">{blocks}</div>;
+}
+
+// ---- Live script editor ----
+// Each line is a block styled as it will look on the call card. Typing a marker at the start of a line
+// ("# ", "## ", "> ", "- ", "Note: ") turns the line into that block; the script still saves as plain text.
+type ScriptBlockType = "p" | "section" | "sub" | "say" | "note" | "example" | "li";
+const blockPrefix: Record<ScriptBlockType, string> = { p: "", section: "# ", sub: "## ", say: "> ", note: "Note: ", example: "", li: "- " };
+const blockShortcuts: [RegExp, ScriptBlockType, boolean][] = [
+  // [what was typed at the start of a plain line, block it becomes, keep the typed text?]
+  [/^##\s/, "sub", false], [/^#\s/, "section", false], [/^>\s/, "say", false], [/^[-*]\s/, "li", false],
+  [/^note:\s/i, "note", false], [/^example:\s/i, "example", true],
+];
+
+function parseScriptBlocks(text: string) {
+  return text.replace(/\r\n/g, "\n").split("\n").map((raw) => {
+    const indent = Math.min(3, (raw.match(/^(?: {2}|\t)*/)?.[0] || "").replace(/\t/g, "  ").length / 2);
+    const line = raw.trim();
+    const block = (type: ScriptBlockType, value: string) => ({ type, indent: Math.floor(indent), text: value });
+    if (/^##\s+/.test(line)) return block("sub", line.replace(/^##\s+/, ""));
+    if (/^#\s+/.test(line)) return block("section", line.replace(/^#\s+/, ""));
+    if (/^>\s?/.test(line)) return block("say", line.replace(/^>\s?/, ""));
+    if (/^["“].+["”]$/.test(line)) return block("say", line.slice(1, -1));
+    if (/^(note|flow):\s*/i.test(line)) return block("note", line.replace(/^(note|flow):\s*/i, ""));
+    if (/^example:\s*/i.test(line)) return block("example", line);
+    if (/^[-*]\s+/.test(line)) return block("li", line.replace(/^[-*]\s+/, ""));
+    return block("p", line);
+  });
+}
+
+const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// **bold** shows as bold while editing.
+const inlineToHtml = (text: string) => escapeHtml(text).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+const isLabelText = (text: string) => text.trim().endsWith(":") && text.trim().length <= 70 && !/[.!?]\s/.test(text);
+
+function blockElement(type: ScriptBlockType, indent: number, html: string) {
+  const line = document.createElement("div");
+  line.className = "se-line";
+  line.dataset.type = type;
+  line.dataset.indent = String(indent);
+  line.innerHTML = html || "<br>";
+  return line;
+}
+
+// Text of one line, with bold written back as **bold**.
+function lineText(node: Node): string {
+  let out = "";
+  node.childNodes.forEach((child) => {
+    if (child.nodeType === Node.TEXT_NODE) out += child.textContent || "";
+    else if (child instanceof HTMLElement && child.tagName !== "BR") {
+      const inner = lineText(child);
+      out += /^(B|STRONG)$/.test(child.tagName) && inner.trim() ? `**${inner}**` : inner;
+    }
+  });
+  return out.replace(/\u00a0/g, " ");
+}
+
+function serializeScript(editor: HTMLElement) {
+  const lines = [...editor.querySelectorAll<HTMLElement>(":scope > .se-line")].map((line) => {
+    const type = (line.dataset.type || "p") as ScriptBlockType;
+    let text = lineText(line).replace(/\*\*\*\*/g, "").trimEnd();
+    if (type === "example" && !/^example:/i.test(text)) text = `Example: ${text}`;
+    if (!text.trim() && type === "p") return "";
+    return "  ".repeat(Number(line.dataset.indent || 0)) + blockPrefix[type] + text.trimStart();
+  });
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function ScriptEditor({ initial, editorRef }: { initial: string; editorRef: { current: HTMLDivElement | null } }) {
+  const [empty, setEmpty] = useState(!initial.trim());
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.replaceChildren(...(initial.trim() ? parseScriptBlocks(initial) : [{ type: "p" as const, indent: 0, text: "" }]).map((block) => blockElement(block.type, block.indent, inlineToHtml(block.text))));
+    editor.querySelectorAll<HTMLElement>(".se-line").forEach(markLabel);
+  }, []);
+  const currentLine = () => {
+    const node = window.getSelection()?.anchorNode;
+    const element = node && (node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement);
+    const line = element?.closest<HTMLElement>(".se-line");
+    return line && editorRef.current?.contains(line) ? line : null;
+  };
+  const caretOffset = (line: HTMLElement) => {
+    const selection = window.getSelection();
+    if (!selection?.rangeCount) return 0;
+    const range = selection.getRangeAt(0).cloneRange();
+    range.selectNodeContents(line);
+    range.setEnd(selection.getRangeAt(0).startContainer, selection.getRangeAt(0).startOffset);
+    return range.toString().length;
+  };
+  const placeCaret = (line: HTMLElement, offset: number) => {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    let left = offset;
+    const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const length = node.textContent?.length || 0;
+      if (left <= length) {
+        range.setStart(node, left);
+        range.collapse(true);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        return;
+      }
+      left -= length;
+    }
+    range.selectNodeContents(line);
+    range.collapse(false);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  };
+  function markLabel(line: HTMLElement) {
+    line.classList.toggle("is-label", line.dataset.type === "p" && isLabelText(line.textContent || ""));
+  }
+  const setType = (line: HTMLElement, type: ScriptBlockType) => {
+    line.dataset.type = type;
+    markLabel(line);
+  };
+  const setIndent = (line: HTMLElement, change: number) => {
+    line.dataset.indent = String(Math.max(0, Math.min(3, Number(line.dataset.indent || 0) + change)));
+  };
+  // Keep every piece of text inside a line block (browsers sometimes type straight into the editor).
+  const normalize = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    [...editor.childNodes].forEach((node) => {
+      if (node instanceof HTMLElement && node.classList.contains("se-line")) return;
+      const line = blockElement("p", 0, "");
+      line.replaceChildren();
+      editor.insertBefore(line, node);
+      line.appendChild(node);
+    });
+    if (!editor.querySelector(".se-line")) editor.appendChild(blockElement("p", 0, ""));
+    setEmpty(!editor.textContent?.trim() && editor.querySelectorAll(".se-line").length === 1);
+  };
+  const onInput = () => {
+    normalize();
+    const line = currentLine();
+    if (!line) return;
+    if (line.dataset.type === "p") {
+      const text = (line.textContent || "").replace(/\u00a0/g, " ");
+      for (const [pattern, type, keep] of blockShortcuts) {
+        const match = text.match(pattern);
+        if (!match) continue;
+        const offset = caretOffset(line);
+        if (!keep) {
+          line.innerHTML = inlineToHtml(text.slice(match[0].length)) || "<br>";
+          setType(line, type);
+          placeCaret(line, Math.max(0, offset - match[0].length));
+        } else setType(line, type);
+        return;
+      }
+    }
+    markLabel(line);
+  };
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const line = currentLine();
+    if (!line) return;
+    const type = (line.dataset.type || "p") as ScriptBlockType;
+    const atStart = caretOffset(line) === 0 && (window.getSelection()?.isCollapsed ?? true);
+    if (event.key === "Tab") {
+      event.preventDefault();
+      setIndent(line, event.shiftKey ? -1 : 1);
+      return;
+    }
+    if (event.key === "Backspace" && atStart) {
+      // Undo formatting first, then indentation, before joining with the line above.
+      if (type !== "p") { event.preventDefault(); setType(line, "p"); return; }
+      if (Number(line.dataset.indent || 0) > 0) { event.preventDefault(); setIndent(line, -1); return; }
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      const isEmpty = !(line.textContent || "").trim();
+      // Enter on an empty formatted line ends that format, like a word processor's lists.
+      if (isEmpty && type !== "p") { setType(line, "p"); return; }
+      const selection = window.getSelection();
+      if (!selection?.rangeCount) return;
+      const range = selection.getRangeAt(0);
+      range.deleteContents();
+      const tail = document.createRange();
+      tail.setStart(range.startContainer, range.startOffset);
+      tail.setEnd(line, line.childNodes.length);
+      const moved = tail.extractContents();
+      const next = blockElement(type === "li" ? "li" : "p", Number(line.dataset.indent || 0), "");
+      if (moved.textContent) next.replaceChildren(moved);
+      if (!line.textContent && !line.querySelector("br")) line.innerHTML = "<br>";
+      // Enter at the very start of a formatted line pushes it down as-is and opens a plain line above.
+      if (atStart && !isEmpty) {
+        const above = blockElement("p", Number(line.dataset.indent || 0), "");
+        line.replaceChildren(...[...next.childNodes]);
+        line.parentElement!.insertBefore(above, line);
+        placeCaret(line, 0);
+        markLabel(line);
+        return;
+      }
+      line.after(next);
+      markLabel(line);
+      markLabel(next);
+      placeCaret(next, 0);
+    }
+  };
+  const onPaste = (event: React.ClipboardEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const text = event.clipboardData.getData("text/plain");
+    if (!text.includes("\n")) { document.execCommand("insertText", false, text); return; }
+    // Several lines: paste them as blocks after the current line (into it, if it's empty).
+    const line = currentLine();
+    const blocks = parseScriptBlocks(text).map((block) => blockElement(block.type, block.indent, inlineToHtml(block.text)));
+    blocks.forEach(markLabel);
+    if (line && !(line.textContent || "").trim()) line.replaceWith(...blocks);
+    else if (line) line.after(...blocks);
+    else editorRef.current?.append(...blocks);
+    placeCaret(blocks[blocks.length - 1], Number.MAX_SAFE_INTEGER);
+    normalize();
+  };
+  const apply = (type: ScriptBlockType | "indent" | "outdent" | "bold") => {
+    editorRef.current?.focus();
+    if (type === "bold") return void document.execCommand("bold");
+    const line = currentLine() || editorRef.current?.querySelector<HTMLElement>(".se-line:last-child");
+    if (!line) return;
+    if (type === "indent" || type === "outdent") return setIndent(line, type === "indent" ? 1 : -1);
+    setType(line, line.dataset.type === type ? "p" : type);
+  };
+  const tools: [ScriptBlockType | "indent" | "outdent" | "bold", string, string][] = [
+    ["section", "Section", "# "], ["sub", "Branch", "## "], ["say", "Say this", "> "], ["note", "Note", "Note: "],
+    ["li", "List", "- "], ["p", "Text", ""], ["bold", "Bold", "Ctrl+B"], ["indent", "Indent", "Tab"], ["outdent", "Outdent", "Shift+Tab"],
+  ];
+  return (
+    <div className="script-editor-wrap">
+      <div className="script-editor__toolbar" role="toolbar" aria-label="Formatting">
+        {tools.map(([type, label, hint]) => (
+          <button type="button" key={type} title={hint ? `${label} (${hint})` : label} onMouseDown={(event) => event.preventDefault()} onClick={() => apply(type)}>{label}</button>
+        ))}
+      </div>
+      <div
+        ref={editorRef}
+        className={`script-editor script${empty ? " is-empty" : ""}`}
+        contentEditable
+        suppressContentEditableWarning
+        role="textbox"
+        aria-multiline="true"
+        aria-label="Script"
+        spellCheck
+        onInput={onInput}
+        onKeyDown={onKeyDown}
+        onPaste={onPaste}
+        data-placeholder="Type your script. Start a line with # for a section, > for what you say, - for a list."
+      />
+      <small className="script-dialog__help">Shortcuts at the start of a line: <b># </b> section · <b>## </b> branch · <b>&gt; </b> say this · <b>- </b> list · <b>Note: </b> note · a short line ending in <b>:</b> is a label · Tab indents into a branch · [Name], [District Name] and [fact] fill in on calls</small>
+    </div>
+  );
+}
+
+// Add or edit a campaign's script: write it in the live editor and/or upload a PDF.
+function ScriptDialog({ campaign, settings, onViewPdf, onClose, onChanged }: { campaign: string; settings: CampaignSettings; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean) => Promise<void> }) {
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [onClose]);
+  const run = async (work: () => Promise<unknown>, message: string, close: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await work();
+      await onChanged(message, close);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save the script.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const save = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const text = editorRef.current ? serializeScript(editorRef.current) : settings.script || "";
+    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign, script: text }) }), text.trim() ? `Script saved for ${campaign}.` : `Script removed from ${campaign}.`, true);
+  };
+  const upload = (file: File | undefined) => {
+    if (!file) return;
+    // Uploads are capped at 5 MB of text, and base64 adds a third.
+    if (file.size > 3_500_000) return setError("That PDF is over 3.5 MB. Export a smaller one, or paste the script as text.");
+    const reader = new FileReader();
+    reader.onload = () => void run(() => api("/api/campaigns/script-pdf", { method: "POST", body: JSON.stringify({ campaign, fileName: file.name, data: String(reader.result).split(",")[1] || "" }) }), `${file.name} added to ${campaign}.`, false);
+    reader.readAsDataURL(file);
+  };
+  return (
+    <div className="modal-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <form className="lead-form script-dialog" onSubmit={save} role="dialog" aria-modal="true" aria-labelledby="script-dialog-title">
+        <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
+        <h2 id="script-dialog-title">Script for {campaign}</h2>
+        <p>Shows on the call screen for every lead in this campaign. Paste it as text, upload a PDF, or both.</p>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <ScriptEditor initial={settings.script || ""} editorRef={editorRef} />
+        <div className="script-dialog__pdf">
+          <FileText size={18} aria-hidden="true" />
+          {settings.pdf ? (
+            <>
+              <span><b>{settings.pdf.name}</b><small>{Math.max(1, Math.round(settings.pdf.size / 1024))} KB</small></span>
+              <button type="button" className="quiet-button" onClick={onViewPdf}>View</button>
+              <label className="quiet-button script-dialog__file">Replace<input type="file" accept="application/pdf,.pdf" onChange={(event) => upload(event.target.files?.[0])} /></label>
+              <button type="button" className="quiet-button" disabled={busy} onClick={() => void run(() => api(`/api/campaigns/script-pdf?campaign=${encodeURIComponent(campaign)}`, { method: "DELETE" }), `PDF removed from ${campaign}.`, false)}>Remove</button>
+            </>
+          ) : (
+            <>
+              <span><b>Script PDF</b><small>Optional. Opens in a viewer from the call screen</small></span>
+              <label className="quiet-button script-dialog__file">Upload PDF<input type="file" accept="application/pdf,.pdf" onChange={(event) => upload(event.target.files?.[0])} /></label>
+            </>
+          )}
+        </div>
+        <div className="task-dialog__actions">
+          <button type="button" className="quiet-button" onClick={onClose}>Cancel</button>
+          <button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save script"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// The PDF's pages drawn with pdf.js, fitted to the column width: no browser toolbar or thumbnail sidebar.
+function PdfPages({ campaign }: { campaign: string }) {
+  const box = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const observer = new ResizeObserver(([entry]) => setWidth(Math.round(entry.contentRect.width)));
+    if (box.current) observer.observe(box.current);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!width || !box.current) return;
+    let cancelled = false;
+    (async () => {
+      const [pdfjs, worker] = await Promise.all([import("pdfjs-dist"), import("pdfjs-dist/build/pdf.worker.min.mjs?url")]);
+      pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
+      const pdf = await pdfjs.getDocument(`/api/campaigns/script-pdf?campaign=${encodeURIComponent(campaign)}`).promise;
+      const canvases: HTMLCanvasElement[] = [];
+      for (let number = 1; number <= pdf.numPages; number++) {
+        const page = await pdf.getPage(number);
+        const viewport = page.getViewport({ scale: (width / page.getViewport({ scale: 1 }).width) * devicePixelRatio });
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        canvas.setAttribute("aria-label", `Page ${number} of ${pdf.numPages}`);
+        await page.render({ canvas, viewport }).promise;
+        if (cancelled) return;
+        canvases.push(canvas);
+      }
+      if (!cancelled && box.current) box.current.replaceChildren(...canvases);
+    })().catch(() => { if (!cancelled) setError("Couldn't show this PDF. Try opening it in a new tab."); });
+    return () => { cancelled = true; };
+  }, [campaign, width]);
+  return <>{error && <p className="call-script__empty">{error}</p>}<div className="pdf-pages" ref={box} /></>;
+}
+
+// The campaign's script PDF, large enough to read during a call.
+function PdfViewer({ campaign, name, onClose }: { campaign: string; name: string; onClose: () => void }) {
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [onClose]);
+  const src = `/api/campaigns/script-pdf?campaign=${encodeURIComponent(campaign)}`;
+  return (
+    <div className="modal-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="pdf-viewer" role="dialog" aria-modal="true" aria-label={name}>
+        <header>
+          <b>{name}</b>
+          <a className="quiet-button" href={src} target="_blank" rel="noreferrer"><ExternalLink size={16} aria-hidden="true" /> Open in a new tab</a>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </header>
+        <div className="pdf-viewer__body"><PdfPages campaign={campaign} /></div>
       </div>
     </div>
   );
@@ -2152,7 +2869,10 @@ function Pipeline({
                 if (lead && lead.status !== stage) onMove(lead, stage);
               }}
             >
-              <header><b>{stage}</b><span>{items.length}</span></header>
+              <header>
+                <b>{stage}</b><span>{items.length}</span>
+                <p className="stage-legend" aria-label={`${stage} legend`}>{stageLegends[stage].map(([tone, label]) => <span key={label}><Dots tones={[tone]} />{label}</span>)}</p>
+              </header>
               <div className="pipeline-cards">
                 {items.map((lead) => (
                   <article
@@ -2169,7 +2889,8 @@ function Pipeline({
                   >
                     <b>{leadLabel(lead)}</b>
                     <small>{leadSubtitle(lead)}</small>
-                    <span className="pipeline-card__meta">{formatPhone(lead.phone, lead.extension)}{lead.dnc ? " · Do not call" : ""}</span>
+                    <span className="pipeline-card__meta">{formatPhone(lead.phone, lead.extension)}</span>
+                    <StageLine lead={lead} calls={calls} />
                     {lead.campaigns?.length ? <span className="pipeline-card__meta">{lead.campaigns.join(", ")}</span> : null}
                   </article>
                 ))}
@@ -2184,7 +2905,7 @@ function Pipeline({
   );
 }
 
-function Campaigns({ leads, onStart, onView, onStage, onImport }: { leads: Lead[]; onStart: (name: string) => void; onView: (name: string) => void; onStage: (name: string) => void; onImport: () => void }) {
+function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScript }: { leads: Lead[]; onStart: (name: string) => void; onView: (name: string) => void; onStage: (name: string) => void; onImport: () => void; settings: Record<string, CampaignSettings>; onScript: (name: string) => void }) {
   const names = campaignsOf(leads);
   const untagged = leads.filter((lead) => !lead.campaigns?.length).length;
   return (
@@ -2200,13 +2921,18 @@ function Campaigns({ leads, onStart, onView, onStage, onImport }: { leads: Lead[
           const toCall = items.filter(inQueue).length;
           return (
             <article className="campaign-card" key={name}>
-              <header><h2>{name}</h2><span>{items.length} lead{items.length === 1 ? "" : "s"}</span></header>
+              <header><h2>{name}</h2><span>{items.length} lead{items.length === 1 ? "" : "s"}{settings[name]?.script || settings[name]?.pdf ? " · Script" : ""}</span></header>
+              {/* One bar for the whole campaign: each stage's share of its leads, same colors as the counts below. */}
+              <div className="campaign-bar" aria-hidden="true">
+                {leadStages.map((stage) => { const count = items.filter((lead) => lead.status === stage).length; return count ? <i key={stage} className={`dot--${campaignStageTone[stage]}`} style={{ flexGrow: count }} /> : null; })}
+              </div>
               <dl className="campaign-stages">
-                {leadStages.map((stage) => <div key={stage}><dt><button type="button" className="stretch-link" onClick={() => onStage(name)} title={`Open ${name} on the pipeline`}>{stage}</button></dt><dd>{items.filter((lead) => lead.status === stage).length}</dd></div>)}
+                {leadStages.map((stage) => <div key={stage}><dt><button type="button" className="stretch-link" onClick={() => onStage(name)} title={`Open ${name} on the pipeline`}><Dots tones={[campaignStageTone[stage]]} />{stage === "Meeting booked" ? "Meetings" : stage}</button></dt><dd>{items.filter((lead) => lead.status === stage).length}</dd></div>)}
               </dl>
               <div className="campaign-card__actions">
-                <button type="button" className="quiet-button" onClick={() => onView(name)}>View leads</button>
-                <button type="button" className="quiet-button" disabled={!toCall} onClick={() => onStart(name)}><PhoneCall size={16} aria-hidden="true" /> Start calling ({toCall})</button>
+                <button type="button" className="text-link" onClick={() => onScript(name)}>{settings[name]?.script || settings[name]?.pdf ? "Script" : "Add script"}</button>
+                <button type="button" className="text-link" onClick={() => onView(name)}>View leads</button>
+                <button type="button" className="primary-button" disabled={!toCall} onClick={() => onStart(name)}><PhoneCall size={16} aria-hidden="true" /> Start calling ({toCall})</button>
               </div>
             </article>
           );
@@ -2437,6 +3163,18 @@ function CallOutcome({ lead, bookingUrl, onBook, onClose, onSaved }: { lead: Lea
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState("");
+  const [followUpAt, setFollowUpAt] = useState("");
+  // A dropped voicemail gets a follow-up two business days out at 10:00, unless a time is already set.
+  const pickOutcome = (value: string) => {
+    setOutcome(value);
+    if (value !== "Voicemail" || followUpAt) return;
+    const date = new Date();
+    for (let added = 0; added < 2; ) {
+      date.setDate(date.getDate() + 1);
+      if (date.getDay() !== 0 && date.getDay() !== 6) added += 1;
+    }
+    setFollowUpAt(`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T10:00`);
+  };
   // A callback or a meeting without a time never becomes a task, so those two need one.
   const needsDate = outcome === "Callback" || outcome === "Meeting booked";
   const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt") }) }); await onSaved(String(form.get("outcome"))); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
@@ -2447,11 +3185,11 @@ function CallOutcome({ lead, bookingUrl, onBook, onClose, onSaved }: { lead: Lea
         <h2 id="outcome-title">Log call outcome</h2>
         <p>Record the result for {leadLabel(lead)}. This updates the lead and call history, then moves you to the next lead.</p>
         {error && <p className="form-error" role="alert">{error}</p>}
-        <label>Outcome<select name="outcome" value={outcome} onChange={(event) => setOutcome(event.target.value)} required><option value="" disabled>Choose what happened…</option><option>Interested</option><option>Meeting booked</option><option>Callback</option><option>Maybe later</option><option>No answer</option><option>Busy</option><option>Voicemail</option><option>Not interested</option><option>Wrong number</option><option>Do not call</option></select></label>
+        <label>Outcome<select name="outcome" value={outcome} onChange={(event) => pickOutcome(event.target.value)} required><option value="" disabled>Choose what happened…</option><option>Interested</option><option>Meeting booked</option><option>Callback</option><option>Maybe later</option><option>No answer</option><option>Busy</option><option>Voicemail</option><option>Not interested</option><option>Wrong number</option><option>Do not call</option></select></label>
         {outcome === "Meeting booked" && (bookingUrl
           ? <button type="button" className="quiet-button outcome-book" onClick={onBook}><CalendarPlus size={16} aria-hidden="true" /> Open your booking page</button>
           : <p className="outcome-hint">Add your Calendly or Cal.com link in Settings to book from here.</p>)}
-        <label>{outcome === "Meeting booked" ? "Meeting date and time" : outcome === "Callback" ? "Call back on" : "Follow-up date and time"}{needsDate && <small>Required</small>}<input name="followUpAt" type="datetime-local" required={needsDate} /></label>
+        <label>{outcome === "Meeting booked" ? "Meeting date and time" : outcome === "Callback" ? "Call back on" : outcome === "Voicemail" ? "Follow up on" : "Follow-up date and time"}{needsDate && <small>Required</small>}<input name="followUpAt" type="datetime-local" required={needsDate} value={followUpAt} onChange={(event) => setFollowUpAt(event.target.value)} /></label>
         <label>Notes<textarea name="note" placeholder="What happened on this call?" /></label>
         <button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save outcome"}</button>
       </form>

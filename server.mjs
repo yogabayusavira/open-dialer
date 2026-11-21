@@ -12,6 +12,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -148,7 +149,12 @@ function normalizeState(stored) {
     ...structuredClone(defaultState),
     ...stored,
     leads: (Array.isArray(stored.leads) ? stored.leads : structuredClone(defaultState.leads))
-      .map((lead) => migrateLead(lead, Array.isArray(stored.opportunities) ? stored.opportunities : [])),
+      .map((lead) => migrateLead(lead, Array.isArray(stored.opportunities) ? stored.opportunities : []))
+      .map((lead) => {
+        if (lead.status !== "Follow-up" || lead.followUpSince) return lead;
+        const reached = (Array.isArray(stored.calls) ? stored.calls : []).find((call) => call.leadId === lead.id && reachedOutcomes.includes(call.outcome));
+        return { ...lead, followUpSince: reached?.at || "" };
+      }),
     activity: Array.isArray(stored.activity)
       ? stored.activity
       : structuredClone(defaultState.activity),
@@ -158,6 +164,8 @@ function normalizeState(stored) {
     calls: Array.isArray(stored.calls) ? stored.calls : [],
     // Tasks you write yourself. Callbacks and meetings stay derived from leads.
     tasks: Array.isArray(stored.tasks) ? stored.tasks : [],
+    // Per campaign: a pasted call script and, if uploaded, which PDF (the file itself is stored on its own).
+    campaignSettings: stored.campaignSettings && typeof stored.campaignSettings === "object" && !Array.isArray(stored.campaignSettings) ? stored.campaignSettings : {},
     dncNumbers: Array.isArray(stored.dncNumbers) ? [...new Set(stored.dncNumbers.map(phoneKey))] : [],
     connection: stored.connection || null,
     settings: stored.settings && typeof stored.settings === "object" ? stored.settings : {},
@@ -195,6 +203,26 @@ async function readState() {
     return structuredClone(defaultState);
   }
   return readFileState() || structuredClone(defaultState);
+}
+// Large files (script PDFs) live in their own rows/files so the workspace record stays small.
+function blobPath(id) {
+  return join(storeDir, "files", `${createHash("sha256").update(id).digest("hex")}.json`);
+}
+async function readBlob(id) {
+  const client = await databaseClient();
+  if (client) return (await client.query("SELECT payload FROM open_dialer_state WHERE id = $1", [id])).rows[0]?.payload || null;
+  return existsSync(blobPath(id)) ? JSON.parse(readFileSync(blobPath(id), "utf8")) : null;
+}
+async function writeBlob(id, payload) {
+  const client = await databaseClient();
+  if (client) {
+    if (payload === null) await client.query("DELETE FROM open_dialer_state WHERE id = $1", [id]);
+    else await client.query("INSERT INTO open_dialer_state (id, payload, updated_at) VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()", [id, JSON.stringify(payload)]);
+    return;
+  }
+  if (payload === null) return rmSync(blobPath(id), { force: true });
+  mkdirSync(join(storeDir, "files"), { recursive: true });
+  writeFileSync(blobPath(id), JSON.stringify(payload), { mode: 0o600 });
 }
 let stateQueue = Promise.resolve();
 // Runs read-change-save steps one at a time, so requests arriving together (like Twilio's call reports)
@@ -277,7 +305,15 @@ function migrateLead(lead, opportunities) {
 }
 // What a logged call outcome moves the lead to. No answer, busy and voicemail leave the stage alone;
 // the rest only move a lead forward, except Lost.
-const outcomeStage = { Callback: "Follow-up", "Maybe later": "Follow-up", Interested: "Follow-up", "Meeting booked": "Meeting booked", "Not interested": "Lost", "Wrong number": "Lost", "Do not call": "Lost" };
+const outcomeStage = { Callback: "Follow-up", "Maybe later": "Follow-up", Interested: "Follow-up", Voicemail: "Follow-up", "Meeting booked": "Meeting booked", "Not interested": "Lost", "Wrong number": "Lost", "Do not call": "Lost" };
+const reachedOutcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "Not interested", "Wrong number", "Do not call"];
+// Why a lead is being followed up, shown as a tag next to its follow-up number.
+const followUpReasons = { Interested: "Interested", Callback: "Callback asked", "Maybe later": "Maybe later", Voicemail: "Voicemail left" };
+// Follow-up numbers count calls made after this moment, so a lead entering Follow-up starts at "1 of 3".
+function enterStage(lead, next) {
+  if (next === "Follow-up" && lead.status !== "Follow-up") lead.followUpSince = new Date().toISOString();
+  lead.status = next;
+}
 function stageAfterOutcome(current, outcome) {
   const next = outcomeStage[outcome];
   if (!next) return current;
@@ -600,6 +636,7 @@ function mime(path) {
     {
       ".html": "text/html",
       ".js": "text/javascript",
+      ".mjs": "text/javascript",
       ".css": "text/css",
       ".svg": "image/svg+xml",
       ".png": "image/png",
@@ -744,6 +781,53 @@ createServer(async (req, res) => {
       await writeState(state);
       return json(res, 201, lead);
     }
+    if (url.pathname === "/api/campaigns/script" && req.method === "PUT") {
+      const { campaign, script } = await getBody(req);
+      const name = campaignName(campaign);
+      if (!name) return json(res, 400, { error: "Choose a campaign." });
+      const text = typeof script === "string" ? script.replace(/\r\n/g, "\n").trim().slice(0, 20000) : "";
+      const state = await readState();
+      if (!state.leads.some((lead) => lead.campaigns.includes(name))) return json(res, 404, { error: "That campaign has no leads." });
+      state.campaignSettings[name] = { ...state.campaignSettings[name], script: text };
+      activity(state, text ? "Script saved" : "Script removed", name);
+      await writeState(state);
+      return json(res, 200, state.campaignSettings[name]);
+    }
+    if (url.pathname === "/api/campaigns/script-pdf") {
+      const name = campaignName(req.method === "GET" || req.method === "DELETE" ? url.searchParams.get("campaign") : "");
+      const blobId = (campaign) => `script-pdf:${campaign}`;
+      if (req.method === "GET") {
+        const file = name && (await readBlob(blobId(name)));
+        if (!file) return json(res, 404, { error: "No script PDF for this campaign." });
+        // Shown inline in the app's viewer; never cached, since it can be replaced.
+        res.writeHead(200, { "content-type": "application/pdf", "content-disposition": `inline; filename="${String(file.name).replace(/[^\w .-]/g, "_")}"`, "cache-control": "no-store" });
+        return res.end(Buffer.from(file.data, "base64"));
+      }
+      if (req.method === "POST") {
+        const { campaign, fileName, data } = await getBody(req);
+        const target = campaignName(campaign);
+        if (!target) return json(res, 400, { error: "Choose a campaign." });
+        const bytes = typeof data === "string" ? Buffer.from(data, "base64") : Buffer.alloc(0);
+        if (bytes.subarray(0, 5).toString("latin1") !== "%PDF-") return json(res, 400, { error: "That file isn't a PDF." });
+        const state = await readState();
+        if (!state.leads.some((lead) => lead.campaigns.includes(target))) return json(res, 404, { error: "That campaign has no leads." });
+        const fileLabel = cleanText(fileName, 120) || "script.pdf";
+        await writeBlob(blobId(target), { name: fileLabel, data: bytes.toString("base64") });
+        state.campaignSettings[target] = { ...state.campaignSettings[target], pdf: { name: fileLabel, size: bytes.length, updatedAt: new Date().toISOString() } };
+        activity(state, "Script PDF uploaded", `${target} · ${fileLabel}`);
+        await writeState(state);
+        return json(res, 200, state.campaignSettings[target]);
+      }
+      if (req.method === "DELETE") {
+        if (!name) return json(res, 400, { error: "Choose a campaign." });
+        await writeBlob(blobId(name), null);
+        const state = await readState();
+        if (state.campaignSettings[name]) delete state.campaignSettings[name].pdf;
+        activity(state, "Script PDF removed", name);
+        await writeState(state);
+        return json(res, 200, state.campaignSettings[name] || {});
+      }
+    }
     if (url.pathname === "/api/tasks" && req.method === "POST") {
       const { title, details, due, leadId } = await getBody(req);
       const text = cleanText(title, 200);
@@ -824,6 +908,7 @@ createServer(async (req, res) => {
           id: `lead_${Date.now()}_${index}`,
           ...candidate,
           status: dnc ? "Lost" : candidate.status,
+          ...(candidate.status === "Follow-up" && !dnc ? { followUpSince: new Date().toISOString() } : {}),
           campaigns: tag ? [tag] : [],
           dnc,
           note: dnc ? "Do not call: matched the workspace suppression list." : candidate.note,
@@ -927,7 +1012,7 @@ createServer(async (req, res) => {
       }
       if (typeof body.status === "string") {
         if (!leadStages.includes(body.status)) return json(res, 400, { error: "Choose a valid stage." });
-        lead.status = body.status;
+        enterStage(lead, body.status);
         if (lead.due !== "Suppressed" && ["Won", "Lost"].includes(body.status)) lead.due = body.status;
         else if (lead.due !== "Suppressed" && ["Won", "Lost"].includes(lead.due)) lead.due = "Unscheduled";
       }
@@ -978,7 +1063,8 @@ createServer(async (req, res) => {
       if (!outcomes.includes(outcome)) return json(res, 400, { error: "Choose a valid call outcome." });
       const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString() };
       state.calls.unshift(call);
-      lead.status = stageAfterOutcome(lead.status, outcome);
+      enterStage(lead, stageAfterOutcome(lead.status, outcome));
+      if (lead.status === "Follow-up" && followUpReasons[outcome]) lead.followUpReason = followUpReasons[outcome];
       delete lead.taskDone;
       const followUp = typeof followUpAt === "string" && followUpAt ? followUpAt : "";
       if (outcome === "Do not call") {

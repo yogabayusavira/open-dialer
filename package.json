@@ -16,6 +16,7 @@
     "@twilio/voice-sdk": "^2.19.0",
     "@vitejs/plugin-react": "latest",
     "lucide-react": "latest",
+    "pdfjs-dist": "^5.7.284",
     "pg": "^8.23.1",
     "react": "latest",
     "react-dom": "latest",

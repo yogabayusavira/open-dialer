@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "src/design-system.css"
+        ],
+        "createdAt": "2026-11-21T06:04:40.548Z",
+        "reason": "Claude: border-left marks quoted 'say this'/note lines and indented branches in the call script view and editor, copying the owner's Datastreams call-script HTML formatting they asked to match; not card accents"
+      }
+    ]
+  }
+}
