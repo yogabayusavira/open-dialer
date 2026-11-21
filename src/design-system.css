@@ -1051,3 +1051,8 @@ html[data-theme="light"] .dash-banner .dash-banner__main .dash-progress i { back
 /* The map's width sets its height; this keeps it level with the left column. */
 .dash-banner__body { grid-template-columns: minmax(0, 1fr) 224px; }
 @media (max-width: 640px) { .dash-banner__body { grid-template-columns: minmax(0, 1fr); } .dash-where { max-width: 260px; } }
+
+/* In-call volume for the other person, on top of the leveler. */
+.call-volume { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--color-text-muted); font-size: var(--font-size-meta); font-variant-numeric: tabular-nums; }
+.call-volume input { width: 96px; accent-color: var(--color-text-muted); }
+.call-volume span { min-width: 36px; }
