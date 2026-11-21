@@ -1914,7 +1914,7 @@ function CallStrip({ calls, onOpen }: { calls: CallRecord[]; onOpen: () => void 
 type StatTarget = "calls-today" | "conversations" | "followups" | "to-call";
 
 function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide, onGo }: { state: State; selected: Lead; picker: ReactNode; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void }) {
-  const setup = setupSteps(state);
+  const setup = setupSteps(state).filter((step) => !step.optional);
   const setupDone = setup.filter((step) => step.done).length;
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -3531,36 +3531,53 @@ function ActivityLog({ activity, leads, onOpenLead }: { activity: State["activit
   );
 }
 
-type GuideTarget = "settings" | "leads" | "queue";
+type GuideTarget = "settings" | "leads" | "queue" | "campaigns";
 
-function setupSteps(state: State) {
+type SetupStep = { done: boolean; title: string; body: string; target: GuideTarget | null; action: string; optional?: boolean };
+
+// The setup checklist. Owners set up calling for their company; callers only need their leads and a first call.
+// Optional steps (a team, email) never hold back "set up", since plenty of people call alone.
+function setupSteps(state: State): SetupStep[] {
   const realCalls = state.calls.filter((call) => call.outcome !== "In progress" || "sid" in call);
+  const firstCall: SetupStep = { done: realCalls.length > 0, title: "Make your first call", body: "Open the Dashboard, pick a campaign and press Start calling. Log the outcome after each call; the next lead comes up on its own.", target: "queue", action: "Open Dashboard" };
+  if (state.me.role !== "owner")
+    return [
+      { done: Boolean(state.connection?.selectedNumber), title: "Calling is set up for you", body: "Your company's owner connects Twilio and the number leads see. If this stays open, ask them to finish it.", target: null, action: "" },
+      { done: state.leads.length > 0, title: "Get your leads", body: "You see the leads your owner assigns to you. If the Leads page is empty, ask them to assign some.", target: "leads", action: "Open Leads" },
+      { done: true, title: "Use a headset", body: "Calls play through this browser. Allow the microphone when your browser asks, and use a headset so the lead doesn't hear an echo. Settings → Account → Profile is where you change your password.", target: null, action: "" },
+      firstCall,
+    ];
+  const scripts = Object.values(state.campaignSettings || {}).some((settings) => settings.script || settings.pdf);
   return [
-    { done: Boolean(state.connection), title: "Connect your Twilio account", body: "Settings → Phone numbers: enter your Account SID and Auth Token. They're checked and stored encrypted on the server.", target: "settings" as GuideTarget, action: "Open Settings" },
-    { done: Boolean(state.connection?.selectedNumber), title: "Pick the number leads will see", body: "After connecting, choose one of your Twilio numbers as the caller ID.", target: "settings" as GuideTarget, action: "Open Settings" },
-    { done: true, title: "Choose how you take calls", body: "By default you talk in this app with your microphone and speaker (a headset works best). You can switch to Zoiper or your phone in Settings.", target: "settings" as GuideTarget, action: "Open Settings" },
-    { done: Boolean(state.callbackReachable), title: "Let Twilio reach this app", body: "Works automatically when the app runs on its own web address. On your computer, start a tunnel (for example cloudflared) and put its address in OPEN_DIALER_PUBLIC_URL in .env, then restart.", target: null, action: "" },
-    { done: state.leads.length > 0, title: "Add your leads", body: "Import any CSV and match its columns, or add leads one at a time. Only a phone number is required.", target: "leads" as GuideTarget, action: "Open Leads" },
-    { done: realCalls.length > 0, title: "Make your first call", body: "Open the Dashboard, pick a lead, and press Call. Log the outcome afterwards to move to the next lead.", target: "queue" as GuideTarget, action: "Open Dashboard" },
+    { done: Boolean(state.connection), title: "Connect your Twilio account", body: "Settings → Calling → Phone numbers: enter your Account SID and Auth Token. They're checked and stored encrypted on the server.", target: "settings", action: "Open Settings" },
+    { done: Boolean(state.connection?.selectedNumber), title: "Pick the number leads will see", body: "After connecting, choose one of your Twilio numbers as the caller ID.", target: "settings", action: "Open Settings" },
+    { done: Boolean(state.connection), title: "Choose how you take calls", body: "By default you talk in this app with your microphone and speaker (a headset works best). You can switch to Zoiper or your phone in the same Settings page.", target: "settings", action: "Open Settings" },
+    { done: Boolean(state.callbackReachable), title: "Let Twilio reach this app", body: "A hosted copy does this on its own. On your computer, start the app with Start Open Dialer.bat (or npm run local): it opens a Cloudflare tunnel and points Twilio at it. RUNNING-LOCALLY.md has the details.", target: null, action: "" },
+    { done: state.leads.length > 0, title: "Add your leads", body: "Leads → Import CSV, or import into a campaign from the Campaigns page. Match the columns; only a phone number is required.", target: "leads", action: "Open Leads" },
+    { done: scripts, title: "Add a call script", body: "Campaigns → Add script on a campaign. Paste or write it, or upload a PDF. It shows on the call screen, with the lead's name and facts filled in.", target: "campaigns", action: "Open Campaigns", optional: true },
+    { done: state.team.length > 1, title: "Invite your callers", body: "Settings → Workspace → Team → Send invite. Then select leads on the Leads page and use Assign to. Callers only see what you assign them. Skip this if you call alone.", target: "settings", action: "Open Settings", optional: true },
+    { done: Boolean(state.emailReady), title: "Turn on email", body: "So invites and password resets arrive by email: add RESEND_API_KEY and RESEND_FROM_EMAIL (a sender on a domain verified in Resend) to .env, or in Dokploy, then restart. Until then, you get each sign-in link to send yourself.", target: null, action: "", optional: true },
+    firstCall,
   ];
 }
 
 function SetupGuide({ state, onClose, onGo }: { state: State; onClose: () => void; onGo: (target: GuideTarget) => void }) {
   const steps = setupSteps(state);
-  const done = steps.filter((step) => step.done).length;
+  const required = steps.filter((step) => !step.optional);
+  const done = required.filter((step) => step.done).length;
   return (
     <div className="modal-backdrop">
       <section className="lead-form setup-guide" role="dialog" aria-modal="true" aria-labelledby="setup-guide-title">
         <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
         <h2 id="setup-guide-title">Setup guide</h2>
-        <p>{done === steps.length ? "Everything is set up. You're ready to call." : `${done} of ${steps.length} done. Each step updates on its own once it's finished.`}</p>
-        <div className="dash-progress setup-guide__progress"><span><i style={{ width: `${Math.round((done / steps.length) * 100)}%` }} /></span></div>
+        <p>{done === required.length ? "Everything you need is set up. You're ready to call." : `${done} of ${required.length} done. Each step ticks itself off once it's finished.`}</p>
+        <div className="dash-progress setup-guide__progress"><span><i style={{ width: `${Math.round((done / required.length) * 100)}%` }} /></span></div>
         <ol className="setup-steps">
           {steps.map((step, index) => (
             <li key={step.title} className={step.done ? "is-done" : undefined}>
               <span className="setup-steps__mark" aria-hidden="true">{step.done ? <Check size={14} /> : index + 1}</span>
               <div>
-                <b>{step.title}<span className="sr-only">{step.done ? " (done)" : " (to do)"}</span></b>
+                <b>{step.title}{step.optional && <em className="setup-steps__optional">Optional</em>}<span className="sr-only">{step.done ? " (done)" : " (to do)"}</span></b>
                 <small>{step.body}</small>
               </div>
               {!step.done && step.target && <button type="button" className="quiet-button" onClick={() => onGo(step.target!)}>{step.action}</button>}
