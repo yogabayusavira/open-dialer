@@ -92,7 +92,7 @@ type CallRecord = {
 };
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
-type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string } };
+type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string> };
 type State = {
   tasks?: Task[];
   campaignSettings?: Record<string, CampaignSettings>;
@@ -1250,7 +1250,7 @@ function App() {
             onStage={(name) => { setCampaign(name); setScreen("pipeline"); }}
             settings={state.campaignSettings || {}}
             onScript={setScriptFor}
-            onImport={() => setImportOpen("campaign")}
+            onImport={(name) => { if (name) setCampaign(name); setImportOpen("campaign"); }}
           />
         )}
         {screen === "settings" && (
@@ -1268,13 +1268,20 @@ function App() {
           />
         )}
       </section>
-      {scriptFor && (
+      {scriptFor !== null && (
         <ScriptDialog
           campaign={scriptFor}
           settings={state.campaignSettings?.[scriptFor] || {}}
+          columns={[...new Set(state.leads.filter((lead) => !scriptFor || lead.campaigns?.includes(scriptFor)).flatMap((lead) => Object.keys(lead.details || {})))].sort()}
           onViewPdf={() => setPdfFor(scriptFor)}
           onClose={() => setScriptFor(null)}
-          onChanged={async (message, close) => { await refresh(); setNotice(message); if (close) setScriptFor(null); }}
+          onChanged={async (message, close, name) => {
+            await refresh();
+            // A new campaign's next step is its leads.
+            if (!scriptFor && close) notifyWith(message, "Import leads", () => { setCampaign(name); setImportOpen("campaign"); });
+            else setNotice(message);
+            if (close) setScriptFor(null);
+          }}
         />
       )}
       {pdfFor && <PdfViewer campaign={pdfFor} name={state.campaignSettings?.[pdfFor]?.pdf?.name || "Script"} onClose={() => setPdfFor(null)} />}
@@ -1306,7 +1313,7 @@ function App() {
           }}
         />
       )}
-      {importOpen && <ImportLeads campaigns={campaigns} defaultCampaign={activeCampaign} requireCampaign={importOpen === "campaign"} onClose={() => setImportOpen(false)} onSaved={async (message, name) => { setImportOpen(false); await refresh(); notifyWith(message, "Start calling", () => { setCampaign(name); setScreen("queue"); }); }} />}
+      {importOpen && <ImportLeads campaigns={[...new Set([...campaigns, ...Object.keys(state.campaignSettings || {})])]} settings={state.campaignSettings || {}} defaultCampaign={importOpen === "campaign" && campaign ? campaign : activeCampaign} requireCampaign={importOpen === "campaign"} onClose={() => setImportOpen(false)} onSaved={async (message, name) => { setImportOpen(false); await refresh(); notifyWith(message, "Start calling", () => { setCampaign(name); setScreen("queue"); }); }} />}
       {dncOpen && <DncList onClose={() => setDncOpen(false)} onSaved={async (message) => { setDncOpen(false); await refresh(); setNotice(message); }} />}
       {outcomeLead && <CallOutcome lead={outcomeLead} bookingUrl={state.settings?.bookingUrl || ""} onBook={() => openBooking(state.settings!.bookingUrl!, outcomeLead.name).catch((error) => showError(error instanceof Error ? error.message : "Couldn't open the booking page."))} onClose={() => setOutcomeLead(null)} onSaved={async (outcome) => {
         setOutcomeLead(null);
@@ -2160,7 +2167,7 @@ function Queue({
                   {script.pdf && <button type="button" className="quiet-button" onClick={() => onOpenPdf(scriptCampaign)}><FileText size={16} aria-hidden="true" /> Open {script.pdf.name}</button>}
                   <button type="button" className="quiet-button" onClick={() => onEditScript(scriptCampaign)}>Edit script</button>
                 </div>
-                {script.script && <ScriptView text={script.script} lead={selected} />}
+                {script.script && <ScriptView text={script.script} lead={selected} variables={script.variables} />}
                 {script.pdf && !script.script && <PdfPages campaign={scriptCampaign} />}
               </div>
             </details>
@@ -2643,30 +2650,56 @@ function LeadPeek({ lead, calls, onClose, onMove, onEdit, onCall, onAddTask }: {
 //   # Section            ## Branch heading        > What you say (a "say this" box)
 //   Label:               Note: call-flow note     Example: a muted example
 //   - list item          lines indented by 2 spaces sit inside a branch
-//   **bold**             [Name], [District Name], [fact] fill in from the lead on a call
-const scriptHelp = "# Section · ## Branch · > What you say · Label: · Note: · Example: · - list · indent 2 spaces for a branch · [Name] fills in";
+//   **bold**             {{variable}} fills in from the lead on a call (each campaign maps its own variables)
+const scriptHelp = "# Section · ## Branch · > What you say · Label: · Note: · Example: · - list · indent 2 spaces for a branch · {{variable}} fills in";
 
-// What a [placeholder] becomes for this lead, or null to leave it marked.
-function scriptSlot(key: string, lead?: Lead) {
-  if (!lead) return null;
-  const k = key.trim().toLowerCase();
-  const detail = (pattern: RegExp) => Object.entries(lead.details || {}).find(([label, value]) => pattern.test(label) && value?.trim())?.[1] || null;
-  if (k === "first name") return lead.name ? lead.name.replace(/^(dr|mr|mrs|ms|mx)\.?\s+/i, "").split(/\s+/)[0] : null;
-  if (/^(name|contact|contact name|their name|full name)$/.test(k)) return lead.name || null;
-  if (/^(district|district name|company|organization|school system|school district)$/.test(k)) return lead.company && lead.company !== "Unassigned" ? lead.company : null;
-  if (k === "state") return leadState(lead)?.[1] || null;
-  if (k.includes("fact")) return detail(/fact/i);
-  return Object.entries(lead.details || {}).find(([label]) => label.trim().toLowerCase() === k)?.[1] || null;
+// ---- Script variables ----
+// A script names its own variables, like {{fact}}. Each campaign says where each one comes from: a lead field
+// ("name", "first_name", "company", "state", "phone", "role") or a CSV column kept as a lead detail ("detail:Short fact").
+// Without a choice, common names are matched for you; anything else stays highlighted until you map it.
+const variablePattern = /\{\{\s*([^{}]+?)\s*\}\}/g;
+function scriptVariables(text: string) {
+  return [...new Set([...text.matchAll(variablePattern)].map((match) => match[1].trim()))];
+}
+const variableFields: [string, string][] = [["name", "Contact name"], ["first_name", "First name"], ["company", "Company / district"], ["state", "State"], ["phone", "Phone"], ["role", "Role"]];
+const simplify = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
+// The source a variable gets when nobody picked one: a lead field by its usual names, or a detail column of the same name.
+function guessVariable(name: string, detailKeys: string[]) {
+  const key = simplify(name);
+  if (/^(firstname|first)$/.test(key)) return "first_name";
+  if (/^(name|fullname|contact|contactname|theirname)$/.test(key)) return "name";
+  if (/^(company|district|districtname|organization|organisation|business|schooldistrict|schoolsystem)$/.test(key)) return "company";
+  if (/^(state|province)$/.test(key)) return "state";
+  if (/^(phone|phonenumber|number)$/.test(key)) return "phone";
+  if (/^(role|title|jobtitle)$/.test(key)) return "role";
+  const column = detailKeys.find((label) => simplify(label) === key);
+  return column ? `detail:${column}` : "";
+}
+function variableValue(source: string, lead: Lead) {
+  if (source === "first_name") return lead.name ? lead.name.replace(/^(dr|mr|mrs|ms|mx)\.?\s+/i, "").split(/\s+/)[0] : "";
+  if (source === "name") return lead.name || "";
+  if (source === "company") return lead.company && lead.company !== "Unassigned" ? lead.company : "";
+  if (source === "state") return leadState(lead)?.[1] || "";
+  if (source === "phone") return formatPhone(lead.phone, lead.extension);
+  if (source === "role") return lead.role && lead.role !== "Contact" ? lead.role : "";
+  if (source.startsWith("detail:")) return lead.details?.[source.slice(7)]?.trim() || "";
+  return "";
+}
+function fillVariable(name: string, lead: Lead | undefined, variables: Record<string, string> | undefined) {
+  if (!lead) return "";
+  const source = variables?.[name] || guessVariable(name, Object.keys(lead.details || {}));
+  return source ? variableValue(source, lead) : "";
 }
 
-function ScriptInline({ text, lead }: { text: string; lead?: Lead }) {
+function ScriptInline({ text, lead, variables }: { text: string; lead?: Lead; variables?: Record<string, string> }) {
   return (
     <>
-      {text.split(/(\*\*[^*]+\*\*|\[[^\]]+\])/).map((part, index) => {
+      {text.split(/(\*\*[^*]+\*\*|\{\{[^{}]+\}\})/).map((part, index) => {
         if (/^\*\*[^*]+\*\*$/.test(part)) return <strong key={index}>{part.slice(2, -2)}</strong>;
-        if (/^\[[^\]]+\]$/.test(part)) {
-          const value = scriptSlot(part.slice(1, -1), lead);
-          return <mark key={index} className={value ? "script-fill" : "script-slot"}>{value || part}</mark>;
+        if (/^\{\{[^{}]+\}\}$/.test(part)) {
+          const name = part.slice(2, -2).trim();
+          const value = fillVariable(name, lead, variables);
+          return <mark key={index} className={value ? "script-fill" : "script-slot"} title={value ? `{{${name}}}` : `No value for {{${name}}} on this lead`}>{value || `{{${name}}}`}</mark>;
         }
         return part;
       })}
@@ -2674,12 +2707,12 @@ function ScriptInline({ text, lead }: { text: string; lead?: Lead }) {
   );
 }
 
-function ScriptView({ text, lead }: { text: string; lead?: Lead }) {
+function ScriptView({ text, lead, variables }: { text: string; lead?: Lead; variables?: Record<string, string> }) {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   const blocks: ReactNode[] = [];
   let list: string[] = [];
   const flushList = () => {
-    if (list.length) blocks.push(<ul key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}><ScriptInline text={item} lead={lead} /></li>)}</ul>);
+    if (list.length) blocks.push(<ul key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}><ScriptInline text={item} lead={lead} variables={variables} /></li>)}</ul>);
     list = [];
   };
   for (let index = 0; index < lines.length; index += 1) {
@@ -2690,7 +2723,7 @@ function ScriptView({ text, lead }: { text: string; lead?: Lead }) {
       const branch: string[] = [];
       while (index < lines.length && (/^(\s{2,}|\t)\S/.test(lines[index]) || (!lines[index].trim() && /^(\s{2,}|\t)\S/.test(lines[index + 1] || "")))) branch.push(lines[index++].replace(/^(\s{2}|\t)/, ""));
       index -= 1;
-      blocks.push(<div className="script-branch" key={`branch-${index}`}><ScriptView text={branch.join("\n")} lead={lead} /></div>);
+      blocks.push(<div className="script-branch" key={`branch-${index}`}><ScriptView text={branch.join("\n")} lead={lead} variables={variables} /></div>);
       continue;
     }
     const line = raw.trim();
@@ -2698,14 +2731,14 @@ function ScriptView({ text, lead }: { text: string; lead?: Lead }) {
     flushList();
     if (!line) continue;
     const key = `line-${index}`;
-    if (/^##\s+/.test(line)) blocks.push(<h4 className="script-sub" key={key}><ScriptInline text={line.replace(/^##\s+/, "")} lead={lead} /></h4>);
-    else if (/^#\s+/.test(line)) blocks.push(<h3 className="script-section" key={key}><ScriptInline text={line.replace(/^#\s+/, "")} lead={lead} /></h3>);
-    else if (/^>\s?/.test(line)) blocks.push(<blockquote className="script-say" key={key}><ScriptInline text={line.replace(/^>\s?/, "")} lead={lead} /></blockquote>);
-    else if (/^["“].+["”]$/.test(line)) blocks.push(<blockquote className="script-say" key={key}><ScriptInline text={line.slice(1, -1)} lead={lead} /></blockquote>);
-    else if (/^(note|flow):\s*/i.test(line)) blocks.push(<blockquote className="script-note" key={key}><ScriptInline text={line.replace(/^(note|flow):\s*/i, "")} lead={lead} /></blockquote>);
-    else if (/^example:\s*/i.test(line)) blocks.push(<p className="script-example" key={key}><ScriptInline text={line} lead={lead} /></p>);
-    else if (line.endsWith(":") && line.length <= 70 && !/[.!?]\s/.test(line)) blocks.push(<p className="script-label" key={key}><ScriptInline text={line.slice(0, -1)} lead={lead} /></p>);
-    else blocks.push(<p key={key}><ScriptInline text={line} lead={lead} /></p>);
+    if (/^##\s+/.test(line)) blocks.push(<h4 className="script-sub" key={key}><ScriptInline text={line.replace(/^##\s+/, "")} lead={lead} variables={variables} /></h4>);
+    else if (/^#\s+/.test(line)) blocks.push(<h3 className="script-section" key={key}><ScriptInline text={line.replace(/^#\s+/, "")} lead={lead} variables={variables} /></h3>);
+    else if (/^>\s?/.test(line)) blocks.push(<blockquote className="script-say" key={key}><ScriptInline text={line.replace(/^>\s?/, "")} lead={lead} variables={variables} /></blockquote>);
+    else if (/^["“].+["”]$/.test(line)) blocks.push(<blockquote className="script-say" key={key}><ScriptInline text={line.slice(1, -1)} lead={lead} variables={variables} /></blockquote>);
+    else if (/^(note|flow):\s*/i.test(line)) blocks.push(<blockquote className="script-note" key={key}><ScriptInline text={line.replace(/^(note|flow):\s*/i, "")} lead={lead} variables={variables} /></blockquote>);
+    else if (/^example:\s*/i.test(line)) blocks.push(<p className="script-example" key={key}><ScriptInline text={line} lead={lead} variables={variables} /></p>);
+    else if (line.endsWith(":") && line.length <= 70 && !/[.!?]\s/.test(line)) blocks.push(<p className="script-label" key={key}><ScriptInline text={line.slice(0, -1)} lead={lead} variables={variables} /></p>);
+    else blocks.push(<p key={key}><ScriptInline text={line} lead={lead} variables={variables} /></p>);
   }
   flushList();
   return <div className="script">{blocks}</div>;
@@ -2739,8 +2772,9 @@ function parseScriptBlocks(text: string) {
 }
 
 const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-// **bold** shows as bold while editing.
-const inlineToHtml = (text: string) => escapeHtml(text).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+// **bold** shows as bold while editing; {{variables}} show as chips that delete as one piece.
+const variableChip = (name: string) => `<span class="se-var" contenteditable="false">{{${escapeHtml(name)}}}</span>`;
+const inlineToHtml = (text: string) => escapeHtml(text).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_, name) => variableChip(name));
 const isLabelText = (text: string) => text.trim().endsWith(":") && text.trim().length <= 70 && !/[.!?]\s/.test(text);
 
 function blockElement(type: ScriptBlockType, indent: number, html: string) {
@@ -2762,7 +2796,7 @@ function lineText(node: Node): string {
       out += /^(B|STRONG)$/.test(child.tagName) && inner.trim() ? `**${inner}**` : inner;
     }
   });
-  return out.replace(/\u00a0/g, " ");
+  return out.replace(/\u00a0/g, " ").replace(/\u200b/g, "");
 }
 
 function serializeScript(editor: HTMLElement) {
@@ -2776,8 +2810,46 @@ function serializeScript(editor: HTMLElement) {
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function ScriptEditor({ initial, editorRef }: { initial: string; editorRef: { current: HTMLDivElement | null } }) {
+function ScriptEditor({ initial, editorRef, onTextChange }: { initial: string; editorRef: { current: HTMLDivElement | null }; onTextChange?: (text: string) => void }) {
   const [empty, setEmpty] = useState(!initial.trim());
+  const [variableOpen, setVariableOpen] = useState(false);
+  const [variableName, setVariableName] = useState("");
+  const savedRange = useRef<Range | null>(null);
+  const changed = () => { if (editorRef.current && onTextChange) onTextChange(serializeScript(editorRef.current)); };
+  const known = () => (editorRef.current ? scriptVariables(serializeScript(editorRef.current)) : []);
+  // Puts {{name}} where the cursor was before the variable box opened.
+  const insertVariable = (name: string) => {
+    const clean = name.replace(/[{}]/g, "").trim();
+    if (!clean) return;
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    // Into the line the cursor was in; with no cursor, at the end of the last line.
+    const start = savedRange.current?.startContainer;
+    const line = (start && (start.nodeType === Node.ELEMENT_NODE ? (start as Element) : start.parentElement)?.closest<HTMLElement>(".se-line")) || editor.querySelector<HTMLElement>(".se-line:last-child");
+    if (!line) return;
+    let range = savedRange.current && line.contains(savedRange.current.startContainer) ? savedRange.current : null;
+    if (!range) { range = document.createRange(); range.selectNodeContents(line); range.collapse(false); }
+    line.querySelector(":scope > br:only-child")?.remove();
+    const holder = document.createElement("span");
+    holder.innerHTML = variableChip(clean);
+    const chip = holder.firstChild!;
+    // An invisible character to put the cursor after the tag; it is dropped when the script is saved.
+    const space = document.createTextNode("​");
+    range.deleteContents();
+    range.insertNode(space);
+    range.insertNode(chip);
+    const after = document.createRange();
+    after.setStart(space, 1);
+    after.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(after);
+    setVariableOpen(false);
+    setVariableName("");
+    normalize();
+    changed();
+  };
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
@@ -2845,6 +2917,7 @@ function ScriptEditor({ initial, editorRef }: { initial: string; editorRef: { cu
   };
   const onInput = () => {
     normalize();
+    changed();
     const line = currentLine();
     if (!line) return;
     if (line.dataset.type === "p") {
@@ -2922,6 +2995,7 @@ function ScriptEditor({ initial, editorRef }: { initial: string; editorRef: { cu
     else editorRef.current?.append(...blocks);
     placeCaret(blocks[blocks.length - 1], Number.MAX_SAFE_INTEGER);
     normalize();
+    changed();
   };
   const apply = (type: ScriptBlockType | "indent" | "outdent" | "bold") => {
     editorRef.current?.focus();
@@ -2941,7 +3015,21 @@ function ScriptEditor({ initial, editorRef }: { initial: string; editorRef: { cu
         {tools.map(([type, label, hint]) => (
           <button type="button" key={type} title={hint ? `${label} (${hint})` : label} onMouseDown={(event) => event.preventDefault()} onClick={() => apply(type)}>{label}</button>
         ))}
+        <button
+          type="button"
+          title="Insert a variable, like {{fact}}, that fills in from each lead"
+          aria-expanded={variableOpen}
+          onMouseDown={(event) => { event.preventDefault(); const selection = window.getSelection(); savedRange.current = selection?.rangeCount && editorRef.current?.contains(selection.anchorNode) ? selection.getRangeAt(0).cloneRange() : null; }}
+          onClick={() => setVariableOpen((open) => !open)}
+        >{"{{ }}"} Variable</button>
       </div>
+      {variableOpen && (
+        <div className="script-variable-box" role="group" aria-label="Insert a variable">
+          {known().map((name) => <button type="button" key={name} className="se-var" onClick={() => insertVariable(name)}>{`{{${name}}}`}</button>)}
+          <input value={variableName} onChange={(event) => setVariableName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); insertVariable(variableName); } if (event.key === "Escape") setVariableOpen(false); }} placeholder="New variable, like fact" aria-label="New variable name" autoFocus />
+          <button type="button" className="quiet-button" onClick={() => insertVariable(variableName)} disabled={!variableName.trim()}>Insert</button>
+        </div>
+      )}
       <div
         ref={editorRef}
         className={`script-editor script${empty ? " is-empty" : ""}`}
@@ -2956,14 +3044,43 @@ function ScriptEditor({ initial, editorRef }: { initial: string; editorRef: { cu
         onPaste={onPaste}
         data-placeholder="Type your script. Start a line with # for a section, > for what you say, - for a list."
       />
-      <small className="script-dialog__help">Shortcuts at the start of a line: <b># </b> section · <b>## </b> branch · <b>&gt; </b> say this · <b>- </b> list · <b>Note: </b> note · a short line ending in <b>:</b> is a label · Tab indents into a branch · [Name], [District Name] and [fact] fill in on calls</small>
+      <small className="script-dialog__help">Shortcuts at the start of a line: <b># </b> section · <b>## </b> branch · <b>&gt; </b> say this · <b>- </b> list · <b>Note: </b> note · a short line ending in <b>:</b> is a label · Tab indents into a branch · <b>{"{{fact}}"}</b> is a variable you fill from each lead</small>
+    </div>
+  );
+}
+
+// Where each script variable gets its value. Columns are the CSV's (at import) or the leads' saved details.
+function VariableMap({ names, value, columns, onChange, auto }: { names: string[]; value: Record<string, string>; columns: string[]; onChange: (next: Record<string, string>) => void; auto: (name: string) => string }) {
+  if (!names.length) return null;
+  const label = (source: string) => variableFields.find(([key]) => key === source)?.[1] || source.replace(/^detail:/, "");
+  return (
+    <div className="variable-map">
+      {names.map((name) => {
+        const guess = auto(name);
+        return (
+          <label key={name}>
+            <span className="se-var">{`{{${name}}}`}</span>
+            <select value={value[name] || ""} onChange={(event) => onChange({ ...value, [name]: event.target.value })}>
+              <option value="">{guess ? `Automatic: ${label(guess)}` : "Not set, shows as a blank"}</option>
+              <optgroup label="Lead fields">{variableFields.map(([key, text]) => <option key={key} value={key}>{text}</option>)}</optgroup>
+              {columns.length > 0 && <optgroup label="Columns">{columns.map((column) => <option key={column} value={`detail:${column}`}>{column}</option>)}</optgroup>}
+            </select>
+          </label>
+        );
+      })}
     </div>
   );
 }
 
 // Add or edit a campaign's script: write it in the live editor and/or upload a PDF.
-function ScriptDialog({ campaign, settings, onViewPdf, onClose, onChanged }: { campaign: string; settings: CampaignSettings; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean) => Promise<void> }) {
+function ScriptDialog({ campaign, settings, columns, onViewPdf, onClose, onChanged }: { campaign: string; settings: CampaignSettings; columns: string[]; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
+  // An empty campaign name means a new campaign: name it, write the script, then import its leads.
+  const isNew = !campaign;
+  const [name, setName] = useState(campaign);
+  const [text, setText] = useState(settings.script || "");
+  const [variables, setVariables] = useState<Record<string, string>>(settings.variables || {});
+  const names = scriptVariables(text);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -2976,7 +3093,7 @@ function ScriptDialog({ campaign, settings, onViewPdf, onClose, onChanged }: { c
     setError(null);
     try {
       await work();
-      await onChanged(message, close);
+      await onChanged(message, close, name.trim());
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save the script.");
     } finally {
@@ -2985,25 +3102,37 @@ function ScriptDialog({ campaign, settings, onViewPdf, onClose, onChanged }: { c
   };
   const save = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const text = editorRef.current ? serializeScript(editorRef.current) : settings.script || "";
-    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign, script: text }) }), text.trim() ? `Script saved for ${campaign}.` : `Script removed from ${campaign}.`, true);
+    const script = editorRef.current ? serializeScript(editorRef.current) : settings.script || "";
+    if (!name.trim()) return setError("Name the campaign first.");
+    // Only keep choices for variables still in the script.
+    const kept = Object.fromEntries(Object.entries(variables).filter(([key, source]) => source && scriptVariables(script).includes(key)));
+    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name.trim(), script, variables: kept }) }), isNew ? `${name.trim()} created.` : script.trim() ? `Script saved for ${name.trim()}.` : `Script removed from ${name.trim()}.`, true);
   };
   const upload = (file: File | undefined) => {
     if (!file) return;
     // Uploads are capped at 5 MB of text, and base64 adds a third.
     if (file.size > 3_500_000) return setError("That PDF is over 3.5 MB. Export a smaller one, or paste the script as text.");
     const reader = new FileReader();
-    reader.onload = () => void run(() => api("/api/campaigns/script-pdf", { method: "POST", body: JSON.stringify({ campaign, fileName: file.name, data: String(reader.result).split(",")[1] || "" }) }), `${file.name} added to ${campaign}.`, false);
+    if (!name.trim()) return setError("Name the campaign first.");
+    reader.onload = () => void run(() => api("/api/campaigns/script-pdf", { method: "POST", body: JSON.stringify({ campaign: name.trim(), fileName: file.name, data: String(reader.result).split(",")[1] || "" }) }), `${file.name} added to ${name.trim()}.`, false);
     reader.readAsDataURL(file);
   };
   return (
     <div className="modal-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <form className="lead-form script-dialog" onSubmit={save} role="dialog" aria-modal="true" aria-labelledby="script-dialog-title">
         <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
-        <h2 id="script-dialog-title">Script for {campaign}</h2>
-        <p>Shows on the call screen for every lead in this campaign. Paste it as text, upload a PDF, or both.</p>
+        <h2 id="script-dialog-title">{isNew ? "New campaign" : `Script for ${campaign}`}</h2>
+        <p>{isNew ? "Name it and write the script. Put {{variables}} where each lead's details go; you'll match them to your CSV's columns when you import the leads." : "Shows on the call screen for every lead in this campaign. Paste it as text, upload a PDF, or both."}</p>
         {error && <p className="form-error" role="alert">{error}</p>}
-        <ScriptEditor initial={settings.script || ""} editorRef={editorRef} />
+        {isNew && <label>Campaign name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="NC school districts" required autoFocus /></label>}
+        <ScriptEditor initial={settings.script || ""} editorRef={editorRef} onTextChange={setText} />
+        {names.length > 0 && (
+          <section className="script-dialog__variables" aria-label="Variables in this script">
+            <b>Variables in this script</b>
+            <small>Pick what fills each one on a call. You can also pick them when you import the CSV.</small>
+            <VariableMap names={names} value={variables} columns={columns} onChange={setVariables} auto={(variable) => guessVariable(variable, columns)} />
+          </section>
+        )}
         <div className="script-dialog__pdf">
           <FileText size={18} aria-hidden="true" />
           {settings.pdf ? (
@@ -3022,7 +3151,7 @@ function ScriptDialog({ campaign, settings, onViewPdf, onClose, onChanged }: { c
         </div>
         <div className="task-dialog__actions">
           <button type="button" className="quiet-button" onClick={onClose}>Cancel</button>
-          <button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save script"}</button>
+          <button className="primary-button" disabled={busy}>{busy ? "Saving…" : isNew ? "Create campaign" : "Save script"}</button>
         </div>
       </form>
     </div>
@@ -3213,16 +3342,20 @@ function Pipeline({
   );
 }
 
-function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScript }: { leads: Lead[]; onStart: (name: string) => void; onView: (name: string) => void; onStage: (name: string) => void; onImport: () => void; settings: Record<string, CampaignSettings>; onScript: (name: string) => void }) {
-  const names = campaignsOf(leads);
+function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScript }: { leads: Lead[]; onStart: (name: string) => void; onView: (name: string) => void; onStage: (name: string) => void; onImport: (name?: string) => void; settings: Record<string, CampaignSettings>; onScript: (name: string) => void }) {
+  // Campaigns with leads, plus new ones that so far only have a script.
+  const names = [...new Set([...campaignsOf(leads), ...Object.keys(settings).filter((name) => settings[name]?.script || settings[name]?.pdf)])].sort((left, right) => left.localeCompare(right));
   const untagged = leads.filter((lead) => !lead.campaigns?.length).length;
   return (
     <section className="campaigns-page">
       <div className="campaigns-head">
-        <p>Each CSV you import goes into a campaign. Pick one to call only its leads.</p>
-        <button type="button" className={names.length ? "quiet-button" : "primary-button"} onClick={onImport}><FileUp size={16} aria-hidden="true" /> Import into a campaign</button>
+        <p>Start a campaign with its script, then import its leads. Pick a campaign to call only its leads.</p>
+        <div className="campaigns-head__actions">
+          <button type="button" className="quiet-button" onClick={() => onImport()}><FileUp size={16} aria-hidden="true" /> Import into a campaign</button>
+          <button type="button" className={names.length ? "quiet-button" : "primary-button"} onClick={() => onScript("")}><Plus size={16} aria-hidden="true" /> New campaign</button>
+        </div>
       </div>
-      {!names.length && <div className="empty-state">No campaigns yet. Import a CSV and give it a campaign name.</div>}
+      {!names.length && <div className="empty-state">No campaigns yet. Start one with New campaign, or import a CSV and give it a campaign name.</div>}
       <div className="campaign-list">
         {names.map((name) => {
           const items = leads.filter((lead) => lead.campaigns?.includes(name));
@@ -3239,8 +3372,10 @@ function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScri
               </dl>
               <div className="campaign-card__actions">
                 <button type="button" className="text-link" onClick={() => onScript(name)}>{settings[name]?.script || settings[name]?.pdf ? "Script" : "Add script"}</button>
-                <button type="button" className="text-link" onClick={() => onView(name)}>View leads</button>
-                <button type="button" className="primary-button" disabled={!toCall} onClick={() => onStart(name)}><PhoneCall size={16} aria-hidden="true" /> Start calling ({toCall})</button>
+                {items.length ? <button type="button" className="text-link" onClick={() => onView(name)}>View leads</button> : null}
+                {items.length
+                  ? <button type="button" className="primary-button" disabled={!toCall} onClick={() => onStart(name)}><PhoneCall size={16} aria-hidden="true" /> Start calling ({toCall})</button>
+                  : <button type="button" className="primary-button" onClick={() => onImport(name)}><FileUp size={16} aria-hidden="true" /> Import leads</button>}
               </div>
             </article>
           );
@@ -3330,8 +3465,12 @@ function guessMapping(headers: string[], rows: string[][]) {
   return mapping;
 }
 
-function ImportLeads({ campaigns, defaultCampaign, requireCampaign, onClose, onSaved }: { campaigns: string[]; defaultCampaign: string; requireCampaign: boolean; onClose: () => void; onSaved: (message: string, campaign: string) => Promise<void> }) {
+function ImportLeads({ campaigns, settings, defaultCampaign, requireCampaign, onClose, onSaved }: { campaigns: string[]; settings: Record<string, CampaignSettings>; defaultCampaign: string; requireCampaign: boolean; onClose: () => void; onSaved: (message: string, campaign: string) => Promise<void> }) {
   const [campaign, setCampaign] = useState(defaultCampaign);
+  const campaignSetup = settings[campaign.trim()] || {};
+  const variableNames = scriptVariables(campaignSetup.script || "");
+  // Variable → CSV column index, or a lead field key.
+  const [variableColumns, setVariableColumns] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState("");
@@ -3357,6 +3496,14 @@ function ImportLeads({ campaigns, defaultCampaign, requireCampaign, onClose, onS
     setHeaders(names);
     setRows(body);
     setMapping(guessMapping(names, body));
+    setVariableColumns({});
+  };
+  // What a variable is filled from after import: its chosen column (kept as a detail) or lead field, else the campaign's earlier choice.
+  const variableSource = (name: string) => {
+    const choice = variableColumns[name];
+    if (choice?.startsWith("detail:")) return choice;
+    if (choice) return choice;
+    return campaignSetup.variables?.[name] || "";
   };
   const mapped = new Set(Object.values(mapping || {}).filter((value): value is number => value !== null));
   const others = headers.map((header, index) => ({ header, index })).filter(({ index }) => !mapped.has(index));
@@ -3373,6 +3520,8 @@ function ImportLeads({ campaigns, defaultCampaign, requireCampaign, onClose, onS
       stage: cell(row, "stage"),
       details: {
         ...(keepOthers ? Object.fromEntries(others.map(({ header, index }) => [header, row[index] || ""]).filter(([, text]) => text)) : {}),
+        // Columns picked for script variables are always kept, even with "keep the other columns" off.
+        ...Object.fromEntries(Object.values(variableColumns).filter((source) => source.startsWith("detail:")).map((source) => source.slice(7)).map((header) => [header, row[headers.indexOf(header)] || ""]).filter(([, text]) => text)),
         // Saved under one name whatever the column was called, so local time and the map always find it.
         ...(cell(row, "state") ? { State: cell(row, "state") } : {}),
       },
@@ -3396,6 +3545,9 @@ function ImportLeads({ campaigns, defaultCampaign, requireCampaign, onClose, onS
     setError(null);
     try {
       const result = await api<{ imported: number; duplicates: number; invalid: number; tagged: number }>("/api/leads/import", { method: "POST", body: JSON.stringify({ leads: buildLeads(), campaign }) });
+      // Remember the variable choices on the campaign, so every call fills them the same way.
+      const chosen = Object.fromEntries(variableNames.map((name) => [name, variableSource(name)]).filter(([, source]) => source));
+      if (campaign.trim() && Object.keys(chosen).length) await api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: campaign.trim(), variables: { ...(campaignSetup.variables || {}), ...chosen } }) });
       const skipped = [result.duplicates && `${result.duplicates} already in the workspace${result.tagged ? ` (${result.tagged} added to ${campaign.trim()})` : ""}`, result.invalid && `${result.invalid} without a usable phone number`].filter(Boolean).join(", ");
       await onSaved(result.imported === 0 && result.tagged
         ? `Added ${result.tagged} leads already in your workspace to ${campaign.trim()}.`
@@ -3436,6 +3588,19 @@ function ImportLeads({ campaigns, defaultCampaign, requireCampaign, onClose, onS
               <input type="checkbox" checked={cleanPhones} onChange={(event) => setCleanPhones(event.target.checked)} />
               <span>Clean up phone numbers <small>(saved as +13365706060 and shown as (336) 570-6060; extensions like "ext. 10257" are saved separately and dialed after the call connects)</small></span>
             </label>
+            {variableNames.length > 0 && (
+              <section className="import-variables" aria-label="Script variables">
+                <b>Script variables in {campaign.trim()}</b>
+                <small>Pick the column that fills each one on a call.</small>
+                <VariableMap
+                  names={variableNames}
+                  value={Object.fromEntries(variableNames.map((name) => [name, variableColumns[name] || campaignSetup.variables?.[name] || ""]))}
+                  columns={headers}
+                  onChange={(next) => setVariableColumns(Object.fromEntries(Object.entries(next).filter(([, source]) => source)))}
+                  auto={(name) => guessVariable(name, headers)}
+                />
+              </section>
+            )}
             {others.length > 0 && (
               <label className="import-keep">
                 <input type="checkbox" checked={keepOthers} onChange={(event) => setKeepOthers(event.target.checked)} />

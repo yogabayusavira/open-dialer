@@ -1077,14 +1077,19 @@ async function route(req, res, url) {
       return json(res, 201, lead);
     }
     if (url.pathname === "/api/campaigns/script" && req.method === "PUT") {
-      const { campaign, script } = await getBody(req);
+      const { campaign, script, variables } = await getBody(req);
       const name = campaignName(campaign);
       if (!name) return json(res, 400, { error: "Choose a campaign." });
-      const text = typeof script === "string" ? script.replace(/\r\n/g, "\n").trim().slice(0, 20000) : "";
       const state = await readState();
-      if (!state.leads.some((lead) => lead.campaigns.includes(name))) return json(res, 404, { error: "That campaign has no leads." });
-      state.campaignSettings[name] = { ...state.campaignSettings[name], script: text };
-      activity(state, text ? "Script saved" : "Script removed", name);
+      const current = state.campaignSettings[name] || {};
+      // A new campaign can start with its script; its leads are imported after.
+      const text = typeof script === "string" ? script.replace(/\r\n/g, "\n").trim().slice(0, 20000) : current.script || "";
+      // Which lead field or CSV column fills each {{variable}} in the script, e.g. { fact: "detail:Short fact" }.
+      const map = variables && typeof variables === "object" && !Array.isArray(variables)
+        ? Object.fromEntries(Object.entries(variables).slice(0, 60).map(([key, value]) => [cleanText(key, 60), cleanText(value, 120)]).filter(([key, value]) => key && value))
+        : current.variables || {};
+      state.campaignSettings[name] = { ...current, script: text, variables: map };
+      activity(state, typeof script !== "string" ? "Script variables saved" : text ? "Script saved" : "Script removed", name);
       await writeState(state);
       return json(res, 200, state.campaignSettings[name]);
     }
@@ -1105,7 +1110,6 @@ async function route(req, res, url) {
         const bytes = typeof data === "string" ? Buffer.from(data, "base64") : Buffer.alloc(0);
         if (bytes.subarray(0, 5).toString("latin1") !== "%PDF-") return json(res, 400, { error: "That file isn't a PDF." });
         const state = await readState();
-        if (!state.leads.some((lead) => lead.campaigns.includes(target))) return json(res, 404, { error: "That campaign has no leads." });
         const fileLabel = cleanText(fileName, 120) || "script.pdf";
         await writeBlob(blobId(target), { name: fileLabel, data: bytes.toString("base64") });
         state.campaignSettings[target] = { ...state.campaignSettings[target], pdf: { name: fileLabel, size: bytes.length, updatedAt: new Date().toISOString() } };

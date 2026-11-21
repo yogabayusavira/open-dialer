@@ -1057,3 +1057,18 @@ html[data-theme="light"] .dash-banner .dash-banner__main .dash-progress i { back
 .call-volume input { width: 96px; accent-color: var(--color-text-muted); }
 .call-volume span { min-width: 36px; }
 .setup-steps__optional { margin-left: var(--space-2); padding: 1px 6px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-text-muted); font-size: var(--font-size-label); font-style: normal; font-weight: 500; text-decoration: none; display: inline-block; }
+
+/* Script variables: {{name}} tags in the editor and in the mapping rows; the call screen still uses mark.script-fill / .script-slot. */
+.se-var { display: inline-block; padding: 0 6px; border: 1px solid var(--color-border-strong); border-radius: 4px; background: var(--color-surface-raised); color: var(--color-text); font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.86em; line-height: 1.5; white-space: nowrap; }
+button.se-var { cursor: pointer; }
+button.se-var:hover { border-color: var(--color-text-muted); }
+.script-variable-box { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-surface); }
+.script-variable-box input { flex: 1; min-width: 180px; min-height: 36px; padding: 0 var(--space-3); border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-size: var(--font-size-meta); }
+.script-dialog__variables, .import-variables { display: grid; gap: var(--space-2); padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-control); }
+.script-dialog__variables > b, .import-variables > b { color: var(--color-text); font-size: var(--font-size-body); font-weight: 500; }
+.script-dialog__variables > small, .import-variables > small { color: var(--color-text-muted); font-size: var(--font-size-meta); }
+.variable-map { display: grid; gap: var(--space-2); }
+.variable-map label { display: grid; grid-template-columns: minmax(120px, 200px) minmax(0, 1fr); align-items: center; gap: var(--space-3); }
+.variable-map .se-var { justify-self: start; }
+.variable-map select { min-height: 36px; padding: 0 var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-size: var(--font-size-meta); }
+.campaigns-head__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
