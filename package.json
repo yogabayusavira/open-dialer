@@ -10,7 +10,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "start": "node server.mjs",
-    "local": "npm run build && node --env-file=.env server.mjs"
+    "local": "node scripts/start-local.mjs"
   },
   "dependencies": {
     "@twilio/voice-sdk": "^2.19.0",
