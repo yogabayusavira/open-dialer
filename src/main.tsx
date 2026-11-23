@@ -2986,7 +2986,32 @@ function ScriptEditor({ initial, editorRef, onTextChange }: { initial: string; e
     if (!editor.querySelector(".se-line")) editor.appendChild(blockElement("p", 0, ""));
     setEmpty(!editor.textContent?.trim() && editor.querySelectorAll(".se-line").length === 1);
   };
+  // A {{name}} typed by hand becomes a tag as soon as its closing braces are typed, same as the Variable button makes.
+  const tagTypedVariable = () => {
+    const line = currentLine();
+    if (!line) return;
+    const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
+      if (node.parentElement?.closest(".se-var")) continue;
+      const match = node.data.match(/\{\{\s*([^{}]+?)\s*\}\}/);
+      if (!match) continue;
+      const start = node.splitText(match.index!);
+      const rest = start.splitText(match[0].length);
+      const holder = document.createElement("span");
+      holder.innerHTML = variableChip(match[1]);
+      start.replaceWith(holder.firstChild!);
+      // The cursor goes after the tag; an invisible character holds its place and is dropped on save.
+      if (!rest.data.startsWith("​")) rest.insertData(0, "​");
+      const after = document.createRange();
+      after.setStart(rest, 1);
+      after.collapse(true);
+      window.getSelection()?.removeAllRanges();
+      window.getSelection()?.addRange(after);
+      return;
+    }
+  };
   const onInput = () => {
+    tagTypedVariable();
     normalize();
     changed();
     const line = currentLine();
