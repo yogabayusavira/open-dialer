@@ -181,8 +181,14 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 const levelerBoost = 1;
 const callVolume = {
   level: (() => { try { return Number(localStorage.getItem("open-dialer-call-volume")) || 1; } catch { return 1; } })(),
+  // Off sends the call's sound straight to the speaker, untouched. Read when each call starts.
+  leveler: (() => { try { return localStorage.getItem("open-dialer-leveler") !== "off"; } catch { return true; } })(),
   gains: new Set<GainNode>(),
 };
+function setLeveler(on: boolean) {
+  callVolume.leveler = on;
+  try { localStorage.setItem("open-dialer-leveler", on ? "on" : "off"); } catch { /* private mode */ }
+}
 function setCallVolume(level: number) {
   callVolume.level = level;
   for (const gain of callVolume.gains) gain.gain.value = levelerBoost * level;
@@ -191,8 +197,15 @@ function setCallVolume(level: number) {
 const levelerGraphs = new Map<MediaStream, { context: AudioContext; gain: GainNode }>();
 const callLeveler: AudioProcessor = {
   async createProcessedStream(stream) {
+    if (!callVolume.leveler) return stream;
     const context = new AudioContext();
     if (context.state === "suspended") await context.resume().catch(() => {});
+    // A browser can keep new audio paused until a click; a paused leveler would mean a silent call, so play it untouched.
+    if (context.state !== "running") {
+      console.warn("[Open Dialer] call audio leveler couldn't start; playing the call as is");
+      await context.close().catch(() => {});
+      return stream;
+    }
     const compressor = context.createDynamicsCompressor();
     compressor.threshold.value = -30;
     compressor.knee.value = 12;
@@ -254,12 +267,19 @@ function usesAppPhone(connection: Connection | null | undefined) {
 // How loud the other person is, 100% to 300%, on top of the leveler. Remembered per browser.
 function CallVolume() {
   const [level, setLevel] = useState(callVolume.level);
+  const [leveler, setLevelerOn] = useState(callVolume.leveler);
   return (
-    <label className="call-volume" title="Their volume">
-      <Volume2 size={16} aria-hidden="true" />
-      <input type="range" min={1} max={3} step={0.25} value={level} aria-label="Their volume" aria-valuetext={`${Math.round(level * 100)}%`} onChange={(event) => { const next = Number(event.target.value); setLevel(next); setCallVolume(next); }} />
-      <span>{Math.round(level * 100)}%</span>
-    </label>
+    <>
+      <label className="call-volume" title="Their volume">
+        <Volume2 size={16} aria-hidden="true" />
+        <input type="range" min={1} max={3} step={0.25} value={level} disabled={!leveler} aria-label="Their volume" aria-valuetext={`${Math.round(level * 100)}%`} onChange={(event) => { const next = Number(event.target.value); setLevel(next); setCallVolume(next); }} />
+        <span>{Math.round(level * 100)}%</span>
+      </label>
+      <label className="call-leveler" title="Evens out loud rings and quiet voices. Turn off to hear the call exactly as it comes in. Applies from the next call.">
+        <input type="checkbox" checked={leveler} onChange={(event) => { setLevelerOn(event.target.checked); setLeveler(event.target.checked); }} />
+        Even out volume
+      </label>
+    </>
   );
 }
 

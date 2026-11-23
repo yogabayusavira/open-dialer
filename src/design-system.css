@@ -1147,3 +1147,6 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 .pin-button:hover { background: var(--color-surface-raised); color: var(--color-text); }
 .pin-button.is-pinned { color: var(--color-accent-text); }
 @media (hover: none) { .pin-button { opacity: 1; } }
+.call-leveler { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--color-text-muted); font-size: var(--font-size-meta); cursor: pointer; }
+.call-leveler input { margin: 0; accent-color: var(--color-text-muted); }
+.call-volume input:disabled { opacity: 0.4; }
