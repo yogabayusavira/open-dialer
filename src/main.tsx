@@ -2717,8 +2717,8 @@ const simplify = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
 function guessVariable(name: string, detailKeys: string[]) {
   const key = simplify(name);
   if (/^(firstname|first)$/.test(key)) return "first_name";
-  if (/^(name|fullname|contact|contactname|theirname)$/.test(key)) return "name";
-  if (/^(company|district|districtname|organization|organisation|business|schooldistrict|schoolsystem)$/.test(key)) return "company";
+  if (/^(name|fullname|contact|contactname|theirname|ownername|owner)$/.test(key)) return "name";
+  if (/^(company|companyname|district|districtname|organization|organisation|business|businessname|schooldistrict|schoolsystem)$/.test(key)) return "company";
   if (/^(state|province)$/.test(key)) return "state";
   if (/^(phone|phonenumber|number)$/.test(key)) return "phone";
   if (/^(role|title|jobtitle)$/.test(key)) return "role";
@@ -2993,12 +2993,12 @@ function ScriptEditor({ initial, editorRef, onTextChange }: { initial: string; e
     const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
       if (node.parentElement?.closest(".se-var")) continue;
-      const match = node.data.match(/\{\{\s*([^{}]+?)\s*\}\}/);
+      const match = node.data.match(/\{\{\s*([^{}]+?)\s*\}\}|\(\(\s*([^()]+?)\s*\)\)/);
       if (!match) continue;
       const start = node.splitText(match.index!);
       const rest = start.splitText(match[0].length);
       const holder = document.createElement("span");
-      holder.innerHTML = variableChip(match[1]);
+      holder.innerHTML = variableChip(match[1] || match[2]);
       start.replaceWith(holder.firstChild!);
       // The cursor goes after the tag; an invisible character holds its place and is dropped on save.
       if (!rest.data.startsWith("​")) rest.insertData(0, "​");
@@ -3080,8 +3080,14 @@ function ScriptEditor({ initial, editorRef, onTextChange }: { initial: string; e
   };
   const onPaste = (event: React.ClipboardEvent<HTMLDivElement>) => {
     event.preventDefault();
-    const text = event.clipboardData.getData("text/plain");
-    if (!text.includes("\n")) { document.execCommand("insertText", false, text); return; }
+    // Scripts written elsewhere often mark blanks as ((NAME)); those become {{NAME}} variables too.
+    const text = event.clipboardData.getData("text/plain").replace(/\(\(\s*([^()]+?)\s*\)\)/g, "{{$1}}");
+    if (!text.includes("\n")) {
+      // One line: tag every variable in it, not just the first.
+      if (/\{\{[^{}]+\}\}/.test(text)) document.execCommand("insertHTML", false, inlineToHtml(text));
+      else document.execCommand("insertText", false, text);
+      return;
+    }
     // Several lines: paste them as blocks after the current line (into it, if it's empty).
     const line = currentLine();
     const blocks = parseScriptBlocks(text).map((block) => blockElement(block.type, block.indent, inlineToHtml(block.text)));
