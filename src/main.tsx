@@ -2038,7 +2038,7 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
           <DaylightStrip hour={clock ? clock.hour : null} minute={clock ? clock.minute : 0} />
           <figcaption>
             <b>{leadLabel(selected)}</b>
-            {clock && zone ? <span className={inHours ? "is-open" : ""}><StateFlag lead={selected} />{zone.place} · {clock.label}, {hoursNote(clock).text}</span> : <span>No state yet. Add one with Edit to check calling hours.</span>}
+            {clock && zone ? <span className={inHours ? "is-open" : ""}>{zone.place} · {clock.label}, {hoursNote(clock).text}</span> : <span>No state yet. Add one with Edit to check calling hours.</span>}
           </figcaption>
         </figure>
       </div>
@@ -2223,7 +2223,7 @@ function Queue({
             <div className="dial-strip__number">
               <a href={`tel:${selected.phone.replace(/[^\d+]/g, "")}${selected.extension ? `,${selected.extension}` : ""}`}>{formatPhone(selected.phone, selected.extension)}</a>
               <div className="dial-strip__meta">
-                <span className="dial-strip__where">{(() => { const zone = leadZone(selected); const hours = leadHours(selected); return zone ? <><StateFlag lead={selected} />{`${localTime(zone.zone)} in ${zone.place}`}{hours && <em className={hours.open ? "is-open" : "is-closed"}>{hours.text}</em>}</> : <button type="button" className="text-link" onClick={() => onEdit(selected)}>Set the state to see local time</button>; })()}</span>
+                <span className="dial-strip__where">{(() => { const zone = leadZone(selected); const hours = leadHours(selected); return zone ? <>{`${localTime(zone.zone)} in ${zone.place}`}{hours && <em className={hours.open ? "is-open" : "is-closed"}>{hours.text}</em>}</> : <button type="button" className="text-link" onClick={() => onEdit(selected)}>Set the state to see local time</button>; })()}</span>
                 <select className="status-select" value={selected.status} disabled={selected.dnc} onChange={(event) => onStatus(selected, event.target.value)} aria-label="Pipeline stage">
                   {leadStages.map((stage) => <option key={stage}>{stage}</option>)}
                 </select>
@@ -2271,7 +2271,9 @@ function Queue({
               {pinnedEntries.map(([label, value]) => (
                 <div key={label}>
                   <dt>{label}{pin(label)}</dt>
-                  <dd><DetailValue value={value} /></dd>
+                  <dd>{/^(state|st|state\/province|province)$/i.test(label.trim()) && leadState(selected)
+                    ? <><StateFlag lead={selected} />{leadState(selected)![0]} · {leadState(selected)![1]}</>
+                    : <DetailValue value={value} />}</dd>
                 </div>
               ))}
             </dl>
@@ -2534,7 +2536,7 @@ function LeadList({
                 </td>
                 <td>
                   <span className="contact-phone">{formatPhone(lead.phone, lead.extension)}</span>
-                  <small>{(() => { const zone = leadZone(lead); return zone ? <><StateFlag lead={lead} />{`${localTime(zone.zone)} in ${zone.place}`}</> : <button type="button" className="text-link" onClick={() => onEdit(lead)}>Set the state</button>; })()}</small>
+                  <small>{(() => { const zone = leadZone(lead); return zone ? `${localTime(zone.zone)} in ${zone.place}` : <button type="button" className="text-link" onClick={() => onEdit(lead)}>Set the state</button>; })()}</small>
                 </td>
                 <td>
                   {/* The stage pill opens the stage list: the native select sits invisibly over it. */}
