@@ -1136,3 +1136,14 @@ button.se-var:hover { border-color: var(--color-text-muted); }
   .variable-card .variable-map label { grid-template-columns: 1fr; }
   .variable-card__samples { margin-left: 0; }
 }
+
+/* Call screen: details the owner pinned for this campaign, first thing under the dial strip. */
+.call-pinned { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); margin: var(--space-5) 0 0; }
+.call-pinned div { min-width: 0; padding: var(--space-3) var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-surface-raised); }
+.call-pinned dt { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); color: var(--color-text-muted); font-size: var(--font-size-label); font-weight: 600; }
+.call-pinned dd { margin: var(--space-1) 0 0; color: var(--color-text); font-size: var(--font-size-body); font-weight: 600; overflow-wrap: anywhere; }
+.pin-button { display: inline-grid; place-items: center; width: 22px; height: 22px; margin-left: var(--space-1); padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-faint); vertical-align: middle; cursor: pointer; opacity: 0; transition: opacity 120ms ease; }
+:is(dt, h3):hover .pin-button, .pin-button:focus-visible, .pin-button.is-pinned { opacity: 1; }
+.pin-button:hover { background: var(--color-surface-raised); color: var(--color-text); }
+.pin-button.is-pinned { color: var(--color-accent-text); }
+@media (hover: none) { .pin-button { opacity: 1; } }

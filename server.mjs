@@ -1150,7 +1150,7 @@ async function route(req, res, url) {
       return json(res, 201, lead);
     }
     if (url.pathname === "/api/campaigns/script" && req.method === "PUT") {
-      const { campaign, script, variables, value, clean } = await getBody(req);
+      const { campaign, script, variables, value, clean, pinned } = await getBody(req);
       const name = campaignName(campaign);
       if (!name) return json(res, 400, { error: "Choose a campaign." });
       // What one won deal in this campaign is worth; blank clears it.
@@ -1167,6 +1167,8 @@ async function route(req, res, url) {
       state.campaignSettings[name] = { ...current, script: text, variables: map };
       if (amount === null) delete state.campaignSettings[name].value;
       else if (amount !== undefined) state.campaignSettings[name].value = amount;
+      // Lead details shown first on the call screen for this campaign, in the order they were pinned.
+      if (Array.isArray(pinned)) state.campaignSettings[name].pinned = [...new Set(pinned.map((label) => cleanText(label, 60)).filter(Boolean))].slice(0, 6);
       // AI cleanup per variable: an example (raw → how you'd say it) and notes. Turning one off drops its saved versions.
       if (clean && typeof clean === "object" && !Array.isArray(clean)) {
         const rules = Object.fromEntries(Object.entries(clean).slice(0, 60)
@@ -1175,7 +1177,7 @@ async function route(req, res, url) {
         for (const variable of Object.keys(current.clean || {})) if (!rules[variable]) forgetSpoken(state, name, variable);
         state.campaignSettings[name].clean = rules;
       }
-      activity(state, typeof script !== "string" ? "Script variables saved" : "Campaign settings saved", name);
+      activity(state, Array.isArray(pinned) && typeof script !== "string" ? "Pinned details updated" : typeof script !== "string" ? "Script variables saved" : "Campaign settings saved", name);
       await writeState(state);
       return json(res, 200, state.campaignSettings[name]);
     }

@@ -49,6 +49,7 @@ import {
   Pause,
   Play,
   SkipForward,
+  Pin,
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
 import type { AudioProcessor } from "@twilio/voice-sdk";
@@ -94,7 +95,7 @@ type CallRecord = {
 };
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
-type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule> };
+type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[] };
 type CleanRule = { from: string; to: string; notes: string };
 // A won lead is worth its own value if set, else its campaign's deal value.
 function dealValue(lead: Lead, settings: Record<string, CampaignSettings>) {
@@ -2042,10 +2043,26 @@ function Queue({
   onSettings: () => void;
 }) {
   const upcoming = callQueue(state.leads, state.calls);
-  const groups = groupDetails(selected.details);
   // The script of the lead's first campaign that has one.
   const scriptCampaign = scriptCampaignOf(selected, state.campaignSettings || {});
   const script = scriptCampaign ? state.campaignSettings![scriptCampaign] : undefined;
+  // Pinned details (picked per campaign by the owner) sit at the top; the rest are grouped as before.
+  const pinCampaign = scriptCampaign || selected.campaigns?.[0];
+  const pinned = (pinCampaign && state.campaignSettings?.[pinCampaign]?.pinned) || [];
+  const pinnedEntries = pinned.map((label) => [label, selected.details?.[label] || ""] as [string, string]).filter(([, value]) => value);
+  const groups = groupDetails(Object.fromEntries(Object.entries(selected.details || {}).filter(([label]) => !pinned.includes(label))));
+  const togglePin = async (label: string) => {
+    const next = pinned.includes(label) ? pinned.filter((item) => item !== label) : [...pinned, label];
+    try {
+      await api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: pinCampaign, pinned: next }) });
+      await onRefresh();
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Couldn't pin that.");
+    }
+  };
+  const pin = (label: string) => (pinCampaign && state.me.role === "owner"
+    ? <button type="button" className={`pin-button${pinned.includes(label) ? " is-pinned" : ""}`} aria-pressed={pinned.includes(label)} aria-label={`${pinned.includes(label) ? "Unpin" : "Pin"} ${label}`} title={pinned.includes(label) ? `Unpin for ${pinCampaign}` : `Pin to the top for every lead in ${pinCampaign}`} onClick={() => void togglePin(label)}><Pin size={13} aria-hidden="true" /></button>
+    : null);
   // While calling, clean the script values of this lead and the next 4 in the background (5 at a time, saved once).
   const nextFive = [selected, ...upcoming.filter((lead) => lead.id !== selected.id).slice(0, 4)];
   const pending = state.ai?.ready ? cleanupItems(nextFive, state.campaignSettings || {}) : [];
@@ -2183,11 +2200,21 @@ function Queue({
               </span>
             </p>
           </section>
+          {pinnedEntries.length > 0 && (
+            <dl className="call-pinned" aria-label="Pinned details">
+              {pinnedEntries.map(([label, value]) => (
+                <div key={label}>
+                  <dt>{label}{pin(label)}</dt>
+                  <dd><DetailValue value={value} /></dd>
+                </div>
+              ))}
+            </dl>
+          )}
           {groups.quick.length > 0 && (
             <dl className="call-facts">
               {groups.quick.map(([label, value]) => (
                 <div key={label}>
-                  <dt>{label}</dt>
+                  <dt>{label}{pin(label)}</dt>
                   <dd>{value}</dd>
                 </div>
               ))}
@@ -2202,11 +2229,11 @@ function Queue({
             )}
             {groups.say.map(([label, value]) => (
               <div key={label}>
-                <h3>{label}</h3>
+                <h3>{label}{pin(label)}</h3>
                 <p>{value}</p>
               </div>
             ))}
-            {!realNote(selected) && !groups.say.length && <p className="call-script__empty">No talking points yet. <button type="button" className="text-link" onClick={() => onEdit(selected)}>Add a note</button></p>}
+            {!realNote(selected) && !groups.say.length && !pinnedEntries.length && <p className="call-script__empty">No talking points yet. <button type="button" className="text-link" onClick={() => onEdit(selected)}>Add a note</button></p>}
           </section>
           {scriptCampaign && script && (
             <details className="call-more call-script-full" open>
@@ -2225,13 +2252,13 @@ function Queue({
           {groups.research.length > 0 && (
             <details className="call-more">
               <summary><ChevronRight size={16} aria-hidden="true" /> Research <small>{groups.research.length}</small></summary>
-              <dl>{groups.research.map(([label, value]) => <div key={label}><dt>{label}</dt><dd><DetailValue value={value} /></dd></div>)}</dl>
+              <dl>{groups.research.map(([label, value]) => <div key={label}><dt>{label}{pin(label)}</dt><dd><DetailValue value={value} /></dd></div>)}</dl>
             </details>
           )}
           {groups.sources.length > 0 && (
             <details className="call-more">
               <summary><ChevronRight size={16} aria-hidden="true" /> Sources &amp; history <small>{groups.sources.length}</small></summary>
-              <dl>{groups.sources.map(([label, value]) => <div key={label}><dt>{label}</dt><dd><DetailValue value={value} /></dd></div>)}</dl>
+              <dl>{groups.sources.map(([label, value]) => <div key={label}><dt>{label}{pin(label)}</dt><dd><DetailValue value={value} /></dd></div>)}</dl>
             </details>
           )}
         </article>
