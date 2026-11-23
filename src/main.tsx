@@ -52,6 +52,7 @@ import {
   Pin,
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
+import { hoursStatus, nowIn, parseHours } from "./hours";
 import type { AudioProcessor } from "@twilio/voice-sdk";
 import "./styles.css";
 import "./design-system.css";
@@ -145,7 +146,7 @@ class ApiError extends Error {
 }
 
 const nav = [
-  { id: "dashboard", key: "queue", label: "Dashboard", icon: Activity },
+  { id: "dashboard", key: "queue", label: "Dialer", icon: Activity },
   { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Tag },
   { id: "leads", key: "leads", label: "Leads", icon: Users },
   { id: "calls", key: "calls", label: "Calls", icon: Phone },
@@ -1622,6 +1623,24 @@ function DaylightStrip({ hour, minute }: { hour: number | null; minute: number }
   );
 }
 
+// The state's flag from flagcdn.com (a free flag image service), e.g. us-tx; hidden if it doesn't load.
+function StateFlag({ lead }: { lead: Lead }) {
+  const code = leadStateCode(lead);
+  if (!code) return null;
+  return <img className="state-flag" src={`https://flagcdn.com/us-${code.toLowerCase()}.svg`} alt="" width={18} height={12} loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />;
+}
+
+// Opening hours from a CSV column like "Hours" or "Opening hours" (Google Maps exports have one), checked against
+// the time where the lead is. Null when there's no such column, it can't be read, or the lead has no state.
+function leadHours(lead: Lead) {
+  const text = Object.entries(lead.details || {}).find(([key]) => /hours|opening|open time|working time/i.test(key))?.[1];
+  const zone = leadZone(lead);
+  const week = text ? parseHours(text) : null;
+  if (!week || !zone) return null;
+  const now = nowIn(zone.zone);
+  return hoursStatus(week, now.day, now.minute);
+}
+
 function leadZone(lead: Lead): { zone: string; place: string } | null {
   // A time zone set by hand wins; otherwise the state decides.
   if (isTimeZone(lead.timezone)) return { zone: lead.timezone, place: lead.timezone.split("/").pop()!.replace(/_/g, " ") };
@@ -2019,7 +2038,7 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
           <DaylightStrip hour={clock ? clock.hour : null} minute={clock ? clock.minute : 0} />
           <figcaption>
             <b>{leadLabel(selected)}</b>
-            {clock && zone ? <span className={inHours ? "is-open" : ""}>{zone.place} · {clock.label}, {hoursNote(clock).text}</span> : <span>No state yet. Add one with Edit to check calling hours.</span>}
+            {clock && zone ? <span className={inHours ? "is-open" : ""}><StateFlag lead={selected} />{zone.place} · {clock.label}, {hoursNote(clock).text}</span> : <span>No state yet. Add one with Edit to check calling hours.</span>}
           </figcaption>
         </figure>
       </div>
@@ -2069,6 +2088,15 @@ function Queue({
   onSettings: () => void;
 }) {
   const upcoming = callQueue(state.leads, state.calls);
+  // What the list shows: everything in calling order, only new leads, or callbacks (follow-ups and set call-back times).
+  const [view, setView] = useState<"all" | "new" | "callbacks">(() => { try { return (localStorage.getItem("open-dialer-queue-view") as "all" | "new" | "callbacks") || "all"; } catch { return "all"; } });
+  const [order, setOrder] = useState<"queue" | "newest">(() => { try { return localStorage.getItem("open-dialer-queue-order") === "newest" ? "newest" : "queue"; } catch { return "queue"; } });
+  const remember = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* private mode */ } };
+  const isCallback = (lead: Lead) => lead.status === "Follow-up" || /^\d{4}-\d{2}-\d{2}/.test(lead.due);
+  const addedAt = (lead: Lead) => Number(lead.id.split("_")[1]) || 0;
+  const filtered = upcoming.filter((lead) => view === "all" || (view === "new" ? lead.status === "New" && !isCallback(lead) : isCallback(lead)));
+  const shown = order === "newest" ? [...filtered].sort((left, right) => addedAt(right) - addedAt(left)) : view === "callbacks" ? [...filtered].sort((left, right) => (left.due || "").localeCompare(right.due || "")) : filtered;
+  const counts = { all: upcoming.length, new: upcoming.filter((lead) => lead.status === "New" && !isCallback(lead)).length, callbacks: upcoming.filter(isCallback).length };
   // The script of the lead's first campaign that has one.
   const scriptCampaign = scriptCampaignOf(selected, state.campaignSettings || {});
   const script = scriptCampaign ? state.campaignSettings![scriptCampaign] : undefined;
@@ -2124,14 +2152,26 @@ function Queue({
         onGuide={onGuide}
         onGo={onGo}
         onStart={() => {
-          const next = upcoming[0];
+          const next = shown[0] || upcoming[0];
           if (next) onSelect(next.id);
           document.querySelector(".call-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
         }}
       />
       <section className="queue-layout">
         <aside className="call-list" aria-label="Calling queue">
-          {upcoming.map((lead) => (
+          <div className="call-list__filters">
+            <div className="call-list__views" role="group" aria-label="Show">
+              {([["all", "All"], ["new", "New"], ["callbacks", "Callbacks"]] as const).map(([key, label]) => (
+                <button key={key} type="button" className={view === key ? "is-active" : ""} aria-pressed={view === key} onClick={() => { setView(key); remember("open-dialer-queue-view", key); }}>{label} <small>{counts[key]}</small></button>
+              ))}
+            </div>
+            <select value={order} aria-label="Order" onChange={(event) => { const next = event.target.value as "queue" | "newest"; setOrder(next); remember("open-dialer-queue-order", next); }}>
+              <option value="queue">{view === "callbacks" ? "Soonest first" : "Calling order"}</option>
+              <option value="newest">Newest added</option>
+            </select>
+          </div>
+          {!shown.length && <p className="call-list__empty">{view === "callbacks" ? "No callbacks waiting." : view === "new" ? "No new leads left to call." : "Nothing left to call."}</p>}
+          {shown.map((lead) => (
             <button
               key={lead.id}
               className={
@@ -2183,7 +2223,7 @@ function Queue({
             <div className="dial-strip__number">
               <a href={`tel:${selected.phone.replace(/[^\d+]/g, "")}${selected.extension ? `,${selected.extension}` : ""}`}>{formatPhone(selected.phone, selected.extension)}</a>
               <div className="dial-strip__meta">
-                <span>{(() => { const zone = leadZone(selected); return zone ? `${localTime(zone.zone)} in ${zone.place}` : <button type="button" className="text-link" onClick={() => onEdit(selected)}>Set the state to see local time</button>; })()}</span>
+                <span className="dial-strip__where">{(() => { const zone = leadZone(selected); const hours = leadHours(selected); return zone ? <><StateFlag lead={selected} />{`${localTime(zone.zone)} in ${zone.place}`}{hours && <em className={hours.open ? "is-open" : "is-closed"}>{hours.text}</em>}</> : <button type="button" className="text-link" onClick={() => onEdit(selected)}>Set the state to see local time</button>; })()}</span>
                 <select className="status-select" value={selected.status} disabled={selected.dnc} onChange={(event) => onStatus(selected, event.target.value)} aria-label="Pipeline stage">
                   {leadStages.map((stage) => <option key={stage}>{stage}</option>)}
                 </select>
@@ -2494,7 +2534,7 @@ function LeadList({
                 </td>
                 <td>
                   <span className="contact-phone">{formatPhone(lead.phone, lead.extension)}</span>
-                  <small>{(() => { const zone = leadZone(lead); return zone ? `${localTime(zone.zone)} in ${zone.place}` : <button type="button" className="text-link" onClick={() => onEdit(lead)}>Set the state</button>; })()}</small>
+                  <small>{(() => { const zone = leadZone(lead); return zone ? <><StateFlag lead={lead} />{`${localTime(zone.zone)} in ${zone.place}`}</> : <button type="button" className="text-link" onClick={() => onEdit(lead)}>Set the state</button>; })()}</small>
                 </td>
                 <td>
                   {/* The stage pill opens the stage list: the native select sits invisibly over it. */}
@@ -2764,7 +2804,7 @@ const variablePattern = /\{\{\s*([^{}]+?)\s*\}\}/g;
 function scriptVariables(text: string) {
   return [...new Set([...text.matchAll(variablePattern)].map((match) => match[1].trim()))];
 }
-const variableFields: [string, string][] = [["name", "Contact name"], ["first_name", "First name"], ["company", "Company / district"], ["state", "State"], ["phone", "Phone"], ["role", "Role"]];
+const variableFields: [string, string][] = [["name", "Contact name"], ["first_name", "First name"], ["company", "Organization"], ["state", "State"], ["phone", "Phone"], ["role", "Role"]];
 const simplify = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
 // The source a variable gets when nobody picked one: a lead field by its usual names, or a detail column of the same name.
 function guessVariable(name: string, detailKeys: string[]) {
@@ -3641,7 +3681,7 @@ type ImportTarget = "phone" | "name" | "company" | "role" | "state" | "note" | "
 const importTargets: { key: ImportTarget; label: string; hint: string; guesses: string[] }[] = [
   { key: "phone", label: "Phone", hint: "Required", guesses: ["phone", "phonenumber", "mainphone", "directphone", "telephone", "tel", "mobile", "cell", "number"] },
   { key: "name", label: "Contact name", hint: "Optional. Leave blank for front desks and gatekeepers", guesses: ["name", "fullname", "contact", "contactname", "person", "firstname", "superintendent", "principal", "leader", "owner"] },
-  { key: "company", label: "Company / organization", hint: "Optional", guesses: ["company", "companyname", "organization", "organisation", "account", "accountname", "business", "district", "school", "agency"] },
+  { key: "company", label: "Organization", hint: "Optional. A company, business, school district…", guesses: ["company", "companyname", "organization", "organisation", "account", "accountname", "business", "district", "school", "agency"] },
   { key: "role", label: "Role or title", hint: "Optional", guesses: ["role", "title", "jobtitle", "position"] },
   { key: "state", label: "State / province", hint: "Optional. Sets the lead's local time and its spot on the dashboard map (US states, as NC or North Carolina)", guesses: ["state", "st", "province", "stateprovince", "stateorprovince", "statename", "region"] },
   { key: "note", label: "Notes", hint: "Optional. Becomes the lead note", guesses: ["notes", "note", "comments", "comment", "description"] },
@@ -3974,7 +4014,7 @@ type SetupStep = { done: boolean; title: string; body: string; target: GuideTarg
 // need their leads and a first call. Optional steps never hold back "set up", since plenty of people call alone.
 function setupSteps(state: State): SetupStep[] {
   const realCalls = state.calls.filter((call) => call.outcome !== "In progress" || "sid" in call);
-  const firstCall: SetupStep = { done: realCalls.length > 0, title: "Make your first call", body: "Pick a campaign and press Start calling. The lead's details and script sit under the phone number; hover any detail and click the pin to keep it at the top for the whole campaign. After the call, log the outcome and the next lead comes up on its own.", target: "queue", action: "Open Dashboard", screen: "queue", spot: "start-calling" };
+  const firstCall: SetupStep = { done: realCalls.length > 0, title: "Make your first call", body: "Pick a campaign and press Start calling. The lead's details and script sit under the phone number; hover any detail and click the pin to keep it at the top for the whole campaign. After the call, log the outcome and the next lead comes up on its own.", target: "queue", action: "Open Dialer", screen: "queue", spot: "start-calling" };
   if (state.me.role !== "owner")
     return [
       { done: Boolean(state.connection?.selectedNumber), title: "Calling is set up for you", body: "Your company's owner connects Twilio and the number leads see. If calls don't start, ask them to finish setup.", target: null, action: "" },
@@ -4956,7 +4996,7 @@ function LeadForm({
           <input name="name" placeholder="Leave blank for a front desk or main line" defaultValue={lead?.name} />
         </label>
         <label>
-          Company
+          Organization
           <input name="company" defaultValue={blank(lead?.company, "Unassigned")} />
         </label>
         <label>
