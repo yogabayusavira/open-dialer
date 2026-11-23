@@ -1276,6 +1276,8 @@ function App() {
             connection={state.connection}
             bookingUrl={state.settings?.bookingUrl || ""}
             ai={state.ai}
+            campaignSettings={state.campaignSettings || {}}
+            leads={state.leads}
             onRefresh={refresh}
             onNotice={setNotice}
           />
@@ -3921,9 +3923,13 @@ function Settings({
   connection,
   bookingUrl,
   ai,
+  campaignSettings,
+  leads,
   onRefresh,
   onNotice,
 }: {
+  campaignSettings: Record<string, CampaignSettings>;
+  leads: Lead[];
   me: Member;
   workspace: { id: string; name: string };
   team: Member[];
@@ -4222,11 +4228,41 @@ function Settings({
       </article>
           </section>
         ) : (
-          <SettingsPanel page={page} me={me} workspace={workspace} team={team} emailReady={emailReady} companies={companies} onSignOut={onSignOut} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} ai={ai} onRefresh={onRefresh} />
+          <SettingsPanel page={page} me={me} workspace={workspace} team={team} emailReady={emailReady} companies={companies} onSignOut={onSignOut} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} ai={ai} campaignSettings={campaignSettings} leads={leads} onRefresh={onRefresh} />
         )}
         </div>
       </div>
     </section>
+  );
+}
+
+// Every {{variable}} used in a campaign script: where it fills from and whether AI cleans it. Edited in each campaign's settings.
+function ScriptVariablesList({ settings, leads }: { settings: Record<string, CampaignSettings>; leads: Lead[] }) {
+  const label = (source: string) => variableFields.find(([key]) => key === source)?.[1] || (source ? `Column: ${source.replace(/^detail:/, "")}` : "Not set");
+  const rows = Object.entries(settings).flatMap(([campaign, config]) => {
+    const columns = [...new Set(leads.filter((lead) => lead.campaigns?.includes(campaign)).flatMap((lead) => Object.keys(lead.details || {})))];
+    return scriptVariables(config.script || "").map((name) => ({ name, campaign, source: config.variables?.[name] || guessVariable(name, columns), picked: Boolean(config.variables?.[name]), ai: Boolean(config.clean?.[name]) }));
+  });
+  return (
+    <div className="script-variables-list">
+      <h3>Script variables</h3>
+      <p>The {"{{variables}}"} in your campaign scripts. Change where one fills from, or how AI cleans it, in that campaign's Settings, Variables.</p>
+      {rows.length ? (
+        <table>
+          <thead><tr><th>Variable</th><th>Campaign</th><th>Fills from</th><th>AI cleanup</th></tr></thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={`${row.campaign}:${row.name}`}>
+                <td><span className="se-var">{`{{${row.name}}}`}</span></td>
+                <td>{row.campaign}</td>
+                <td>{label(row.source)}{row.source && !row.picked ? <small> (automatic)</small> : null}</td>
+                <td>{row.ai ? "On" : "Off"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : <span className="script-variables-list__empty">No variables yet. Add one to a script with the Variable button.</span>}
+    </div>
   );
 }
 
@@ -4381,9 +4417,13 @@ function SettingsPanel({
   onNotice,
   bookingUrl,
   ai,
+  campaignSettings,
+  leads,
   onRefresh,
 }: {
   ai: State["ai"];
+  campaignSettings: Record<string, CampaignSettings>;
+  leads: Lead[];
   page: Exclude<SettingsPage, "numbers">;
   me: Member;
   workspace: { id: string; name: string };
@@ -4433,7 +4473,7 @@ function SettingsPanel({
   if (page === "team") return <TeamSettings me={me} workspace={workspace} team={team} emailReady={emailReady} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "companies") return <CompaniesSettings companies={companies} emailReady={emailReady} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "fields") {
-    return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Custom fields</h2><p>Capture the fields your team actually needs on every lead.</p><form className="inline-form" onSubmit={(event) => { event.preventDefault(); const value = fieldName.trim(); if (!value || fields.includes(value)) return; const next = [...fields, value]; setFields(next); localStorage.setItem("open-dialer-lead-fields", JSON.stringify(next)); setFieldName(""); }}><input value={fieldName} onChange={(event) => setFieldName(event.target.value)} placeholder="e.g. Territory" /><button className="primary-button" type="submit">Add field</button></form><div className="field-pills">{fields.length ? fields.map((field) => <button key={field} type="button" onClick={() => { const next = fields.filter((item) => item !== field); setFields(next); localStorage.setItem("open-dialer-lead-fields", JSON.stringify(next)); }}>{field} <X size={13} /></button>) : <span>No custom fields yet.</span>}</div></section>;
+    return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Custom fields</h2><p>Capture the fields your team actually needs on every lead.</p><form className="inline-form" onSubmit={(event) => { event.preventDefault(); const value = fieldName.trim(); if (!value || fields.includes(value)) return; const next = [...fields, value]; setFields(next); localStorage.setItem("open-dialer-lead-fields", JSON.stringify(next)); setFieldName(""); }}><input value={fieldName} onChange={(event) => setFieldName(event.target.value)} placeholder="e.g. Territory" /><button className="primary-button" type="submit">Add field</button></form><div className="field-pills">{fields.length ? fields.map((field) => <button key={field} type="button" onClick={() => { const next = fields.filter((item) => item !== field); setFields(next); localStorage.setItem("open-dialer-lead-fields", JSON.stringify(next)); }}>{field} <X size={13} /></button>) : <span>No custom fields yet.</span>}</div><ScriptVariablesList settings={campaignSettings} leads={leads} /></section>;
   }
   if (page === "profile") return <ProfileSettings me={me} onRefresh={onRefresh} onNotice={onNotice} onSignOut={onSignOut} />;
   return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Privacy</h2><p>Telephony credentials are encrypted server-side. This browser stores only non-sensitive workspace preferences such as your profile and custom field names.</p><div className="settings-callout"><ShieldCheck size={20} /><span>Never enter Twilio credentials into a third-party integration field.</span></div></section>;
