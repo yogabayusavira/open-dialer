@@ -3325,6 +3325,12 @@ function VariableCard({ variable, campaign, source, columns, leads, rule, aiRead
   return (
     <article className="variable-card">
       <VariableMap names={[variable]} value={mapping} columns={columns} onChange={(next) => onSource(next[variable] || "")} auto={(name) => guessVariable(name, columns)} />
+      {/* What this variable actually says on calls, from real leads, so you can judge whether it needs cleaning. */}
+      <div className="variable-card__samples" aria-label={`Values of {{${variable}}} from your leads`}>
+        {raws.length
+          ? <>{raws.slice(0, 3).map((value) => <span key={value}>{value}</span>)}{raws.length > 3 && <small>+{raws.length - 3} more</small>}</>
+          : <small>{leads.length ? "None of this campaign's leads has a value for this yet." : "Import leads to see what this says."}</small>}
+      </div>
       <label className="variable-card__toggle">
         <input type="checkbox" checked={Boolean(rule)} disabled={!aiReady && !rule} onChange={(event) => onRule(event.target.checked ? { from: raws[0] || "", to: "", notes: "" } : null)} />
         Clean with AI

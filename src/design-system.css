@@ -1126,3 +1126,6 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 .settings-help { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin: 0; color: var(--color-text-muted); font-size: var(--font-size-meta); }
 .settings-link { display: inline-flex; align-items: center; gap: 4px; color: var(--color-accent-text); font-weight: 600; text-decoration: none; }
 .settings-link:hover { text-decoration: underline; }
+.variable-card__samples { display: grid; gap: var(--space-1); }
+.variable-card__samples span { display: -webkit-box; overflow: hidden; padding: var(--space-1) var(--space-3); border-radius: var(--radius-control); background: var(--color-surface-raised); color: var(--color-text); font-size: var(--font-size-meta); -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.variable-card__samples small { color: var(--color-text-muted); font-size: var(--font-size-label); }
