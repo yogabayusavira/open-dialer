@@ -189,6 +189,8 @@ const callVolume = {
 function setLeveler(on: boolean) {
   callVolume.leveler = on;
   try { localStorage.setItem("open-dialer-leveler", on ? "on" : "off"); } catch { /* private mode */ }
+  // Off means not plugged in at all, so the call plays exactly the standard Twilio way.
+  if (phoneDevice?.audio) void (on ? phoneDevice.audio.addProcessor(callLeveler, true) : phoneDevice.audio.removeProcessor(callLeveler, true)).catch(() => {});
 }
 function setCallVolume(level: number) {
   callVolume.level = level;
@@ -253,8 +255,8 @@ async function getPhone(accountSid: string) {
   else {
     phoneDevice = new Device(token, { codecPreferences: [Call.Codec.Opus, Call.Codec.PCMU], closeProtection: "A call is in progress. Leave this page anyway?" });
     phoneDevice.on("error", (error) => console.error("[Open Dialer] phone error", error));
-    // If the browser can't run the leveler, calls still work, just without it.
-    void phoneDevice.audio?.addProcessor(callLeveler, true).catch((error) => console.error("[Open Dialer] call audio leveler unavailable", error));
+    // Only when switched on; if the browser can't run the leveler, calls still work, just without it.
+    if (callVolume.leveler) void phoneDevice.audio?.addProcessor(callLeveler, true).catch((error) => console.error("[Open Dialer] call audio leveler unavailable", error));
   }
   phoneTokenAt = Date.now();
   phoneAccount = accountSid;
