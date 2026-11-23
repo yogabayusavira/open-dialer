@@ -1113,7 +1113,7 @@ function App() {
             }}
             onBook={() => {
               const url = state.settings?.bookingUrl;
-              if (!url) return showError("Add your Calendly or Cal.com link first: Settings → Workspace → Booking link.");
+              if (!url) return showError("Add your Calendly or Cal.com link first: Settings → General → Booking link.");
               openBooking(url, activeCall.lead.name).catch((error) => showError(error instanceof Error ? error.message : "Couldn't open the booking page."));
             }}
           />
@@ -1333,7 +1333,7 @@ function App() {
           }}
         />
       )}
-      {importOpen && <ImportLeads campaigns={[...new Set([...campaigns, ...Object.keys(state.campaignSettings || {})])]} settings={state.campaignSettings || {}} defaultCampaign={importOpen === "campaign" && campaign ? campaign : activeCampaign} requireCampaign={importOpen === "campaign"} onClose={() => setImportOpen(false)} onSaved={async (message, name) => { setImportOpen(false); await refresh(); notifyWith(message, "Start calling", () => { setCampaign(name); setScreen("queue"); }); }} />}
+      {importOpen && <ImportLeads campaigns={[...new Set([...campaigns, ...Object.keys(state.campaignSettings || {})])]} settings={state.campaignSettings || {}} fields={state.settings?.fields} defaultCampaign={importOpen === "campaign" && campaign ? campaign : activeCampaign} requireCampaign={importOpen === "campaign"} onClose={() => setImportOpen(false)} onSaved={async (message, name) => { setImportOpen(false); await refresh(); notifyWith(message, "Start calling", () => { setCampaign(name); setScreen("queue"); }); }} />}
       {dncOpen && <DncList onClose={() => setDncOpen(false)} onSaved={async (message) => { setDncOpen(false); await refresh(); setNotice(message); }} />}
       {outcomeLead && <CallOutcome lead={outcomeLead} bookingUrl={state.settings?.bookingUrl || ""} onBook={() => openBooking(state.settings!.bookingUrl!, outcomeLead.name).catch((error) => showError(error instanceof Error ? error.message : "Couldn't open the booking page."))} onClose={() => setOutcomeLead(null)} onSaved={async (outcome) => {
         setOutcomeLead(null);
@@ -3626,7 +3626,7 @@ function guessMapping(headers: string[], rows: string[][]) {
   return mapping;
 }
 
-function ImportLeads({ campaigns, settings, defaultCampaign, requireCampaign, onClose, onSaved }: { campaigns: string[]; settings: Record<string, CampaignSettings>; defaultCampaign: string; requireCampaign: boolean; onClose: () => void; onSaved: (message: string, campaign: string) => Promise<void> }) {
+function ImportLeads({ campaigns, settings, fields = [], defaultCampaign, requireCampaign, onClose, onSaved }: { campaigns: string[]; settings: Record<string, CampaignSettings>; fields?: string[]; defaultCampaign: string; requireCampaign: boolean; onClose: () => void; onSaved: (message: string, campaign: string) => Promise<void> }) {
   const [campaign, setCampaign] = useState(defaultCampaign);
   const campaignSetup = settings[campaign.trim()] || {};
   const variableNames = scriptVariables(campaignSetup.script || "");
@@ -3638,6 +3638,8 @@ function ImportLeads({ campaigns, settings, defaultCampaign, requireCampaign, on
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<string[][]>([]);
   const [mapping, setMapping] = useState<Record<ImportTarget, number | null> | null>(null);
+  // Custom field → CSV column index (matched by name when the file is read).
+  const [fieldColumns, setFieldColumns] = useState<Record<string, number | null>>({});
   const [keepOthers, setKeepOthers] = useState(true);
   const [cleanPhones, setCleanPhones] = useState(true);
   const readFile = async (file: File | undefined) => {
@@ -3657,6 +3659,7 @@ function ImportLeads({ campaigns, settings, defaultCampaign, requireCampaign, on
     setHeaders(names);
     setRows(body);
     setMapping(guessMapping(names, body));
+    setFieldColumns(Object.fromEntries(fields.map((field) => { const index = names.findIndex((header) => simplify(header) === simplify(field)); return [field, index < 0 ? null : index]; })));
     setVariableColumns({});
   };
   // What a variable is filled from after import: its chosen column (kept as a detail) or lead field, else the campaign's earlier choice.
@@ -3666,7 +3669,7 @@ function ImportLeads({ campaigns, settings, defaultCampaign, requireCampaign, on
     if (choice) return choice;
     return campaignSetup.variables?.[name] || "";
   };
-  const mapped = new Set(Object.values(mapping || {}).filter((value): value is number => value !== null));
+  const mapped = new Set([...Object.values(mapping || {}), ...Object.values(fieldColumns)].filter((value): value is number => value !== null));
   const others = headers.map((header, index) => ({ header, index })).filter(({ index }) => !mapped.has(index));
   const shown = importTargets.filter((target) => mapping?.[target.key] != null);
   const cell = (row: string[], target: ImportTarget) => (mapping?.[target] == null ? "" : row[mapping[target] as number] || "");
@@ -3683,6 +3686,8 @@ function ImportLeads({ campaigns, settings, defaultCampaign, requireCampaign, on
         ...(keepOthers ? Object.fromEntries(others.map(({ header, index }) => [header, row[index] || ""]).filter(([, text]) => text)) : {}),
         // Columns picked for script variables are always kept, even with "keep the other columns" off.
         ...Object.fromEntries(Object.values(variableColumns).filter((source) => source.startsWith("detail:")).map((source) => source.slice(7)).map((header) => [header, row[headers.indexOf(header)] || ""]).filter(([, text]) => text)),
+        // Custom fields are saved under the field's name, whatever the column was called.
+        ...Object.fromEntries(Object.entries(fieldColumns).filter(([, index]) => index !== null).map(([field, index]) => [field, row[index as number] || ""]).filter(([, text]) => text)),
         // Saved under one name whatever the column was called, so local time and the map always find it.
         ...(cell(row, "state") ? { State: cell(row, "state") } : {}),
       },
@@ -3741,6 +3746,18 @@ function ImportLeads({ campaigns, settings, defaultCampaign, requireCampaign, on
                   </select>
                   {mapping[target.key] != null && (
                     <small className="import-example">e.g. {rows.find((row) => row[mapping[target.key] as number])?.[mapping[target.key] as number] || "empty column"}</small>
+                  )}
+                </label>
+              ))}
+              {fields.map((field) => (
+                <label key={`field:${field}`}>
+                  <span>{field} <small>Custom field</small></span>
+                  <select value={fieldColumns[field] ?? ""} onChange={(event) => setFieldColumns({ ...fieldColumns, [field]: event.target.value === "" ? null : Number(event.target.value) })}>
+                    <option value="">Not in this file</option>
+                    {headers.map((header, index) => <option key={index} value={index}>{header}</option>)}
+                  </select>
+                  {fieldColumns[field] != null && (
+                    <small className="import-example">e.g. {rows.find((row) => row[fieldColumns[field] as number])?.[fieldColumns[field] as number] || "empty column"}</small>
                   )}
                 </label>
               ))}
@@ -3875,13 +3892,13 @@ function setupSteps(state: State): SetupStep[] {
     ];
   const scripts = Object.values(state.campaignSettings || {}).some((settings) => settings.script || settings.pdf);
   return [
-    { done: Boolean(state.connection), title: "Connect your Twilio account", body: "Settings → Calling → Phone numbers: enter your Account SID and Auth Token. They're checked and stored encrypted on the server.", target: "settings", action: "Open Settings" },
+    { done: Boolean(state.connection), title: "Connect your Twilio account", body: "Settings → General → Phone numbers: enter your Account SID and Auth Token. They're checked and stored encrypted on the server.", target: "settings", action: "Open Settings" },
     { done: Boolean(state.connection?.selectedNumber), title: "Pick the number leads will see", body: "After connecting, choose one of your Twilio numbers as the caller ID.", target: "settings", action: "Open Settings" },
     { done: Boolean(state.connection), title: "Choose how you take calls", body: "By default you talk in this app with your microphone and speaker (a headset works best). You can switch to Zoiper or your phone in the same Settings page.", target: "settings", action: "Open Settings" },
     { done: Boolean(state.callbackReachable), title: "Let Twilio reach this app", body: "A hosted copy does this on its own. On your computer, start the app with Start Open Dialer.bat (or npm run local): it opens a Cloudflare tunnel and points Twilio at it. RUNNING-LOCALLY.md has the details.", target: null, action: "" },
     { done: state.leads.length > 0, title: "Add your leads", body: "Leads → Import CSV, or import into a campaign from the Campaigns page. Match the columns; only a phone number is required.", target: "leads", action: "Open Leads" },
     { done: scripts, title: "Add a call script", body: "Campaigns → Add script on a campaign. Paste or write it, or upload a PDF. It shows on the call screen, with the lead's name and facts filled in.", target: "campaigns", action: "Open Campaigns", optional: true },
-    { done: state.team.length > 1, title: "Invite your callers", body: "Settings → Workspace → Team → Send invite. Then select leads on the Leads page and use Assign to. Callers only see what you assign them. Skip this if you call alone.", target: "settings", action: "Open Settings", optional: true },
+    { done: state.team.length > 1, title: "Invite your callers", body: "Settings → General → Team → Send invite. Then select leads on the Leads page and use Assign to. Callers only see what you assign them. Skip this if you call alone.", target: "settings", action: "Open Settings", optional: true },
     { done: Boolean(state.emailReady), title: "Turn on email", body: "So invites and password resets arrive by email: add RESEND_API_KEY and RESEND_FROM_EMAIL (a sender on a domain verified in Resend) to .env, or in Dokploy, then restart. Until then, you get each sign-in link to send yourself.", target: null, action: "", optional: true },
     firstCall,
   ];
@@ -4134,6 +4151,7 @@ function Settings({
           </div>
         ) : (
           <form onSubmit={validate}>
+            <p className="settings-help">Both are on your Twilio Console home page, under Account Info. <a className="settings-link" href="https://console.twilio.com/" target="_blank" rel="noreferrer">Open Twilio Console <ExternalLink size={12} aria-hidden="true" /></a></p>
             <label>
               Account SID
               <input
@@ -4173,6 +4191,7 @@ function Settings({
           Open Dialer v2 only lists numbers already owned by the connected Twilio
           account. It never purchases numbers.
         </p>
+        <p className="settings-help">Need a number? Buy one in Twilio, then validate again. <a className="settings-link" href="https://console.twilio.com/us1/develop/phone-numbers/manage/incoming" target="_blank" rel="noreferrer">Your Twilio numbers <ExternalLink size={12} aria-hidden="true" /></a></p>
         {numbers.length > 0 ? (
           <>
             <div className="number-list">
@@ -4314,7 +4333,7 @@ function AiSettings({ ai, onRefresh, onNotice }: { ai: State["ai"]; onRefresh: (
         <label>
           API key
           <input type="password" value={key} onChange={(event) => setKey(event.target.value)} placeholder={ai?.hint && ai.provider === provider ? `Saved: ${ai.hint}. Paste a new one to replace it` : provider === "groq" ? "gsk_…" : "sk-or-…"} autoComplete="off" spellCheck={false} />
-          <small>{provider === "groq" ? "Create one at console.groq.com, API Keys." : "Create one at openrouter.ai, Keys."}</small>
+          <small>{provider === "groq" ? <>Create a free one in Groq's console. <a className="settings-link" href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get a Groq key <ExternalLink size={12} aria-hidden="true" /></a></> : <>Create one in your OpenRouter account. <a className="settings-link" href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer">Get an OpenRouter key <ExternalLink size={12} aria-hidden="true" /></a></>}</small>
         </label>
         <label>
           Model
@@ -4476,6 +4495,7 @@ function SettingsPanel({
       <section className="settings-panel">
         <h2>Booking link</h2>
         <p>Paste your Calendly or Cal.com scheduling link. During a call, Book a call opens it so you can pick a time with the lead.</p>
+        <p className="settings-help">Copy the link of the event you book calls with: <a className="settings-link" href="https://calendly.com/event_types/user/me" target="_blank" rel="noreferrer">Calendly event types <ExternalLink size={12} aria-hidden="true" /></a> <a className="settings-link" href="https://app.cal.com/event-types" target="_blank" rel="noreferrer">Cal.com event types <ExternalLink size={12} aria-hidden="true" /></a></p>
         <form className="settings-form" onSubmit={save}>
           <label>
             Calendly or Cal.com link

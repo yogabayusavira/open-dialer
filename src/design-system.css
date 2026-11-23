@@ -1121,3 +1121,8 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 .settings-nav__group + .settings-nav__group { margin-top: var(--space-4); }
 .settings-nav__group > span { padding: 0 8px 4px; color: var(--color-text-faint); font-size: var(--font-size-label); font-weight: 600; }
 @media (max-width: 760px) { .settings-nav__group { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); } .settings-nav__group > span { grid-column: 1 / -1; } }
+
+/* Settings: a short line pointing to where a key, number or link lives, with a link that opens it. */
+.settings-help { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin: 0; color: var(--color-text-muted); font-size: var(--font-size-meta); }
+.settings-link { display: inline-flex; align-items: center; gap: 4px; color: var(--color-accent-text); font-weight: 600; text-decoration: none; }
+.settings-link:hover { text-decoration: underline; }
