@@ -535,6 +535,18 @@ function campaignName(value) {
 function cleanText(value, max = 500) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
+// Custom fields and CSV columns live in lead.details; a blank value removes the field from the lead.
+function applyDetails(lead, details) {
+  if (!details || typeof details !== "object" || Array.isArray(details)) return;
+  for (const [key, value] of Object.entries(details).slice(0, 40)) {
+    const label = cleanText(key, 60);
+    if (!label) continue;
+    const text = cleanText(value);
+    lead.details = lead.details || {};
+    if (text) lead.details[label] = text;
+    else delete lead.details[label];
+  }
+}
 function importedLeadRows(rows) {
   if (!Array.isArray(rows) || rows.length === 0)
     throw new Error("The import has no rows. Choose a CSV and map a Phone column.");
@@ -980,7 +992,7 @@ async function route(req, res, url) {
     // Things only a company's owner can change: calling setup, the team, imports, deleting and scripts.
     const ownerOnly = [
       ["POST", /^\/api\/twilio\/(validate|connection)$/], ["DELETE", /^\/api\/twilio\/connection$/], ["PATCH", /^\/api\/twilio\/connection$/], ["GET", /^\/api\/twilio\/account-check$/],
-      ["PATCH", /^\/api\/settings$/], ["POST", /^\/api\/leads\/(import|delete|assign)$/], ["DELETE", /^\/api\/leads\/[^/]+$/], ["DELETE", /^\/api\/dnc\/[^/]+$/], ["POST", /^\/api\/dnc$/],
+      ["PATCH", /^\/api\/settings$/], ["PUT", /^\/api\/settings\/fields$/], ["POST", /^\/api\/leads\/(import|delete|assign)$/], ["DELETE", /^\/api\/leads\/[^/]+$/], ["DELETE", /^\/api\/dnc\/[^/]+$/], ["POST", /^\/api\/dnc$/],
       ["PUT", /^\/api\/campaigns\/script$/], ["POST", /^\/api\/campaigns\/script-pdf$/], ["DELETE", /^\/api\/campaigns\/script-pdf$/],
       ["POST", /^\/api\/team$/], ["PATCH", /^\/api\/team\/[^/]+$/], ["DELETE", /^\/api\/team\/[^/]+$/], ["PATCH", /^\/api\/workspace$/],
       ["PUT", /^\/api\/ai\/settings$/], ["DELETE", /^\/api\/ai\/settings$/], ["POST", /^\/api\/ai\/(preview|forget)$/],
@@ -1126,6 +1138,7 @@ async function route(req, res, url) {
         note: "Added manually.",
         due: "Unscheduled",
       };
+      applyDetails(lead, body.details);
       state.leads.unshift(lead);
       state.activity.unshift({
         id: `event_${Date.now()}`,
@@ -1374,6 +1387,7 @@ async function route(req, res, url) {
       if (typeof body.role === "string") lead.role = cleanText(body.role, 120) || "Contact";
       if (typeof body.timezone === "string") lead.timezone = cleanText(body.timezone, 60) || "Unknown";
       if (typeof body.note === "string") lead.note = cleanText(body.note, 1000);
+      applyDetails(lead, body.details);
       if (typeof body.dnc === "boolean") {
         lead.dnc = body.dnc;
         lead.status = body.dnc ? "Lost" : "New";
@@ -1610,6 +1624,16 @@ async function route(req, res, url) {
       const variable = cleanText(body.variable, 60);
       const count = await updateState((state) => forgetSpoken(state, campaign, variable));
       return json(res, 200, { forgotten: count });
+    }
+    // The company's custom lead fields: shown on every lead's form and usable as script variables.
+    if (url.pathname === "/api/settings/fields" && req.method === "PUT") {
+      const { fields } = await getBody(req);
+      const list = [...new Set((Array.isArray(fields) ? fields : []).map((field) => cleanText(field, 60)).filter(Boolean))].slice(0, 30);
+      await updateState((state) => {
+        state.settings = { ...(state.settings || {}), fields: list };
+        activity(state, "Custom fields updated", list.join(", ") || "None");
+      });
+      return json(res, 200, { fields: list });
     }
     if (url.pathname === "/api/settings" && req.method === "PATCH") {
       const { bookingUrl } = await getBody(req);

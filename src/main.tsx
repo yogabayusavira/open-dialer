@@ -109,7 +109,7 @@ type State = {
   calls: CallRecord[];
   dncNumbers: string[];
   callbackReachable?: boolean;
-  settings?: { bookingUrl?: string };
+  settings?: { bookingUrl?: string; fields?: string[] };
   ai?: { provider?: string; model?: string; hint?: string; ready: boolean };
   me: Member;
   workspace: { id: string; name: string };
@@ -123,7 +123,7 @@ type LinkResult = { emailed?: boolean; link?: string; emailError?: string };
 type NumberOption = { sid: string; number: string; label: string };
 type Session = { authenticated: boolean };
 type Screen = "queue" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "analytics" | "settings";
-type SettingsArea = "calling" | "workspace" | "account";
+type SettingsArea = "general" | "account";
 type SettingsPage =
   | "numbers"
   | "team"
@@ -1278,6 +1278,7 @@ function App() {
             ai={state.ai}
             campaignSettings={state.campaignSettings || {}}
             leads={state.leads}
+            fields={state.settings?.fields}
             onRefresh={refresh}
             onNotice={setNotice}
           />
@@ -1287,7 +1288,7 @@ function App() {
         <ScriptDialog
           campaign={scriptFor}
           settings={state.campaignSettings?.[scriptFor] || {}}
-          columns={[...new Set(state.leads.filter((lead) => !scriptFor || lead.campaigns?.includes(scriptFor)).flatMap((lead) => Object.keys(lead.details || {})))].sort()}
+          columns={[...new Set([...(state.settings?.fields || []), ...state.leads.filter((lead) => !scriptFor || lead.campaigns?.includes(scriptFor)).flatMap((lead) => Object.keys(lead.details || {}))])].sort()}
           leads={state.leads.filter((lead) => lead.campaigns?.includes(scriptFor))}
           aiReady={Boolean(state.ai?.ready)}
           onImport={() => { setCampaign(scriptFor); setScriptFor(null); setImportOpen("campaign"); }}
@@ -1317,6 +1318,7 @@ function App() {
       {showLeadForm && (
         <LeadForm
           campaigns={campaigns}
+          fields={state.settings?.fields}
           defaultCampaign={activeCampaign}
           onClose={() => setShowLeadForm(false)}
           onImport={() => {
@@ -1337,7 +1339,7 @@ function App() {
         setOutcomeLead(null);
         advanceFrom(await refresh(), outcomeLead, `${outcome} saved for ${leadLabel(outcomeLead)}.`);
       }} />}
-      {editLead && <LeadForm lead={editLead} campaigns={campaigns} onClose={() => setEditLead(null)} onSaved={async () => { setEditLead(null); await refresh(); setNotice("Lead updated."); }} onDeleted={async () => { const name = leadLabel(editLead); setEditLead(null); if (selectedId === editLead.id) setSelectedId(null); await refresh(); setNotice(`${name} deleted.`); }} />}
+      {editLead && <LeadForm lead={editLead} campaigns={campaigns} fields={state.settings?.fields} onClose={() => setEditLead(null)} onSaved={async () => { setEditLead(null); await refresh(); setNotice("Lead updated."); }} onDeleted={async () => { const name = leadLabel(editLead); setEditLead(null); if (selectedId === editLead.id) setSelectedId(null); await refresh(); setNotice(`${name} deleted.`); }} />}
       {guideOpen && (
         <SetupGuide
           state={state}
@@ -3925,9 +3927,11 @@ function Settings({
   ai,
   campaignSettings,
   leads,
+  fields,
   onRefresh,
   onNotice,
 }: {
+  fields?: string[];
   campaignSettings: Record<string, CampaignSettings>;
   leads: Lead[];
   me: Member;
@@ -3950,7 +3954,7 @@ function Settings({
   const [answerOn, setAnswerOn] = useState<"browser" | "voip" | "sim">(usesAppPhone(connection) ? "browser" : connection!.bridgeNumber!.startsWith("sip:") ? "voip" : "sim");
   const [bridgeNumber, setBridgeNumber] = useState(usesAppPhone(connection) ? "" : (connection?.bridgeNumber || "").replace(/^sip:/i, ""));
   const owner = me.role === "owner";
-  const [area, setArea] = useState<SettingsArea>(owner ? "calling" : "account");
+  const [area, setArea] = useState<SettingsArea>(owner ? "general" : "account");
   const [page, setPage] = useState<SettingsPage>(owner ? "numbers" : "profile");
   const validate = async (event: FormEvent) => {
     event.preventDefault();
@@ -4028,36 +4032,35 @@ function Settings({
     setArea(nextArea);
     setPage(nextPage);
   };
-  const sections: Record<SettingsArea, { id: SettingsPage; label: string; icon: typeof Phone }[]> = {
-    calling: [
-      { id: "numbers", label: "Phone numbers", icon: Phone },
-    ],
-    workspace: [
-      { id: "team", label: "Team", icon: Users },
-      { id: "fields", label: "Custom fields", icon: SlidersHorizontal },
-      { id: "booking", label: "Booking link", icon: CalendarPlus },
-      { id: "ai", label: "AI", icon: Sparkles },
-      ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : []),
+  // Each tab's sidebar is a few titled groups of pages.
+  const sections: Record<SettingsArea, { title: string; items: { id: SettingsPage; label: string; icon: typeof Phone }[] }[]> = {
+    general: [
+      { title: "Calling", items: [{ id: "numbers", label: "Phone numbers", icon: Phone }, { id: "booking", label: "Booking link", icon: CalendarPlus }] },
+      { title: "Integrations", items: [{ id: "ai", label: "AI", icon: Sparkles }] },
+      { title: "Workspace", items: [{ id: "team", label: "Team", icon: Users }, { id: "fields", label: "Custom fields", icon: SlidersHorizontal }, ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : [])] },
     ],
     account: [
-      { id: "profile", label: "Profile", icon: UserRound },
-      { id: "privacy", label: "Privacy", icon: ShieldCheck },
+      { title: "Account", items: [{ id: "profile", label: "Profile", icon: UserRound }, { id: "privacy", label: "Privacy", icon: ShieldCheck }] },
     ],
   };
   return (
     <section className="settings-page">
       <div className="settings-tabs" role="tablist" aria-label="Settings sections">
-        {((owner ? ["calling", "workspace", "account"] : ["account"]) as SettingsArea[]).map((item) => (
-          <button key={item} type="button" role="tab" aria-selected={area === item} className={area === item ? "is-active" : ""} onClick={() => selectPage(item, sections[item][0].id)}>
+        {((owner ? ["general", "account"] : ["account"]) as SettingsArea[]).map((item) => (
+          <button key={item} type="button" role="tab" aria-selected={area === item} className={area === item ? "is-active" : ""} onClick={() => selectPage(item, sections[item][0].items[0].id)}>
             {item}
           </button>
         ))}
       </div>
       <div className="settings-layout">
         <aside className="settings-nav" aria-label={`${area} settings`}>
-          <span>{area} settings</span>
-          {sections[area].map((item) => (
-            <button key={item.id} type="button" className={page === item.id ? "is-active" : ""} onClick={() => setPage(item.id)}><item.icon size={16} aria-hidden="true" />{item.label}</button>
+          {sections[area].map((group) => (
+            <div key={group.title} className="settings-nav__group">
+              <span>{group.title}</span>
+              {group.items.map((item) => (
+                <button key={item.id} type="button" className={page === item.id ? "is-active" : ""} onClick={() => setPage(item.id)}><item.icon size={16} aria-hidden="true" />{item.label}</button>
+              ))}
+            </div>
           ))}
         </aside>
         <div className="settings-content">
@@ -4228,7 +4231,7 @@ function Settings({
       </article>
           </section>
         ) : (
-          <SettingsPanel page={page} me={me} workspace={workspace} team={team} emailReady={emailReady} companies={companies} onSignOut={onSignOut} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} ai={ai} campaignSettings={campaignSettings} leads={leads} onRefresh={onRefresh} />
+          <SettingsPanel page={page} me={me} workspace={workspace} team={team} emailReady={emailReady} companies={companies} onSignOut={onSignOut} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} ai={ai} campaignSettings={campaignSettings} leads={leads} savedFields={fields} onRefresh={onRefresh} />
         )}
         </div>
       </div>
@@ -4419,8 +4422,10 @@ function SettingsPanel({
   ai,
   campaignSettings,
   leads,
+  savedFields,
   onRefresh,
 }: {
+  savedFields?: string[];
   ai: State["ai"];
   campaignSettings: Record<string, CampaignSettings>;
   leads: Lead[];
@@ -4439,7 +4444,22 @@ function SettingsPanel({
   const [booking, setBooking] = useState(bookingUrl);
 
   const [fieldName, setFieldName] = useState("");
-  const [fields, setFields] = useState<string[]>(() => JSON.parse(localStorage.getItem("open-dialer-lead-fields") || "[]"));
+  const fields = savedFields || [];
+  const saveFields = async (next: string[]) => {
+    try {
+      await api("/api/settings/fields", { method: "PUT", body: JSON.stringify({ fields: next }) });
+      await onRefresh();
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Couldn't save the custom fields.");
+    }
+  };
+  // Fields made before they were saved for the company lived only in this browser: move them over once.
+  useEffect(() => {
+    try {
+      const local: string[] = JSON.parse(localStorage.getItem("open-dialer-lead-fields") || "[]");
+      if (local.length && !fields.length && me.role === "owner") void saveFields(local).then(() => localStorage.removeItem("open-dialer-lead-fields"));
+    } catch {}
+  }, []);
 
   if (page === "booking") {
     const save = async (event: FormEvent) => {
@@ -4473,7 +4493,19 @@ function SettingsPanel({
   if (page === "team") return <TeamSettings me={me} workspace={workspace} team={team} emailReady={emailReady} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "companies") return <CompaniesSettings companies={companies} emailReady={emailReady} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "fields") {
-    return <section className="settings-panel"><span className="panel-kicker">Workspace</span><h2>Custom fields</h2><p>Capture the fields your team actually needs on every lead.</p><form className="inline-form" onSubmit={(event) => { event.preventDefault(); const value = fieldName.trim(); if (!value || fields.includes(value)) return; const next = [...fields, value]; setFields(next); localStorage.setItem("open-dialer-lead-fields", JSON.stringify(next)); setFieldName(""); }}><input value={fieldName} onChange={(event) => setFieldName(event.target.value)} placeholder="e.g. Territory" /><button className="primary-button" type="submit">Add field</button></form><div className="field-pills">{fields.length ? fields.map((field) => <button key={field} type="button" onClick={() => { const next = fields.filter((item) => item !== field); setFields(next); localStorage.setItem("open-dialer-lead-fields", JSON.stringify(next)); }}>{field} <X size={13} /></button>) : <span>No custom fields yet.</span>}</div><ScriptVariablesList settings={campaignSettings} leads={leads} /></section>;
+    return (
+      <section className="settings-panel">
+        <span className="panel-kicker">Workspace</span>
+        <h2>Custom fields</h2>
+        <p>Extra details your team fills in on every lead, like Territory. They show on each lead's form for everyone in this company, and you can use them as script variables.</p>
+        <form className="inline-form" onSubmit={(event) => { event.preventDefault(); const value = fieldName.trim(); if (!value || fields.includes(value)) return; setFieldName(""); void saveFields([...fields, value]); }}>
+          <input value={fieldName} onChange={(event) => setFieldName(event.target.value)} placeholder="e.g. Territory" maxLength={60} />
+          <button className="primary-button" type="submit">Add field</button>
+        </form>
+        <div className="field-pills">{fields.length ? fields.map((field) => <button key={field} type="button" aria-label={`Remove ${field}`} onClick={() => void saveFields(fields.filter((item) => item !== field))}>{field} <X size={13} /></button>) : <span>No custom fields yet.</span>}</div>
+        <ScriptVariablesList settings={campaignSettings} leads={leads} />
+      </section>
+    );
   }
   if (page === "profile") return <ProfileSettings me={me} onRefresh={onRefresh} onNotice={onNotice} onSignOut={onSignOut} />;
   return <section className="settings-panel"><span className="panel-kicker">Account</span><h2>Privacy</h2><p>Telephony credentials are encrypted server-side. This browser stores only non-sensitive workspace preferences such as your profile and custom field names.</p><div className="settings-callout"><ShieldCheck size={20} /><span>Never enter Twilio credentials into a third-party integration field.</span></div></section>;
@@ -4652,7 +4684,9 @@ function LeadForm({
   onSaved,
   onDeleted,
   onImport,
+  fields = [],
 }: {
+  fields?: string[];
   lead?: Lead;
   campaigns?: string[];
   defaultCampaign?: string;
@@ -4677,6 +4711,10 @@ function LeadForm({
           // Editing takes a comma-separated list of campaigns; adding takes one.
           if (typeof body.campaigns === "string") body.campaigns = body.campaigns.split(",").map((name) => name.trim()).filter(Boolean);
           if (body.value === "") delete body.value;
+          // Custom fields arrive as "field:Territory" inputs and are saved in the lead's details.
+          const details: Record<string, unknown> = {};
+          for (const key of Object.keys(body)) if (key.startsWith("field:")) { details[key.slice(6)] = body[key]; delete body[key]; }
+          if (Object.keys(details).length) body.details = details;
           return body;
         })()),
       });
@@ -4762,6 +4800,12 @@ function LeadForm({
             {["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"].map((zone) => <option key={zone} value={zone} />)}
           </datalist>
         </label>
+        {fields.map((field) => (
+          <label key={field}>
+            {field}
+            <input name={`field:${field}`} defaultValue={lead?.details?.[field] || ""} autoComplete="off" />
+          </label>
+        ))}
         {editing && (
           <label>
             Note

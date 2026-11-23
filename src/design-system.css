@@ -1115,3 +1115,9 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 .script-variables-list td small { color: var(--color-text-muted); }
 .script-variables-list__empty { color: var(--color-text-muted); font-size: var(--font-size-meta); }
 @media (max-width: 640px) { .script-variables-list { overflow-x: auto; } }
+
+/* Settings sidebar: titled groups (Calling, Integrations, Workspace). */
+.settings-nav__group { display: grid; gap: 4px; }
+.settings-nav__group + .settings-nav__group { margin-top: var(--space-4); }
+.settings-nav__group > span { padding: 0 8px 4px; color: var(--color-text-faint); font-size: var(--font-size-label); font-weight: 600; }
+@media (max-width: 760px) { .settings-nav__group { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); } .settings-nav__group > span { grid-column: 1 / -1; } }
