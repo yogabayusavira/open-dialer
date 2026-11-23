@@ -3,7 +3,7 @@
 // Hosted copies (Dokploy) don't need this: they set OPEN_DIALER_PUBLIC_URL to their real domain.
 // Run: npm run local   (or double-click "Start Open Dialer.bat" on Windows)
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -36,6 +36,23 @@ function startTunnel(cloudflared) {
     tunnel.on("exit", () => { clearTimeout(timer); resolve(null); });
   });
   return { tunnel, address };
+}
+
+// The database can run in Docker on this computer (container open-dialer-db, see .env). Start it and wait until it answers.
+const envText = existsSync(join(root, ".env")) ? readFileSync(join(root, ".env"), "utf8") : "";
+if (/^DATABASE_URL=.*@127\.0\.0\.1:5433\//m.test(envText)) {
+  log("Starting the local database (Docker)…");
+  const started = spawnSync("docker", ["start", "open-dialer-db"], { encoding: "utf8" });
+  if (started.status !== 0) {
+    log("Couldn't start the database. Open Docker Desktop, wait until it says it's running, then start Open Dialer again.");
+    process.exit(1);
+  }
+  let ready = false;
+  for (let tries = 0; tries < 30 && !ready; tries++) {
+    ready = spawnSync("docker", ["exec", "open-dialer-db", "pg_isready", "-U", "opendialer"]).status === 0;
+    if (!ready) spawnSync(process.platform === "win32" ? "timeout" : "sleep", process.platform === "win32" ? ["/t", "2", "/nobreak"] : ["2"], { stdio: "ignore" });
+  }
+  if (!ready) log("The database is slow to start; Open Dialer will keep trying.");
 }
 
 log("Building the app…");

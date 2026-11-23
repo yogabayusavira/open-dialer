@@ -33,6 +33,13 @@ The tunnel gets a new address every time you start. That's fine: the app sends t
   ```
 
 - **A `.env` file** in this folder with at least `DATABASE_URL` and `OPEN_DIALER_ENCRYPTION_KEY`. Add `RESEND_API_KEY` and `RESEND_FROM_EMAIL` if you want invite and password-reset emails to send. Leave `OPEN_DIALER_PUBLIC_URL` out: the start script sets it to the tunnel each time.
+- **A database.** A local one is fastest: Postgres in Docker, with its files kept in `data/postgres` (on the same drive as this folder, not C:). Create it once, with your own password:
+
+  ```
+  docker run -d --name open-dialer-db --restart unless-stopped -e POSTGRES_USER=opendialer -e POSTGRES_PASSWORD=choose-a-password -e POSTGRES_DB=opendialer -e PGDATA=/var/lib/postgresql/data/pgdata -p 127.0.0.1:5433:5432 -v "%CD%\data\postgres:/var/lib/postgresql/data" postgres:17-alpine
+  ```
+
+  Then set `DATABASE_URL=postgres://opendialer:choose-a-password@127.0.0.1:5433/opendialer` in `.env`. With that address, the start script starts the container for you; Docker Desktop just has to be running. Back up the `data` folder: it now holds all your leads and calls.
 
 ## If calls don't connect
 
