@@ -41,6 +41,15 @@ function startTunnel(cloudflared) {
 // The database can run in Docker on this computer (container open-dialer-db, see .env). Start it and wait until it answers.
 const envText = existsSync(join(root, ".env")) ? readFileSync(join(root, ".env"), "utf8") : "";
 if (/^DATABASE_URL=.*@127\.0\.0\.1:5433\//m.test(envText)) {
+  const pause = (seconds) => spawnSync(process.platform === "win32" ? "timeout" : "sleep", process.platform === "win32" ? ["/t", String(seconds), "/nobreak"] : [String(seconds)], { stdio: "ignore" });
+  const dockerUp = () => spawnSync("docker", ["info"], { stdio: "ignore" }).status === 0;
+  // Docker Desktop closed: open it and wait for it (it takes up to a minute or two after a restart).
+  const desktop = "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe";
+  if (!dockerUp() && process.platform === "win32" && existsSync(desktop)) {
+    log("Opening Docker Desktop for the database…");
+    spawn(desktop, [], { detached: true, stdio: "ignore" }).unref();
+    for (let tries = 0; tries < 60 && !dockerUp(); tries++) pause(3);
+  }
   log("Starting the local database (Docker)…");
   const started = spawnSync("docker", ["start", "open-dialer-db"], { encoding: "utf8" });
   if (started.status !== 0) {
@@ -50,7 +59,7 @@ if (/^DATABASE_URL=.*@127\.0\.0\.1:5433\//m.test(envText)) {
   let ready = false;
   for (let tries = 0; tries < 30 && !ready; tries++) {
     ready = spawnSync("docker", ["exec", "open-dialer-db", "pg_isready", "-U", "opendialer"]).status === 0;
-    if (!ready) spawnSync(process.platform === "win32" ? "timeout" : "sleep", process.platform === "win32" ? ["/t", "2", "/nobreak"] : ["2"], { stdio: "ignore" });
+    if (!ready) pause(2);
   }
   if (!ready) log("The database is slow to start; Open Dialer will keep trying.");
 }
