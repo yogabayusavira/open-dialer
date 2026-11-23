@@ -713,6 +713,7 @@ function App() {
   const [outcomeLead, setOutcomeLead] = useState<Lead | null>(null);
   const [editLead, setEditLead] = useState<Lead | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
+  const [tourAt, setTourAt] = useState<number | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [welcomeToken, setWelcomeToken] = useState(() => (hashParts().page === "welcome" ? hashParts().lead : null));
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1059,6 +1060,7 @@ function App() {
           {nav.map(({ id, key, label, icon: Icon }) => (
             <button
               key={id}
+              data-tour={`nav-${key}`}
               className={screen === key ? "nav-item nav-item--active" : "nav-item"}
               onClick={() => { setLeadsView("all"); setCallsView("conversations"); setScreen(key); }}
             >
@@ -1368,12 +1370,13 @@ function App() {
         <SetupGuide
           state={state}
           onClose={() => setGuideOpen(false)}
-          onGo={(target) => {
+          onTour={(step) => {
             setGuideOpen(false);
-            setScreen(target);
+            setTourAt(step);
           }}
         />
       )}
+      {tourAt !== null && <SetupTour steps={setupSteps(state)} start={tourAt} onScreen={setScreen} onClose={() => setTourAt(null)} />}
     </main>
   );
 }
@@ -1992,7 +1995,7 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
           {picker}
           {setupDone < setup.length && <button className="quiet-button" onClick={onGuide}><BadgeCheck size={16} /> Setup {setupDone}/{setup.length}</button>}
           <button className="quiet-button" onClick={onAddLead}><Plus size={16} /> Add lead</button>
-          <button className="primary-button" onClick={onStart} disabled={!toCall}>Start calling <ChevronRight size={16} /></button>
+          <button className="primary-button" data-tour="start-calling" onClick={onStart} disabled={!toCall}>Start calling <ChevronRight size={16} /></button>
         </div>
       </div>
       <div className="dash-banner__body">
@@ -3600,7 +3603,7 @@ function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScri
         <p>Start a campaign with its script, then import its leads. Pick a campaign to call only its leads.</p>
         <div className="campaigns-head__actions">
           <button type="button" className="quiet-button" onClick={() => onImport()}><FileUp size={16} aria-hidden="true" /> Import into a campaign</button>
-          <button type="button" className={names.length ? "quiet-button" : "primary-button"} onClick={() => onScript("")}><Plus size={16} aria-hidden="true" /> New campaign</button>
+          <button type="button" data-tour="new-campaign" className={names.length ? "quiet-button" : "primary-button"} onClick={() => onScript("")}><Plus size={16} aria-hidden="true" /> New campaign</button>
         </div>
       </div>
       {!names.length && <div className="empty-state">No campaigns yet. Start one with New campaign, or import a CSV and give it a campaign name.</div>}
@@ -3619,7 +3622,7 @@ function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScri
                 {leadStages.map((stage) => <div key={stage}><dt><button type="button" className="stretch-link" onClick={() => onStage(name)} title={`Open ${name} on the pipeline`}><Dots tones={[campaignStageTone[stage]]} />{stage === "Meeting booked" ? "Meetings" : stage}</button></dt><dd>{items.filter((lead) => lead.status === stage).length}</dd></div>)}
               </dl>
               <div className="campaign-card__actions">
-                <button type="button" className="text-link" onClick={() => onScript(name)}><SlidersHorizontal size={14} aria-hidden="true" /> Settings</button>
+                <button type="button" className="text-link" data-tour="campaign-settings" onClick={() => onScript(name)}><SlidersHorizontal size={14} aria-hidden="true" /> Settings</button>
                 {items.length ? <button type="button" className="text-link" onClick={() => onView(name)}>View leads</button> : null}
                 {items.length
                   ? <button type="button" className="primary-button" disabled={!toCall} onClick={() => onStart(name)}><PhoneCall size={16} aria-hidden="true" /> Start calling ({toCall})</button>
@@ -3963,35 +3966,41 @@ function ActivityLog({ activity, leads, onOpenLead }: { activity: State["activit
 
 type GuideTarget = "settings" | "leads" | "queue" | "campaigns";
 
-type SetupStep = { done: boolean; title: string; body: string; target: GuideTarget | null; action: string; optional?: boolean };
+// screen: the page the tour opens for this step. spot: what it highlights there, as data-tour names to try in
+// order (the first one on screen wins); none means the card sits in the middle.
+type SetupStep = { done: boolean; title: string; body: string; target: GuideTarget | null; action: string; optional?: boolean; screen?: Screen; spot?: string };
 
-// The setup checklist. Owners set up calling for their company; callers only need their leads and a first call.
-// Optional steps (a team, email) never hold back "set up", since plenty of people call alone.
+// The setup steps, used by the checklist and the guided tour. Owners set up calling for their company; callers only
+// need their leads and a first call. Optional steps never hold back "set up", since plenty of people call alone.
 function setupSteps(state: State): SetupStep[] {
   const realCalls = state.calls.filter((call) => call.outcome !== "In progress" || "sid" in call);
-  const firstCall: SetupStep = { done: realCalls.length > 0, title: "Make your first call", body: "Open the Dashboard, pick a campaign and press Start calling. Log the outcome after each call; the next lead comes up on its own.", target: "queue", action: "Open Dashboard" };
+  const firstCall: SetupStep = { done: realCalls.length > 0, title: "Make your first call", body: "Pick a campaign and press Start calling. The lead's details and script sit under the phone number; hover any detail and click the pin to keep it at the top for the whole campaign. After the call, log the outcome and the next lead comes up on its own.", target: "queue", action: "Open Dashboard", screen: "queue", spot: "start-calling" };
   if (state.me.role !== "owner")
     return [
-      { done: Boolean(state.connection?.selectedNumber), title: "Calling is set up for you", body: "Your company's owner connects Twilio and the number leads see. If this stays open, ask them to finish it.", target: null, action: "" },
-      { done: state.leads.length > 0, title: "Get your leads", body: "You see the leads your owner assigns to you. If the Leads page is empty, ask them to assign some.", target: "leads", action: "Open Leads" },
-      { done: true, title: "Use a headset", body: "Calls play through this browser. Allow the microphone when your browser asks, and use a headset so the lead doesn't hear an echo. Settings → Account → Profile is where you change your password.", target: null, action: "" },
+      { done: Boolean(state.connection?.selectedNumber), title: "Calling is set up for you", body: "Your company's owner connects Twilio and the number leads see. If calls don't start, ask them to finish setup.", target: null, action: "" },
+      { done: state.leads.length > 0, title: "Get your leads", body: "You see the leads your owner assigns to you, here on the Leads page. If it's empty, ask them to assign some.", target: "leads", action: "Open Leads", spot: "nav-leads" },
+      { done: true, title: "Use a headset", body: "Calls play through this browser. Allow the microphone when your browser asks, and use a headset so the lead doesn't hear an echo. Your password lives in Settings → Account → Profile.", target: null, action: "" },
       firstCall,
     ];
   const scripts = Object.values(state.campaignSettings || {}).some((settings) => settings.script || settings.pdf);
   return [
-    { done: Boolean(state.connection), title: "Connect your Twilio account", body: "Settings → General → Phone numbers: enter your Account SID and Auth Token. They're checked and stored encrypted on the server.", target: "settings", action: "Open Settings" },
-    { done: Boolean(state.connection?.selectedNumber), title: "Pick the number leads will see", body: "After connecting, choose one of your Twilio numbers as the caller ID.", target: "settings", action: "Open Settings" },
-    { done: Boolean(state.connection), title: "Choose how you take calls", body: "By default you talk in this app with your microphone and speaker (a headset works best). You can switch to Zoiper or your phone in the same Settings page.", target: "settings", action: "Open Settings" },
-    { done: Boolean(state.callbackReachable), title: "Let Twilio reach this app", body: "A hosted copy does this on its own. On your computer, start the app with Start Open Dialer.bat (or npm run local): it opens a Cloudflare tunnel and points Twilio at it. RUNNING-LOCALLY.md has the details.", target: null, action: "" },
-    { done: state.leads.length > 0, title: "Add your leads", body: "Leads → Import CSV, or import into a campaign from the Campaigns page. Match the columns; only a phone number is required.", target: "leads", action: "Open Leads" },
-    { done: scripts, title: "Add a call script", body: "Campaigns → Add script on a campaign. Paste or write it, or upload a PDF. It shows on the call screen, with the lead's name and facts filled in.", target: "campaigns", action: "Open Campaigns", optional: true },
-    { done: state.team.length > 1, title: "Invite your callers", body: "Settings → General → Team → Send invite. Then select leads on the Leads page and use Assign to. Callers only see what you assign them. Skip this if you call alone.", target: "settings", action: "Open Settings", optional: true },
-    { done: Boolean(state.emailReady), title: "Turn on email", body: "So invites and password resets arrive by email: add RESEND_API_KEY and RESEND_FROM_EMAIL (a sender on a domain verified in Resend) to .env, or in Dokploy, then restart. Until then, you get each sign-in link to send yourself.", target: null, action: "", optional: true },
+    { done: Boolean(state.connection), title: "Connect your Twilio account", body: "Paste your Account SID and Auth Token here and press Validate. Both are on your Twilio Console home page; the link above the fields opens it. They're checked and stored encrypted.", target: "settings", action: "Open Settings", screen: "settings", spot: "twilio" },
+    { done: Boolean(state.connection?.selectedNumber), title: "Pick the number leads will see", body: "Once Twilio is connected, your numbers are listed here. Choose the one leads see as caller ID and save it. Need a number? The link here opens your Twilio numbers.", target: "settings", action: "Open Settings", screen: "settings", spot: "number,twilio" },
+    { done: Boolean(state.connection), title: "Choose how you take calls", body: "\"In this app\" plays calls through your browser: use a headset and allow the microphone. You can switch to Zoiper or your phone here instead.", target: "settings", action: "Open Settings", screen: "settings", spot: "answer-on,twilio" },
+    { done: Boolean(state.callbackReachable), title: "Start Open Dialer the easy way", body: "On your computer, always start with Start Open Dialer.bat. It opens Docker Desktop and the local database, builds the app, and opens the tunnel Twilio needs to reach you. Keep its window open while you call. A hosted copy needs none of this.", target: null, action: "" },
+    { done: state.leads.length > 0, title: "Add your leads", body: "New campaign: name it and write the script first, then import its CSV. Match the columns; only a phone number is required. Leads → Import CSV works too.", target: "campaigns", action: "Open Campaigns", screen: "campaigns", spot: "new-campaign" },
+    { done: scripts, title: "Set up each campaign", body: "Settings on a campaign card. General: what a won deal is worth. Script: type {{name}} or ((NAME)) where lead details go, or use the Variable button. Variables: what fills each one, with real examples from your leads, and Clean with AI to make messy values sound natural.", target: "campaigns", action: "Open Campaigns", optional: true, screen: "campaigns", spot: "campaign-settings,new-campaign" },
+    { done: Boolean(state.settings?.fields?.length), title: "Add custom fields", body: "Extra details your team fills in on every lead, like Territory. They show on each lead's form, in the CSV import, and as script variables.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-fields" },
+    { done: Boolean(state.ai?.ready), title: "Connect AI", body: "For cleaning script variables while you call. Pick Groq (fast and free), paste a key (the link opens Groq's keys page) and press Check and save.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-ai" },
+    { done: Boolean(state.settings?.bookingUrl), title: "Add your booking link", body: "Your Calendly or Cal.com link, so Book a call opens it during a call. The links there take you to your event types to copy it.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-booking" },
+    { done: state.team.length > 1, title: "Invite your callers", body: "Team → Send invite. Then select leads on the Leads page and use Assign to; callers only see what you assign them. Skip this if you call alone.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-team" },
+    { done: Boolean(state.emailReady), title: "Turn on email", body: "So invites and password resets arrive by email: add RESEND_API_KEY and RESEND_FROM_EMAIL (a sender on a domain verified in Resend) to .env, then restart. Until then, you get each sign-in link to send yourself.", target: null, action: "", optional: true },
     firstCall,
   ];
 }
 
-function SetupGuide({ state, onClose, onGo }: { state: State; onClose: () => void; onGo: (target: GuideTarget) => void }) {
+// The checklist: what's done, plus the guided tour, from the start or from any step.
+function SetupGuide({ state, onClose, onTour }: { state: State; onClose: () => void; onTour: (step: number) => void }) {
   const steps = setupSteps(state);
   const required = steps.filter((step) => !step.optional);
   const done = required.filter((step) => step.done).length;
@@ -4000,8 +4009,9 @@ function SetupGuide({ state, onClose, onGo }: { state: State; onClose: () => voi
       <section className="lead-form setup-guide" role="dialog" aria-modal="true" aria-labelledby="setup-guide-title">
         <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
         <h2 id="setup-guide-title">Setup guide</h2>
-        <p>{done === required.length ? "Everything you need is set up. You're ready to call." : `${done} of ${required.length} done. Each step ticks itself off once it's finished.`}</p>
+        <p>{done === required.length ? "Everything you need is set up. Take the tour any time for a refresher." : `${done} of ${required.length} done. Each step ticks itself off once it's finished.`}</p>
         <div className="dash-progress setup-guide__progress"><span><i style={{ width: `${Math.round((done / required.length) * 100)}%` }} /></span></div>
+        <button type="button" className="primary-button setup-guide__tour" onClick={() => onTour(Math.max(0, steps.findIndex((step) => !step.done)))}><Play size={16} aria-hidden="true" /> {done === required.length ? "Take the tour" : "Continue with the tour"}</button>
         <ol className="setup-steps">
           {steps.map((step, index) => (
             <li key={step.title} className={step.done ? "is-done" : undefined}>
@@ -4010,10 +4020,81 @@ function SetupGuide({ state, onClose, onGo }: { state: State; onClose: () => voi
                 <b>{step.title}{step.optional && <em className="setup-steps__optional">Optional</em>}<span className="sr-only">{step.done ? " (done)" : " (to do)"}</span></b>
                 <small>{step.body}</small>
               </div>
-              {!step.done && step.target && <button type="button" className="quiet-button" onClick={() => onGo(step.target!)}>{step.action}</button>}
+              <button type="button" className="quiet-button" onClick={() => onTour(index)}>Show me</button>
             </li>
           ))}
         </ol>
+      </section>
+    </div>
+  );
+}
+
+// The guided tour: one step at a time, it opens the right page and lights up the thing to use, with a card beside it.
+// Nothing is blocked: you can click the highlighted part (or anything else) while the card stays up.
+function SetupTour({ steps, start, onScreen, onClose }: { steps: SetupStep[]; start: number; onScreen: (screen: Screen) => void; onClose: () => void }) {
+  const [index, setIndex] = useState(start);
+  const step = steps[Math.min(index, steps.length - 1)];
+  const [rect, setRect] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
+  const last = index >= steps.length - 1;
+  useEffect(() => { if (step.screen) onScreen(step.screen); }, [index]);
+  useEffect(() => {
+    // The page may still be opening, and things move as you scroll, so keep looking for the spot.
+    let scrolled = false;
+    const find = () => {
+      const element = (step.spot || "").split(",").map((name) => document.querySelector<HTMLElement>(`[data-tour="${name}"]`)).find((found) => found && found.offsetParent !== null);
+      if (element && !scrolled) { element.scrollIntoView({ block: "center", behavior: "smooth" }); scrolled = true; }
+      const box = element?.getBoundingClientRect();
+      const next = box ? { top: Math.round(box.top), left: Math.round(box.left), width: Math.round(box.width), height: Math.round(box.height) } : null;
+      setRect((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next));
+    };
+    find();
+    const timer = window.setInterval(find, 200);
+    return () => window.clearInterval(timer);
+  }, [index]);
+  useEffect(() => {
+    const keys = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowRight" && !last) setIndex((current) => current + 1);
+      if (event.key === "ArrowLeft" && index > 0) setIndex((current) => current - 1);
+    };
+    window.addEventListener("keydown", keys);
+    return () => window.removeEventListener("keydown", keys);
+  }, [index, last, onClose]);
+  const pad = 8;
+  const cardWidth = Math.min(360, window.innerWidth - 32);
+  // Below the spot if it fits, else above, else beside it, else in the bottom corner (for spots taller than the window).
+  const room = 260;
+  const left = rect ? Math.min(Math.max(16, rect.left), window.innerWidth - cardWidth - 16) : 0;
+  const cardStyle = !rect
+    ? { left: "50%", top: "50%", transform: "translate(-50%, -50%)", width: cardWidth }
+    : window.innerHeight - (rect.top + rect.height + pad) > room
+      ? { left, top: rect.top + rect.height + pad + 12, width: cardWidth }
+      : rect.top - pad > room
+        ? { left, bottom: window.innerHeight - rect.top + pad + 12, width: cardWidth }
+        : window.innerWidth - (rect.left + rect.width + pad) > cardWidth + 28
+          ? { left: rect.left + rect.width + pad + 12, top: Math.min(Math.max(16, rect.top), window.innerHeight - room - 16), width: cardWidth }
+          : rect.left - pad > cardWidth + 28
+            ? { left: rect.left - pad - 12 - cardWidth, top: Math.min(Math.max(16, rect.top), window.innerHeight - room - 16), width: cardWidth }
+            : { right: 16, bottom: 16, width: cardWidth };
+  return (
+    <div className="setup-tour" aria-live="polite">
+      {rect
+        ? <div className="setup-tour__spot" style={{ top: rect.top - pad, left: rect.left - pad, width: rect.width + pad * 2, height: rect.height + pad * 2 }} />
+        : <div className="setup-tour__dim" />}
+      <section className="setup-tour__card" style={cardStyle} role="dialog" aria-labelledby="setup-tour-title">
+        <header>
+          <small>Step {index + 1} of {steps.length}{step.optional && " · Optional"}{step.done && " · Done"}</small>
+          <button type="button" className="close-button" onClick={onClose} aria-label="Close the tour"><X size={16} /></button>
+        </header>
+        <h3 id="setup-tour-title">{step.done && <Check size={16} aria-hidden="true" />} {step.title}</h3>
+        <p>{step.body}</p>
+        <div className="setup-tour__dots" aria-hidden="true">{steps.map((item, dot) => <i key={item.title} className={dot === index ? "is-current" : item.done ? "is-done" : undefined} />)}</div>
+        <footer>
+          <button type="button" className="quiet-button" onClick={() => setIndex(index - 1)} disabled={index === 0}>Back</button>
+          {last
+            ? <button type="button" className="primary-button" onClick={onClose}>Finish</button>
+            : <button type="button" className="primary-button" onClick={() => setIndex(index + 1)}>Next <ChevronRight size={16} aria-hidden="true" /></button>}
+        </footer>
       </section>
     </div>
   );
@@ -4162,7 +4243,7 @@ function Settings({
             <div key={group.title} className="settings-nav__group">
               <span>{group.title}</span>
               {group.items.map((item) => (
-                <button key={item.id} type="button" className={page === item.id ? "is-active" : ""} onClick={() => setPage(item.id)}><item.icon size={16} aria-hidden="true" />{item.label}</button>
+                <button key={item.id} type="button" data-tour={`settings-${item.id}`} className={page === item.id ? "is-active" : ""} onClick={() => setPage(item.id)}><item.icon size={16} aria-hidden="true" />{item.label}</button>
               ))}
             </div>
           ))}
@@ -4170,7 +4251,7 @@ function Settings({
         <div className="settings-content">
         {page === "numbers" ? (
           <section className="settings-grid">
-      <article className="settings-card connection-card">
+      <article className="settings-card connection-card" data-tour="twilio">
         <div>
           <span className="panel-kicker">Telephony</span>
           <h2>Your Twilio connection</h2>
@@ -4200,7 +4281,7 @@ function Settings({
               </div>
             </dl>
             <AccountCheck />
-            <form className="bridge-form" onSubmit={saveBridge}>
+            <form className="bridge-form" data-tour="answer-on" onSubmit={saveBridge}>
               <label>
                 How will you take calls?
                 <select value={answerOn} onChange={(event) => { setAnswerOn(event.target.value as "browser" | "voip" | "sim"); setBridgeNumber(""); }}>
@@ -4271,7 +4352,7 @@ function Settings({
           </form>
         )}
       </article>
-      <article className="settings-card">
+      <article className="settings-card" data-tour="number">
         <span className="panel-kicker">Outbound line</span>
         <h2>Select an existing number</h2>
         <p>

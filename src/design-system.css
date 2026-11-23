@@ -1150,3 +1150,22 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 .call-leveler { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--color-text-muted); font-size: var(--font-size-meta); cursor: pointer; }
 .call-leveler input { margin: 0; accent-color: var(--color-text-muted); }
 .call-volume input:disabled { opacity: 0.4; }
+
+/* Setup tour: the page dims except the spot being explained; the card sits next to it. Clicks still reach the page. */
+.setup-tour { position: fixed; inset: 0; z-index: 200; pointer-events: none; }
+.setup-tour__dim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.55); }
+.setup-tour__spot { position: fixed; border-radius: 12px; box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55), 0 0 0 2px var(--color-accent-text); transition: top 220ms ease, left 220ms ease, width 220ms ease, height 220ms ease; }
+.setup-tour__card { position: fixed; display: grid; gap: var(--space-3); padding: var(--space-4) var(--space-5) var(--space-4); border: 1px solid var(--color-border-strong); border-radius: var(--radius-dialog, 16px); background: var(--color-surface); box-shadow: var(--shadow-card); color: var(--color-text); pointer-events: auto; }
+.setup-tour__card header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.setup-tour__card header small { color: var(--color-text-muted); font-size: var(--font-size-label); font-weight: 600; }
+.setup-tour__card .close-button { position: static; width: 28px; height: 28px; }
+.setup-tour__card h3 { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--font-size-title); }
+.setup-tour__card h3 svg { color: var(--color-good, #3fb27f); }
+.setup-tour__card p { margin: 0; color: var(--color-text-muted); font-size: var(--font-size-body); line-height: 1.5; }
+.setup-tour__dots { display: flex; flex-wrap: wrap; gap: 5px; }
+.setup-tour__dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--color-border-strong); }
+.setup-tour__dots i.is-done { background: var(--color-text-muted); }
+.setup-tour__dots i.is-current { width: 16px; border-radius: 3px; background: var(--color-accent-text); }
+.setup-tour__card footer { display: flex; justify-content: space-between; gap: var(--space-2); }
+.setup-guide__tour { justify-self: start; }
+@media (prefers-reduced-motion: reduce) { .setup-tour__spot { transition: none; } }
