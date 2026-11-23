@@ -197,18 +197,43 @@ function currentWorkspace() {
 function workspaceFile(ws) {
   return ws === legacyWorkspace ? storePath : join(storeDir, `${ws}.json`);
 }
+// Database rows kept in memory: id → { at: updated_at in ms, payload }. A read first asks only when the row last
+// changed (one quick round trip); the whole row (a workspace is ~0.5 MB, about a second over a far link) is fetched
+// only when it changed, e.g. after another server or a script wrote it. Every read hands out its own copy.
+const rowCache = new Map();
+async function readRow(client, id) {
+  const head = await client.query("SELECT updated_at FROM open_dialer_state WHERE id = $1", [id]);
+  if (!head.rows[0]) {
+    rowCache.delete(id);
+    return null;
+  }
+  const hit = rowCache.get(id);
+  if (hit && hit.at === new Date(head.rows[0].updated_at).getTime()) return structuredClone(hit.payload);
+  const query = () => client.query("SELECT payload, updated_at FROM open_dialer_state WHERE id = $1", [id]);
+  // A garbled read over the network surfaces as a JSON parse error; retry once before failing.
+  const result = await query().catch((error) => {
+    if (!(error instanceof SyntaxError)) throw error;
+    console.error(`[open-dialer] read of ${id} came back garbled, retrying: ${error.message}`);
+    return query();
+  });
+  const row = result.rows[0];
+  if (!row) return null;
+  rowCache.set(id, { at: new Date(row.updated_at).getTime(), payload: row.payload });
+  return structuredClone(row.payload);
+}
+async function writeRow(client, id, payload) {
+  const result = await client.query(
+    "INSERT INTO open_dialer_state (id, payload, updated_at) VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW() RETURNING updated_at",
+    [id, JSON.stringify(payload)],
+  );
+  rowCache.set(id, { at: new Date(result.rows[0].updated_at).getTime(), payload: structuredClone(payload) });
+}
 async function readState() {
   const ws = currentWorkspace();
   const client = await databaseClient();
   if (client) {
-    const query = () => client.query("SELECT payload FROM open_dialer_state WHERE id = $1", [ws]);
-    // A garbled read over the network surfaces as a JSON parse error; retry once before failing.
-    const result = await query().catch((error) => {
-      if (!(error instanceof SyntaxError)) throw error;
-      console.error(`[open-dialer] workspace read came back garbled, retrying: ${error.message}`);
-      return query();
-    });
-    if (result.rows[0]) return normalizeState(result.rows[0].payload);
+    const payload = await readRow(client, ws);
+    if (payload) return normalizeState(payload);
     if (ws !== legacyWorkspace) return normalizeState({ leads: [], activity: [] });
     const legacyState = readFileState();
     if (legacyState) {
@@ -228,14 +253,16 @@ function blobPath(id) {
 }
 async function readBlob(id) {
   const client = await databaseClient();
-  if (client) return (await client.query("SELECT payload FROM open_dialer_state WHERE id = $1", [id])).rows[0]?.payload || null;
+  if (client) return readRow(client, id);
   return existsSync(blobPath(id)) ? JSON.parse(readFileSync(blobPath(id), "utf8")) : null;
 }
 async function writeBlob(id, payload) {
   const client = await databaseClient();
   if (client) {
-    if (payload === null) await client.query("DELETE FROM open_dialer_state WHERE id = $1", [id]);
-    else await client.query("INSERT INTO open_dialer_state (id, payload, updated_at) VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()", [id, JSON.stringify(payload)]);
+    if (payload === null) {
+      await client.query("DELETE FROM open_dialer_state WHERE id = $1", [id]);
+      rowCache.delete(id);
+    } else await writeRow(client, id, payload);
     return;
   }
   if (payload === null) return rmSync(blobPath(id), { force: true });
@@ -265,15 +292,7 @@ function updateState(change) {
 async function writeState(state) {
   const client = await databaseClient();
   if (client) {
-    await client.query(
-      `
-        INSERT INTO open_dialer_state (id, payload, updated_at)
-        VALUES ($1, $2::jsonb, NOW())
-        ON CONFLICT (id) DO UPDATE
-        SET payload = EXCLUDED.payload, updated_at = NOW()
-      `,
-      [currentWorkspace(), JSON.stringify(state)],
-    );
+    await writeRow(client, currentWorkspace(), state);
     return;
   }
   mkdirSync(storeDir, { recursive: true });
