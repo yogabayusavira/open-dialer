@@ -181,8 +181,9 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 const levelerBoost = 1;
 const callVolume = {
   level: (() => { try { return Number(localStorage.getItem("open-dialer-call-volume")) || 1; } catch { return 1; } })(),
-  // Off sends the call's sound straight to the speaker, untouched. Read when each call starts.
-  leveler: (() => { try { return localStorage.getItem("open-dialer-leveler") !== "off"; } catch { return true; } })(),
+  // Off (the default) sends the call's sound straight to the speaker, untouched. Read when each call starts.
+  // shortcut: off by default because calls went silent with it on; turn the default back on once it's confirmed on a real call.
+  leveler: (() => { try { return localStorage.getItem("open-dialer-leveler") === "on"; } catch { return false; } })(),
   gains: new Set<GainNode>(),
 };
 function setLeveler(on: boolean) {
