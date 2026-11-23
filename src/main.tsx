@@ -92,7 +92,11 @@ type CallRecord = {
 };
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
-type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string> };
+type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number };
+// A won lead is worth its own value if set, else its campaign's deal value.
+function dealValue(lead: Lead, settings: Record<string, CampaignSettings>) {
+  return lead.value || Math.max(0, ...(lead.campaigns || []).map((name) => settings[name]?.value || 0));
+}
 type State = {
   tasks?: Task[];
   campaignSettings?: Record<string, CampaignSettings>;
@@ -1232,6 +1236,7 @@ function App() {
           <Pipeline
             leads={scoped.leads}
             calls={state.calls}
+            settings={state.campaignSettings || {}}
             onMove={setStatus}
             onEdit={setEditLead}
             onAddTask={(lead) => setTaskDialog({ leadId: lead.id })}
@@ -1273,6 +1278,8 @@ function App() {
           campaign={scriptFor}
           settings={state.campaignSettings?.[scriptFor] || {}}
           columns={[...new Set(state.leads.filter((lead) => !scriptFor || lead.campaigns?.includes(scriptFor)).flatMap((lead) => Object.keys(lead.details || {})))].sort()}
+          leadCount={state.leads.filter((lead) => lead.campaigns?.includes(scriptFor)).length}
+          onImport={() => { setCampaign(scriptFor); setScriptFor(null); setImportOpen("campaign"); }}
           onViewPdf={() => setPdfFor(scriptFor)}
           onClose={() => setScriptFor(null)}
           onChanged={async (message, close, name) => {
@@ -1701,7 +1708,7 @@ function lostReason(lead: Lead, calls: CallRecord[]) {
   if (lead.followUpSince && callAttempts(calls.filter((call) => call.leadId === lead.id && call.at > lead.followUpSince!)).length >= followUpLimit) return "No reply";
   return calls.find((call) => call.leadId === lead.id && lostOutcomes.includes(call.outcome))?.outcome || "Lost";
 }
-function StageLine({ lead, calls }: { lead: Lead; calls: CallRecord[] }) {
+function StageLine({ lead, calls, value }: { lead: Lead; calls: CallRecord[]; value: number }) {
   if (lead.status === "Follow-up") return <FollowUpTag lead={lead} calls={calls} />;
   if (lead.status === "New") {
     const tries = callAttempts(calls.filter((call) => call.leadId === lead.id)).length;
@@ -1715,7 +1722,7 @@ function StageLine({ lead, calls }: { lead: Lead; calls: CallRecord[] }) {
     const past = at.getTime() < Date.now() && !today;
     return <span className="stage-line"><Dots tones={[past ? "bad" : today ? "warn" : "good"]} />{past ? `Was ${dueLabel(lead.due).text}, no result` : dueLabel(lead.due).text}</span>;
   }
-  if (lead.status === "Won") return <span className="stage-line"><Dots tones={[lead.value ? "good" : "empty"]} />{lead.value ? `$${lead.value.toLocaleString()}` : "No deal value yet"}</span>;
+  if (lead.status === "Won") return <span className="stage-line"><Dots tones={[value ? "good" : "empty"]} />{value ? `$${value.toLocaleString()}` : "No deal value yet"}</span>;
   const reason = lostReason(lead, calls);
   return <span className="stage-line"><Dots tones={[reason === "Do not call" ? "bad" : reason === "No reply" ? "done" : "tried"]} />{reason}</span>;
 }
@@ -3073,11 +3080,13 @@ function VariableMap({ names, value, columns, onChange, auto }: { names: string[
 }
 
 // Add or edit a campaign's script: write it in the live editor and/or upload a PDF.
-function ScriptDialog({ campaign, settings, columns, onViewPdf, onClose, onChanged }: { campaign: string; settings: CampaignSettings; columns: string[]; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
+// One campaign's settings: deal value, leads, script and its variables, script PDF.
+function ScriptDialog({ campaign, settings, columns, leadCount, onImport, onViewPdf, onClose, onChanged }: { campaign: string; settings: CampaignSettings; columns: string[]; leadCount: number; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   // An empty campaign name means a new campaign: name it, write the script, then import its leads.
   const isNew = !campaign;
   const [name, setName] = useState(campaign);
+  const [value, setValue] = useState(settings.value ? String(settings.value) : "");
   const [text, setText] = useState(settings.script || "");
   const [variables, setVariables] = useState<Record<string, string>>(settings.variables || {});
   const names = scriptVariables(text);
@@ -3106,7 +3115,7 @@ function ScriptDialog({ campaign, settings, columns, onViewPdf, onClose, onChang
     if (!name.trim()) return setError("Name the campaign first.");
     // Only keep choices for variables still in the script.
     const kept = Object.fromEntries(Object.entries(variables).filter(([key, source]) => source && scriptVariables(script).includes(key)));
-    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name.trim(), script, variables: kept }) }), isNew ? `${name.trim()} created.` : script.trim() ? `Script saved for ${name.trim()}.` : `Script removed from ${name.trim()}.`, true);
+    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name.trim(), script, variables: kept, value: value.replace(/[$,\s]/g, "") }) }), isNew ? `${name.trim()} created.` : `${name.trim()} saved.`, true);
   };
   const upload = (file: File | undefined) => {
     if (!file) return;
@@ -3121,10 +3130,20 @@ function ScriptDialog({ campaign, settings, columns, onViewPdf, onClose, onChang
     <div className="modal-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <form className="lead-form script-dialog" onSubmit={save} role="dialog" aria-modal="true" aria-labelledby="script-dialog-title">
         <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
-        <h2 id="script-dialog-title">{isNew ? "New campaign" : `Script for ${campaign}`}</h2>
-        <p>{isNew ? "Name it and write the script. Put {{variables}} where each lead's details go; you'll match them to your CSV's columns when you import the leads." : "Shows on the call screen for every lead in this campaign. Paste it as text, upload a PDF, or both."}</p>
+        <h2 id="script-dialog-title">{isNew ? "New campaign" : campaign}</h2>
+        <p>{isNew ? "Name it and write the script. Put {{variables}} where each lead's details go; you'll match them to your CSV's columns when you import the leads." : "Campaign settings. The script shows on the call screen for every lead in this campaign."}</p>
         {error && <p className="form-error" role="alert">{error}</p>}
-        {isNew && <label>Campaign name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="NC school districts" required autoFocus /></label>}
+        <div className="campaign-settings__row">
+          {isNew && <label>Campaign name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="NC school districts" required autoFocus /></label>}
+          <label><span>Deal value<small>for each won lead</small></span><input value={value} onChange={(event) => setValue(event.target.value)} inputMode="decimal" placeholder="$0" /></label>
+          {!isNew && (
+            <div className="campaign-settings__leads">
+              <span>Leads<b>{leadCount}</b></span>
+              <button type="button" className="quiet-button" onClick={onImport}><FileUp size={16} aria-hidden="true" /> Import leads</button>
+            </div>
+          )}
+        </div>
+        <b className="campaign-settings__label">Script</b>
         <ScriptEditor initial={settings.script || ""} editorRef={editorRef} onTextChange={setText} />
         {names.length > 0 && (
           <section className="script-dialog__variables" aria-label="Variables in this script">
@@ -3151,7 +3170,7 @@ function ScriptDialog({ campaign, settings, columns, onViewPdf, onClose, onChang
         </div>
         <div className="task-dialog__actions">
           <button type="button" className="quiet-button" onClick={onClose}>Cancel</button>
-          <button className="primary-button" disabled={busy}>{busy ? "Saving…" : isNew ? "Create campaign" : "Save script"}</button>
+          <button className="primary-button" disabled={busy}>{busy ? "Saving…" : isNew ? "Create campaign" : "Save"}</button>
         </div>
       </form>
     </div>
@@ -3271,6 +3290,7 @@ function Pipeline({
   onEdit,
   onCall,
   onAddTask,
+  settings,
 }: {
   leads: Lead[];
   calls: CallRecord[];
@@ -3278,12 +3298,13 @@ function Pipeline({
   onEdit: (lead: Lead) => void;
   onCall: (id: string) => void;
   onAddTask: (lead: Lead) => void;
+  settings: Record<string, CampaignSettings>;
 }) {
   const [dragging, setDragging] = useState<string | null>(null);
   const [peekId, setPeekId] = useState<string | null>(null);
   const peek = leads.find((lead) => lead.id === peekId);
   const [over, setOver] = useState<string | null>(null);
-  const won = leads.filter((lead) => lead.status === "Won").reduce((sum, lead) => sum + (lead.value || 0), 0);
+  const won = leads.filter((lead) => lead.status === "Won").reduce((sum, lead) => sum + dealValue(lead, settings), 0);
   return (
     <section className="pipeline-page">
       <header className="pipeline-header">
@@ -3327,7 +3348,7 @@ function Pipeline({
                     <b>{leadLabel(lead)}</b>
                     <small>{leadSubtitle(lead)}</small>
                     <span className="pipeline-card__meta">{formatPhone(lead.phone, lead.extension)}</span>
-                    <StageLine lead={lead} calls={calls} />
+                    <StageLine lead={lead} calls={calls} value={dealValue(lead, settings)} />
                     {lead.campaigns?.length ? <span className="pipeline-card__meta">{lead.campaigns.join(", ")}</span> : null}
                   </article>
                 ))}
@@ -3362,7 +3383,7 @@ function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScri
           const toCall = items.filter(inQueue).length;
           return (
             <article className="campaign-card" key={name}>
-              <header><h2>{name}</h2><span>{items.length} lead{items.length === 1 ? "" : "s"}{settings[name]?.script || settings[name]?.pdf ? " · Script" : ""}</span></header>
+              <header><h2>{name}</h2><span>{items.length} lead{items.length === 1 ? "" : "s"}{settings[name]?.script || settings[name]?.pdf ? " · Script" : ""}{settings[name]?.value ? ` · $${settings[name]!.value!.toLocaleString()} a deal` : ""}</span></header>
               {/* One bar for the whole campaign: each stage's share of its leads, same colors as the counts below. */}
               <div className="campaign-bar" aria-hidden="true">
                 {leadStages.map((stage) => { const count = items.filter((lead) => lead.status === stage).length; return count ? <i key={stage} className={`dot--${campaignStageTone[stage]}`} style={{ flexGrow: count }} /> : null; })}
@@ -3371,7 +3392,7 @@ function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScri
                 {leadStages.map((stage) => <div key={stage}><dt><button type="button" className="stretch-link" onClick={() => onStage(name)} title={`Open ${name} on the pipeline`}><Dots tones={[campaignStageTone[stage]]} />{stage === "Meeting booked" ? "Meetings" : stage}</button></dt><dd>{items.filter((lead) => lead.status === stage).length}</dd></div>)}
               </dl>
               <div className="campaign-card__actions">
-                <button type="button" className="text-link" onClick={() => onScript(name)}>{settings[name]?.script || settings[name]?.pdf ? "Script" : "Add script"}</button>
+                <button type="button" className="text-link" onClick={() => onScript(name)}><SlidersHorizontal size={14} aria-hidden="true" /> Settings</button>
                 {items.length ? <button type="button" className="text-link" onClick={() => onView(name)}>View leads</button> : null}
                 {items.length
                   ? <button type="button" className="primary-button" disabled={!toCall} onClick={() => onStart(name)}><PhoneCall size={16} aria-hidden="true" /> Start calling ({toCall})</button>

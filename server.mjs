@@ -1077,9 +1077,12 @@ async function route(req, res, url) {
       return json(res, 201, lead);
     }
     if (url.pathname === "/api/campaigns/script" && req.method === "PUT") {
-      const { campaign, script, variables } = await getBody(req);
+      const { campaign, script, variables, value } = await getBody(req);
       const name = campaignName(campaign);
       if (!name) return json(res, 400, { error: "Choose a campaign." });
+      // What one won deal in this campaign is worth; blank clears it.
+      const amount = value === undefined ? undefined : value === null || value === "" ? null : Number(value);
+      if (amount !== undefined && amount !== null && (!Number.isFinite(amount) || amount < 0)) return json(res, 400, { error: "Deal value must be a positive number." });
       const state = await readState();
       const current = state.campaignSettings[name] || {};
       // A new campaign can start with its script; its leads are imported after.
@@ -1089,7 +1092,9 @@ async function route(req, res, url) {
         ? Object.fromEntries(Object.entries(variables).slice(0, 60).map(([key, value]) => [cleanText(key, 60), cleanText(value, 120)]).filter(([key, value]) => key && value))
         : current.variables || {};
       state.campaignSettings[name] = { ...current, script: text, variables: map };
-      activity(state, typeof script !== "string" ? "Script variables saved" : text ? "Script saved" : "Script removed", name);
+      if (amount === null) delete state.campaignSettings[name].value;
+      else if (amount !== undefined) state.campaignSettings[name].value = amount;
+      activity(state, typeof script !== "string" ? "Script variables saved" : "Campaign settings saved", name);
       await writeState(state);
       return json(res, 200, state.campaignSettings[name]);
     }

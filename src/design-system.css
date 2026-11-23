@@ -1072,3 +1072,11 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 .variable-map .se-var { justify-self: start; }
 .variable-map select { min-height: 36px; padding: 0 var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-size: var(--font-size-meta); }
 .campaigns-head__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+/* Campaign settings dialog: deal value and leads sit in one row above the script. */
+.campaign-settings__row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: end; gap: var(--space-3) var(--space-5); }
+.campaign-settings__leads { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-control); }
+.campaign-settings__leads span { display: grid; color: var(--color-text-muted); font-size: var(--font-size-meta); font-weight: 600; }
+.campaign-settings__leads b { color: var(--color-text); font-size: var(--font-size-body); font-weight: 500; }
+.campaign-settings__label { color: var(--color-text); font-size: var(--font-size-body); font-weight: 500; }
+.campaign-card__actions .text-link svg { vertical-align: -2px; }
