@@ -1073,10 +1073,34 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 .variable-map select { min-height: 36px; padding: 0 var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-size: var(--font-size-meta); }
 .campaigns-head__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 
-/* Campaign settings dialog: deal value and leads sit in one row above the script. */
-.campaign-settings__row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: end; gap: var(--space-3) var(--space-5); }
+/* Campaign settings dialog: a sidebar of parts, one shown at a time. */
 .campaign-settings__leads { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-control); }
 .campaign-settings__leads span { display: grid; color: var(--color-text-muted); font-size: var(--font-size-meta); font-weight: 600; }
 .campaign-settings__leads b { color: var(--color-text); font-size: var(--font-size-body); font-weight: 500; }
-.campaign-settings__label { color: var(--color-text); font-size: var(--font-size-body); font-weight: 500; }
 .campaign-card__actions .text-link svg { vertical-align: -2px; }
+.campaign-settings__body { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: var(--space-5); height: min(600px, calc(100vh - 230px)); }
+.campaign-settings__nav { display: grid; align-content: start; gap: var(--space-1); padding-right: var(--space-4); border-right: 1px solid var(--color-border); }
+.campaign-settings__nav button { display: flex; align-items: center; justify-content: space-between; min-height: 36px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-control); background: transparent; color: var(--color-text-muted); font: inherit; font-size: var(--font-size-body); text-align: left; cursor: pointer; }
+.campaign-settings__nav button:hover { color: var(--color-text); background: var(--color-surface-raised); }
+.campaign-settings__nav button.is-active { color: var(--color-text); background: var(--color-surface-raised); font-weight: 600; }
+.campaign-settings__nav small { color: var(--color-text-muted); font-size: var(--font-size-label); font-weight: 400; }
+.campaign-settings__panel { min-width: 0; overflow-y: auto; padding-right: var(--space-1); }
+.campaign-settings__section { display: grid; align-content: start; gap: var(--space-4); }
+.campaign-settings__section[hidden] { display: none; }
+.campaign-settings__hint { margin: 0; color: var(--color-text-muted); font-size: var(--font-size-meta); }
+.variable-card { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-control); }
+.lead-form .variable-card__toggle { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); color: var(--color-text); font-weight: 500; }
+.variable-card__toggle input { width: auto; min-height: 0; }
+.variable-card__toggle small { margin-left: auto; }
+.variable-card__rule { display: grid; gap: var(--space-3); }
+.variable-card__rule textarea { min-height: 0; resize: vertical; }
+.variable-card__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.variable-card__preview { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.variable-card__preview li { display: grid; gap: 2px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-control); background: var(--color-surface-raised); }
+.variable-card__preview small { color: var(--color-text-muted); font-size: var(--font-size-label); }
+.variable-card__preview b { color: var(--color-text); font-weight: 500; }
+.variable-card__note { color: var(--color-text-muted); font-size: var(--font-size-label); }
+@media (max-width: 640px) {
+  .campaign-settings__body { grid-template-columns: 1fr; height: auto; }
+  .campaign-settings__nav { display: flex; padding: 0 0 var(--space-2); border-right: 0; border-bottom: 1px solid var(--color-border); overflow-x: auto; }
+}

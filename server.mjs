@@ -371,6 +371,62 @@ async function emailOrLink(url, send) {
     return { emailed: false, link: url, emailError: error.message };
   }
 }
+// ---- AI cleanup of script variables ----
+// Each company saves its own key in Settings (encrypted like the Twilio token); a key in .env is the fallback.
+const aiProviders = {
+  groq: { name: "Groq", url: "https://api.groq.com/openai/v1/chat/completions", model: "openai/gpt-oss-20b" },
+  openrouter: { name: "OpenRouter", url: "https://openrouter.ai/api/v1/chat/completions", model: "google/gemma-4-26b-a4b-it:free" },
+};
+function aiConfig(state) {
+  if (state.ai?.key) {
+    const provider = aiProviders[state.ai.provider] ? state.ai.provider : "groq";
+    return { provider, model: state.ai.model || aiProviders[provider].model, key: unseal(state.ai.key) };
+  }
+  if (process.env.GROQ_API_KEY) return { provider: "groq", model: aiProviders.groq.model, key: process.env.GROQ_API_KEY };
+  if (process.env.OPENROUTER_API_KEY) return { provider: "openrouter", model: aiProviders.openrouter.model, key: process.env.OPENROUTER_API_KEY };
+  return null;
+}
+async function aiChat(config, system, user) {
+  const response = await fetch(aiProviders[config.provider].url, {
+    method: "POST",
+    headers: { authorization: `Bearer ${config.key}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: config.model,
+      temperature: 0.2,
+      messages: [{ role: "system", content: system }, { role: "user", content: user }],
+      // gpt-oss models think before answering; keep that short so replies stay fast.
+      ...(config.model.startsWith("openai/gpt-oss") && config.provider === "groq" ? { reasoning_effort: "low" } : {}),
+    }),
+    signal: AbortSignal.timeout(25000),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`${aiProviders[config.provider].name}: ${body.error?.message || `error ${response.status}`}`);
+  return String(body.choices?.[0]?.message?.content || "");
+}
+function forgetSpoken(state, campaign, variable) {
+  let count = 0;
+  for (const lead of state.leads) {
+    if (lead.campaigns?.includes(campaign) && lead.spoken?.[variable]) {
+      delete lead.spoken[variable];
+      count++;
+    }
+  }
+  return count;
+}
+// Rewrites each { variable, text } the way the campaign's example and notes say. Returns texts in the same order.
+async function aiClean(config, rules, items) {
+  const system = "You prepare lead data for a sales caller to read aloud in a phone script. Rewrite each item so it sounds natural when spoken, following that variable's example and notes exactly. Keep the facts, never invent anything, and drop asides that would distract the caller. Reply with only JSON: {\"results\": [\"…\", …]} with one string per item, in order.";
+  const user = JSON.stringify({
+    rules: Object.fromEntries(Object.entries(rules).map(([name, rule]) => [name, { example: rule.from && rule.to ? { raw: rule.from, say: rule.to } : undefined, notes: rule.notes || undefined }])),
+    items: items.map((item) => ({ variable: item.variable, raw: item.text })),
+  });
+  const reply = await aiChat(config, system, user);
+  const match = reply.match(/\{[\s\S]*\}/);
+  const results = match ? JSON.parse(match[0]).results : null;
+  if (!Array.isArray(results) || results.length !== items.length) throw new Error("The AI's answer couldn't be read. Try again.");
+  return results.map((text) => cleanText(String(text ?? ""), 500));
+}
+
 function currentUser() {
   return requestContext.getStore()?.user || null;
 }
@@ -409,7 +465,9 @@ function scopedBlob(id) {
 function safeState(state) {
   const { authToken, tokenCiphertext, iv, tag, apiKeySecret, ...connection } =
     state.connection || {};
-  return { ...state, connection: state.connection ? connection : null };
+  // The AI key never leaves the server; the app only learns whether AI is ready and the key's last characters.
+  const { key, ...ai } = state.ai || {};
+  return { ...state, connection: state.connection ? connection : null, ai: { ...ai, ready: Boolean(key || process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY) } };
 }
 function activity(state, action, detail) {
   state.activity.unshift({
@@ -788,7 +846,8 @@ createServer(async (req, res) => {
       store.ws = store.user?.workspace || null;
     }
     // Every request that changes something waits its turn, so two users can't overwrite each other.
-    const changes = url.pathname.startsWith("/api/") && req.method !== "GET" && !url.pathname.startsWith("/api/twilio/voice/");
+    // AI requests wait seconds on the provider, so they save through updateState instead of holding everyone's turn.
+    const changes = url.pathname.startsWith("/api/") && req.method !== "GET" && !url.pathname.startsWith("/api/twilio/voice/") && !url.pathname.startsWith("/api/ai/");
     await requestContext.run(store, () => (changes ? exclusive(() => route(req, res, url)) : route(req, res, url)));
   } catch (error) {
     json(res, 400, {
@@ -924,6 +983,7 @@ async function route(req, res, url) {
       ["PATCH", /^\/api\/settings$/], ["POST", /^\/api\/leads\/(import|delete|assign)$/], ["DELETE", /^\/api\/leads\/[^/]+$/], ["DELETE", /^\/api\/dnc\/[^/]+$/], ["POST", /^\/api\/dnc$/],
       ["PUT", /^\/api\/campaigns\/script$/], ["POST", /^\/api\/campaigns\/script-pdf$/], ["DELETE", /^\/api\/campaigns\/script-pdf$/],
       ["POST", /^\/api\/team$/], ["PATCH", /^\/api\/team\/[^/]+$/], ["DELETE", /^\/api\/team\/[^/]+$/], ["PATCH", /^\/api\/workspace$/],
+      ["PUT", /^\/api\/ai\/settings$/], ["DELETE", /^\/api\/ai\/settings$/], ["POST", /^\/api\/ai\/(preview|forget)$/],
     ];
     if (!isOwner() && ownerOnly.some(([method, path]) => method === req.method && path.test(url.pathname)))
       return json(res, 403, { error: "Only your company's owner can do that." });
@@ -1077,7 +1137,7 @@ async function route(req, res, url) {
       return json(res, 201, lead);
     }
     if (url.pathname === "/api/campaigns/script" && req.method === "PUT") {
-      const { campaign, script, variables, value } = await getBody(req);
+      const { campaign, script, variables, value, clean } = await getBody(req);
       const name = campaignName(campaign);
       if (!name) return json(res, 400, { error: "Choose a campaign." });
       // What one won deal in this campaign is worth; blank clears it.
@@ -1094,6 +1154,14 @@ async function route(req, res, url) {
       state.campaignSettings[name] = { ...current, script: text, variables: map };
       if (amount === null) delete state.campaignSettings[name].value;
       else if (amount !== undefined) state.campaignSettings[name].value = amount;
+      // AI cleanup per variable: an example (raw → how you'd say it) and notes. Turning one off drops its saved versions.
+      if (clean && typeof clean === "object" && !Array.isArray(clean)) {
+        const rules = Object.fromEntries(Object.entries(clean).slice(0, 60)
+          .map(([key, rule]) => [cleanText(key, 60), { from: cleanText(rule?.from, 1000), to: cleanText(rule?.to, 500), notes: cleanText(rule?.notes, 500) }])
+          .filter(([key, rule]) => key && (rule.to || rule.notes)));
+        for (const variable of Object.keys(current.clean || {})) if (!rules[variable]) forgetSpoken(state, name, variable);
+        state.campaignSettings[name].clean = rules;
+      }
       activity(state, typeof script !== "string" ? "Script variables saved" : "Campaign settings saved", name);
       await writeState(state);
       return json(res, 200, state.campaignSettings[name]);
@@ -1464,6 +1532,84 @@ async function route(req, res, url) {
         }
       }
       return json(res, 200, { alerts });
+    }
+    if (url.pathname === "/api/ai/settings" && req.method === "PUT") {
+      const body = await getBody(req);
+      const provider = aiProviders[body.provider] ? body.provider : "";
+      if (!provider) return json(res, 400, { error: "Choose Groq or OpenRouter." });
+      const model = cleanText(body.model, 120) || aiProviders[provider].model;
+      const typed = cleanText(body.key, 400);
+      const saved = await readState();
+      if (!typed && !saved.ai?.key) return json(res, 400, { error: "Paste your API key." });
+      const key = typed || unseal(saved.ai.key);
+      // One tiny request, so a wrong key or model name shows up now instead of mid-call.
+      try {
+        await aiChat({ provider, model, key }, "Reply with the single word OK.", "Say OK.");
+      } catch (error) {
+        return json(res, 400, { error: `That didn't work. ${error.message}` });
+      }
+      await updateState((state) => {
+        state.ai = { provider, model, key: typed ? seal(typed) : state.ai.key, hint: typed ? `${typed.slice(0, 4)}…${typed.slice(-4)}` : state.ai.hint };
+        activity(state, "AI key saved", `${aiProviders[provider].name} · ${model}`);
+      });
+      return json(res, 200, { ok: true });
+    }
+    if (url.pathname === "/api/ai/settings" && req.method === "DELETE") {
+      await updateState((state) => {
+        delete state.ai;
+        activity(state, "AI key removed", "");
+      });
+      return json(res, 200, { ok: true });
+    }
+    // Try a variable's example and notes on a few real values without saving anything.
+    if (url.pathname === "/api/ai/preview" && req.method === "POST") {
+      const body = await getBody(req);
+      const config = aiConfig(await readState());
+      if (!config) return json(res, 400, { error: "Add an AI key in Settings, AI first." });
+      const variable = cleanText(body.variable, 60);
+      const rule = { from: cleanText(body.rule?.from, 1000), to: cleanText(body.rule?.to, 500), notes: cleanText(body.rule?.notes, 500) };
+      const texts = (Array.isArray(body.texts) ? body.texts : []).map((text) => cleanText(text, 1000)).filter(Boolean).slice(0, 5);
+      if (!variable || !texts.length) return json(res, 400, { error: "No lead has a value for this variable yet." });
+      try {
+        return json(res, 200, { results: await aiClean(config, { [variable]: rule }, texts.map((text) => ({ variable, text }))) });
+      } catch (error) {
+        return json(res, 502, { error: error.message });
+      }
+    }
+    // Clean the variables of the lead on screen and the next few. Values already cleaned stay unless force is set.
+    if (url.pathname === "/api/ai/clean" && req.method === "POST") {
+      const body = await getBody(req);
+      const state = await readState();
+      const config = aiConfig(state);
+      if (!config) return json(res, 400, { error: "Add an AI key in Settings, AI first." });
+      const items = (Array.isArray(body.items) ? body.items : []).slice(0, 25).map((item) => ({ leadId: String(item?.leadId || ""), campaign: campaignName(item?.campaign), variable: cleanText(item?.variable, 60), text: cleanText(item?.text, 1000) })).filter((item) => {
+        const lead = findLead(state, item.leadId);
+        return lead && item.text && lead.campaigns?.includes(item.campaign) && state.campaignSettings[item.campaign]?.clean?.[item.variable]
+          && (body.force || lead.spoken?.[item.variable]?.from !== item.text);
+      });
+      if (!items.length) return json(res, 200, { cleaned: 0 });
+      const rules = Object.fromEntries(items.map((item) => [item.variable, state.campaignSettings[item.campaign].clean[item.variable]]));
+      let results;
+      try {
+        results = await aiClean(config, rules, items);
+      } catch (error) {
+        return json(res, 502, { error: error.message });
+      }
+      await updateState((fresh) => {
+        items.forEach((item, index) => {
+          const lead = findLead(fresh, item.leadId);
+          if (lead && results[index]) lead.spoken = { ...(lead.spoken || {}), [item.variable]: { from: item.text, text: results[index] } };
+        });
+      });
+      return json(res, 200, { cleaned: items.length });
+    }
+    // Regenerate for every lead: drop the saved versions, so each is cleaned again when it comes up.
+    if (url.pathname === "/api/ai/forget" && req.method === "POST") {
+      const body = await getBody(req);
+      const campaign = campaignName(body.campaign);
+      const variable = cleanText(body.variable, 60);
+      const count = await updateState((state) => forgetSpoken(state, campaign, variable));
+      return json(res, 200, { forgotten: count });
     }
     if (url.pathname === "/api/settings" && req.method === "PATCH") {
       const { bookingUrl } = await getBody(req);

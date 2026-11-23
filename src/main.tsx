@@ -74,6 +74,8 @@ type Lead = {
   followUpSince?: string;
   followUpReason?: string;
   assignedTo?: string;
+  // AI-cleaned script values: kept while the raw value (from) is unchanged.
+  spoken?: Record<string, { from: string; text: string }>;
 };
 type Connection = {
   accountSid: string;
@@ -92,7 +94,8 @@ type CallRecord = {
 };
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
-type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number };
+type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule> };
+type CleanRule = { from: string; to: string; notes: string };
 // A won lead is worth its own value if set, else its campaign's deal value.
 function dealValue(lead: Lead, settings: Record<string, CampaignSettings>) {
   return lead.value || Math.max(0, ...(lead.campaigns || []).map((name) => settings[name]?.value || 0));
@@ -107,6 +110,7 @@ type State = {
   dncNumbers: string[];
   callbackReachable?: boolean;
   settings?: { bookingUrl?: string };
+  ai?: { provider?: string; model?: string; hint?: string; ready: boolean };
   me: Member;
   workspace: { id: string; name: string };
   team: Member[];
@@ -127,6 +131,7 @@ type SettingsPage =
   | "profile"
   | "privacy"
   | "booking"
+  | "ai"
   | "companies";
 
 class ApiError extends Error {
@@ -1153,6 +1158,8 @@ function App() {
             onEdit={setEditLead}
             onStatus={setStatus}
             onSettings={() => setScreen("settings")}
+            onRefresh={refresh}
+            onNotice={setNotice}
             onAddLead={() => setShowLeadForm(true)}
             onGuide={() => setGuideOpen(true)}
             onAddTask={(lead) => setTaskDialog({ leadId: lead.id })}
@@ -1268,6 +1275,7 @@ function App() {
             onSignOut={signOut}
             connection={state.connection}
             bookingUrl={state.settings?.bookingUrl || ""}
+            ai={state.ai}
             onRefresh={refresh}
             onNotice={setNotice}
           />
@@ -1278,7 +1286,8 @@ function App() {
           campaign={scriptFor}
           settings={state.campaignSettings?.[scriptFor] || {}}
           columns={[...new Set(state.leads.filter((lead) => !scriptFor || lead.campaigns?.includes(scriptFor)).flatMap((lead) => Object.keys(lead.details || {})))].sort()}
-          leadCount={state.leads.filter((lead) => lead.campaigns?.includes(scriptFor)).length}
+          leads={state.leads.filter((lead) => lead.campaigns?.includes(scriptFor))}
+          aiReady={Boolean(state.ai?.ready)}
           onImport={() => { setCampaign(scriptFor); setScriptFor(null); setImportOpen("campaign"); }}
           onViewPdf={() => setPdfFor(scriptFor)}
           onClose={() => setScriptFor(null)}
@@ -2005,7 +2014,11 @@ function Queue({
   onEditScript,
   calling,
   picker,
+  onRefresh,
+  onNotice,
 }: {
+  onRefresh: () => Promise<unknown>;
+  onNotice: (message: string) => void;
   onOpenPdf: (campaign: string) => void;
   onEditScript: (campaign: string) => void;
   calling: boolean;
@@ -2027,8 +2040,33 @@ function Queue({
   const upcoming = callQueue(state.leads, state.calls);
   const groups = groupDetails(selected.details);
   // The script of the lead's first campaign that has one.
-  const scriptCampaign = selected.campaigns?.find((name) => state.campaignSettings?.[name]?.script || state.campaignSettings?.[name]?.pdf);
+  const scriptCampaign = scriptCampaignOf(selected, state.campaignSettings || {});
   const script = scriptCampaign ? state.campaignSettings![scriptCampaign] : undefined;
+  // While calling, clean the script values of this lead and the next 4 in the background (5 at a time, saved once).
+  const nextFive = [selected, ...upcoming.filter((lead) => lead.id !== selected.id).slice(0, 4)];
+  const pending = state.ai?.ready ? cleanupItems(nextFive, state.campaignSettings || {}) : [];
+  const pendingKey = pending.map((item) => `${item.leadId}:${item.variable}:${item.text}`).join("|");
+  const asked = useRef(new Set<string>());
+  const [cleaning, setCleaning] = useState(false);
+  const clean = async (items: typeof pending, force: boolean) => {
+    setCleaning(true);
+    try {
+      await api("/api/ai/clean", { method: "POST", body: JSON.stringify({ items, force }) });
+      await onRefresh();
+    } catch (error) {
+      if (force) onNotice(error instanceof Error ? error.message : "Couldn't clean the script values.");
+    } finally {
+      setCleaning(false);
+    }
+  };
+  useEffect(() => {
+    // Each value is asked for once per visit; a failure doesn't retry in a loop.
+    const fresh = pending.filter((item) => !asked.current.has(`${item.leadId}:${item.variable}:${item.text}`));
+    if (!fresh.length) return;
+    fresh.forEach((item) => asked.current.add(`${item.leadId}:${item.variable}:${item.text}`));
+    void clean(fresh, false);
+  }, [pendingKey]);
+  const cleanable = Boolean(state.ai?.ready && script?.clean && Object.keys(script.clean).length);
   return (
     <div className="queue-page">
       <DashboardBanner
@@ -2173,6 +2211,7 @@ function Queue({
                 <div className="call-script-full__tools">
                   {script.pdf && <button type="button" className="quiet-button" onClick={() => onOpenPdf(scriptCampaign)}><FileText size={16} aria-hidden="true" /> Open {script.pdf.name}</button>}
                   <button type="button" className="quiet-button" onClick={() => onEditScript(scriptCampaign)}>Edit script</button>
+                  {cleanable && <button type="button" className="quiet-button" disabled={cleaning} onClick={() => void clean(cleanupItems([selected], state.campaignSettings || {}, true), true)}><Sparkles size={16} aria-hidden="true" /> {cleaning ? "Cleaning…" : "Regenerate"}</button>}
                 </div>
                 {script.script && <ScriptView text={script.script} lead={selected} variables={script.variables} />}
                 {script.pdf && !script.script && <PdfPages campaign={scriptCampaign} />}
@@ -2692,10 +2731,31 @@ function variableValue(source: string, lead: Lead) {
   if (source.startsWith("detail:")) return lead.details?.[source.slice(7)]?.trim() || "";
   return "";
 }
-function fillVariable(name: string, lead: Lead | undefined, variables: Record<string, string> | undefined) {
+function rawVariable(name: string, lead: Lead | undefined, variables: Record<string, string> | undefined) {
   if (!lead) return "";
   const source = variables?.[name] || guessVariable(name, Object.keys(lead.details || {}));
   return source ? variableValue(source, lead) : "";
+}
+// The AI-cleaned version when there is one for this exact value, else the value as imported.
+function fillVariable(name: string, lead: Lead | undefined, variables: Record<string, string> | undefined) {
+  const raw = rawVariable(name, lead, variables);
+  const spoken = lead?.spoken?.[name];
+  return spoken && spoken.from === raw ? spoken.text : raw;
+}
+// The campaign whose script a lead's call screen shows: its first campaign with a script.
+function scriptCampaignOf(lead: Lead, settings: Record<string, CampaignSettings>) {
+  return lead.campaigns?.find((name) => settings[name]?.script || settings[name]?.pdf);
+}
+// What still needs AI cleanup for these leads: variables with an example or notes whose value has no cleaned version yet.
+function cleanupItems(leads: Lead[], settings: Record<string, CampaignSettings>, force = false) {
+  return leads.flatMap((lead) => {
+    const campaign = scriptCampaignOf(lead, settings);
+    const config = campaign ? settings[campaign] : undefined;
+    return Object.keys(config?.clean || {}).flatMap((variable) => {
+      const text = rawVariable(variable, lead, config!.variables);
+      return text && (force || lead.spoken?.[variable]?.from !== text) ? [{ leadId: lead.id, campaign: campaign!, variable, text }] : [];
+    });
+  });
 }
 
 function ScriptInline({ text, lead, variables }: { text: string; lead?: Lead; variables?: Record<string, string> }) {
@@ -3080,8 +3140,10 @@ function VariableMap({ names, value, columns, onChange, auto }: { names: string[
 }
 
 // Add or edit a campaign's script: write it in the live editor and/or upload a PDF.
-// One campaign's settings: deal value, leads, script and its variables, script PDF.
-function ScriptDialog({ campaign, settings, columns, leadCount, onImport, onViewPdf, onClose, onChanged }: { campaign: string; settings: CampaignSettings; columns: string[]; leadCount: number; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
+// One campaign's settings, one part at a time from a sidebar: General (name, deal value, leads), Script (text, PDF),
+// Variables (what fills each {{variable}}, and how AI should clean it). Every part stays mounted, so switching keeps edits.
+type CampaignTab = "general" | "script" | "variables";
+function ScriptDialog({ campaign, settings, columns, leads, aiReady, onImport, onViewPdf, onClose, onChanged }: { campaign: string; settings: CampaignSettings; columns: string[]; leads: Lead[]; aiReady: boolean; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   // An empty campaign name means a new campaign: name it, write the script, then import its leads.
   const isNew = !campaign;
@@ -3089,6 +3151,8 @@ function ScriptDialog({ campaign, settings, columns, leadCount, onImport, onView
   const [value, setValue] = useState(settings.value ? String(settings.value) : "");
   const [text, setText] = useState(settings.script || "");
   const [variables, setVariables] = useState<Record<string, string>>(settings.variables || {});
+  const [clean, setClean] = useState<Record<string, CleanRule>>(settings.clean || {});
+  const [tab, setTab] = useState<CampaignTab>(isNew ? "general" : "script");
   const names = scriptVariables(text);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -3115,7 +3179,8 @@ function ScriptDialog({ campaign, settings, columns, leadCount, onImport, onView
     if (!name.trim()) return setError("Name the campaign first.");
     // Only keep choices for variables still in the script.
     const kept = Object.fromEntries(Object.entries(variables).filter(([key, source]) => source && scriptVariables(script).includes(key)));
-    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name.trim(), script, variables: kept, value: value.replace(/[$,\s]/g, "") }) }), isNew ? `${name.trim()} created.` : `${name.trim()} saved.`, true);
+    const rules = Object.fromEntries(Object.entries(clean).filter(([key, rule]) => scriptVariables(script).includes(key) && (rule.to.trim() || rule.notes.trim())));
+    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name.trim(), script, variables: kept, clean: rules, value: value.replace(/[$,\s]/g, "") }) }), isNew ? `${name.trim()} created.` : `${name.trim()} saved.`, true);
   };
   const upload = (file: File | undefined) => {
     if (!file) return;
@@ -3128,45 +3193,72 @@ function ScriptDialog({ campaign, settings, columns, leadCount, onImport, onView
   };
   return (
     <div className="modal-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <form className="lead-form script-dialog" onSubmit={save} role="dialog" aria-modal="true" aria-labelledby="script-dialog-title">
+      <form className="lead-form script-dialog campaign-settings" onSubmit={save} role="dialog" aria-modal="true" aria-labelledby="script-dialog-title">
         <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
         <h2 id="script-dialog-title">{isNew ? "New campaign" : campaign}</h2>
-        <p>{isNew ? "Name it and write the script. Put {{variables}} where each lead's details go; you'll match them to your CSV's columns when you import the leads." : "Campaign settings. The script shows on the call screen for every lead in this campaign."}</p>
         {error && <p className="form-error" role="alert">{error}</p>}
-        <div className="campaign-settings__row">
-          {isNew && <label>Campaign name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="NC school districts" required autoFocus /></label>}
-          <label><span>Deal value<small>for each won lead</small></span><input value={value} onChange={(event) => setValue(event.target.value)} inputMode="decimal" placeholder="$0" /></label>
-          {!isNew && (
-            <div className="campaign-settings__leads">
-              <span>Leads<b>{leadCount}</b></span>
-              <button type="button" className="quiet-button" onClick={onImport}><FileUp size={16} aria-hidden="true" /> Import leads</button>
-            </div>
-          )}
-        </div>
-        <b className="campaign-settings__label">Script</b>
-        <ScriptEditor initial={settings.script || ""} editorRef={editorRef} onTextChange={setText} />
-        {names.length > 0 && (
-          <section className="script-dialog__variables" aria-label="Variables in this script">
-            <b>Variables in this script</b>
-            <small>Pick what fills each one on a call. You can also pick them when you import the CSV.</small>
-            <VariableMap names={names} value={variables} columns={columns} onChange={setVariables} auto={(variable) => guessVariable(variable, columns)} />
-          </section>
-        )}
-        <div className="script-dialog__pdf">
-          <FileText size={18} aria-hidden="true" />
-          {settings.pdf ? (
-            <>
-              <span><b>{settings.pdf.name}</b><small>{Math.max(1, Math.round(settings.pdf.size / 1024))} KB</small></span>
-              <button type="button" className="quiet-button" onClick={onViewPdf}>View</button>
-              <label className="quiet-button script-dialog__file">Replace<input type="file" accept="application/pdf,.pdf" onChange={(event) => upload(event.target.files?.[0])} /></label>
-              <button type="button" className="quiet-button" disabled={busy} onClick={() => void run(() => api(`/api/campaigns/script-pdf?campaign=${encodeURIComponent(campaign)}`, { method: "DELETE" }), `PDF removed from ${campaign}.`, false)}>Remove</button>
-            </>
-          ) : (
-            <>
-              <span><b>Script PDF</b><small>Optional. Opens in a viewer from the call screen</small></span>
-              <label className="quiet-button script-dialog__file">Upload PDF<input type="file" accept="application/pdf,.pdf" onChange={(event) => upload(event.target.files?.[0])} /></label>
-            </>
-          )}
+        <div className="campaign-settings__body">
+          <nav className="campaign-settings__nav" aria-label="Campaign settings">
+            {([["general", "General"], ["script", "Script"], ["variables", "Variables"]] as [CampaignTab, string][]).map(([id, label]) => (
+              <button key={id} type="button" className={tab === id ? "is-active" : ""} aria-current={tab === id ? "page" : undefined} onClick={() => setTab(id)}>
+                {label}{id === "variables" && names.length > 0 && <small>{names.length}</small>}
+              </button>
+            ))}
+          </nav>
+          <div className="campaign-settings__panel">
+            <section hidden={tab !== "general"} className="campaign-settings__section">
+              {isNew && <label>Campaign name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="NC school districts" required autoFocus /></label>}
+              <label><span>Deal value<small>for each won lead</small></span><input value={value} onChange={(event) => setValue(event.target.value)} inputMode="decimal" placeholder="$0" /></label>
+              {!isNew && (
+                <div className="campaign-settings__leads">
+                  <span>Leads<b>{leads.length}</b></span>
+                  <button type="button" className="quiet-button" onClick={onImport}><FileUp size={16} aria-hidden="true" /> Import leads</button>
+                </div>
+              )}
+              {isNew && <p className="campaign-settings__hint">Next, write the script. Put {"{{variables}}"} where each lead's details go; you'll match them to your CSV's columns when you import the leads.</p>}
+            </section>
+            <section hidden={tab !== "script"} className="campaign-settings__section">
+              <p className="campaign-settings__hint">Shows on the call screen for every lead in this campaign.</p>
+              <ScriptEditor initial={settings.script || ""} editorRef={editorRef} onTextChange={setText} />
+              <div className="script-dialog__pdf">
+                <FileText size={18} aria-hidden="true" />
+                {settings.pdf ? (
+                  <>
+                    <span><b>{settings.pdf.name}</b><small>{Math.max(1, Math.round(settings.pdf.size / 1024))} KB</small></span>
+                    <button type="button" className="quiet-button" onClick={onViewPdf}>View</button>
+                    <label className="quiet-button script-dialog__file">Replace<input type="file" accept="application/pdf,.pdf" onChange={(event) => upload(event.target.files?.[0])} /></label>
+                    <button type="button" className="quiet-button" disabled={busy} onClick={() => void run(() => api(`/api/campaigns/script-pdf?campaign=${encodeURIComponent(campaign)}`, { method: "DELETE" }), `PDF removed from ${campaign}.`, false)}>Remove</button>
+                  </>
+                ) : (
+                  <>
+                    <span><b>Script PDF</b><small>Optional. Opens in a viewer from the call screen</small></span>
+                    <label className="quiet-button script-dialog__file">Upload PDF<input type="file" accept="application/pdf,.pdf" onChange={(event) => upload(event.target.files?.[0])} /></label>
+                  </>
+                )}
+              </div>
+            </section>
+            <section hidden={tab !== "variables"} className="campaign-settings__section">
+              {names.length ? (
+                <>
+                  <p className="campaign-settings__hint">Pick what fills each variable on a call. Give an example of how you'd say it and AI cleans each lead's value while you call.{!aiReady && " Add an AI key in Settings, AI to turn that on."}</p>
+                  {names.map((variable) => (
+                    <VariableCard
+                      key={variable}
+                      variable={variable}
+                      campaign={campaign}
+                      source={variables[variable] || ""}
+                      columns={columns}
+                      leads={leads}
+                      rule={clean[variable]}
+                      aiReady={aiReady}
+                      onSource={(source) => setVariables((current) => ({ ...current, [variable]: source }))}
+                      onRule={(rule) => setClean((current) => { const next = { ...current }; if (rule) next[variable] = rule; else delete next[variable]; return next; })}
+                    />
+                  ))}
+                </>
+              ) : <p className="campaign-settings__hint">No variables yet. Add one in the script with the Variable button, like {"{{first_name}}"}.</p>}
+            </section>
+          </div>
         </div>
         <div className="task-dialog__actions">
           <button type="button" className="quiet-button" onClick={onClose}>Cancel</button>
@@ -3174,6 +3266,50 @@ function ScriptDialog({ campaign, settings, columns, leadCount, onImport, onView
         </div>
       </form>
     </div>
+  );
+}
+
+// One variable: where its value comes from, and (optionally) how AI should clean it, with a try-out on real leads.
+function VariableCard({ variable, campaign, source, columns, leads, rule, aiReady, onSource, onRule }: { variable: string; campaign: string; source: string; columns: string[]; leads: Lead[]; rule?: CleanRule; aiReady: boolean; onSource: (source: string) => void; onRule: (rule: CleanRule | null) => void }) {
+  const mapping = source ? { [variable]: source } : {};
+  const raws = [...new Set(leads.map((lead) => rawVariable(variable, lead, mapping)).filter(Boolean))];
+  const cleaned = leads.filter((lead) => { const raw = rawVariable(variable, lead, mapping); return raw && lead.spoken?.[variable]?.from === raw; }).length;
+  const [preview, setPreview] = useState<{ busy: boolean; results?: [string, string][]; error?: string }>({ busy: false });
+  const [forgot, setForgot] = useState(false);
+  const runPreview = async () => {
+    if (!rule) return;
+    const texts = raws.slice(0, 3);
+    setPreview({ busy: true });
+    try {
+      const result = await api<{ results: string[] }>("/api/ai/preview", { method: "POST", body: JSON.stringify({ variable, rule, texts }) });
+      setPreview({ busy: false, results: texts.map((text, index) => [text, result.results[index]]) });
+    } catch (cause) {
+      setPreview({ busy: false, error: cause instanceof Error ? cause.message : "The try-out failed." });
+    }
+  };
+  return (
+    <article className="variable-card">
+      <VariableMap names={[variable]} value={mapping} columns={columns} onChange={(next) => onSource(next[variable] || "")} auto={(name) => guessVariable(name, columns)} />
+      <label className="variable-card__toggle">
+        <input type="checkbox" checked={Boolean(rule)} disabled={!aiReady && !rule} onChange={(event) => onRule(event.target.checked ? { from: raws[0] || "", to: "", notes: "" } : null)} />
+        Clean with AI
+        {rule && leads.length > 0 && <small>{cleaned} of {leads.length} leads cleaned so far</small>}
+      </label>
+      {rule && (
+        <div className="variable-card__rule">
+          <label>Example from a lead<textarea rows={2} value={rule.from} onChange={(event) => onRule({ ...rule, from: event.target.value })} placeholder="14 of 36 graded schools received D/F grades in 2024-25" /></label>
+          <label>How you'd say it<textarea rows={2} value={rule.to} onChange={(event) => onRule({ ...rule, to: event.target.value })} placeholder="14 of your schools got a D or below last year" /></label>
+          <label><span>Notes<small>optional</small></span><textarea rows={2} value={rule.notes} onChange={(event) => onRule({ ...rule, notes: event.target.value })} placeholder="Under 15 words. Say 'your schools'. Drop titles in brackets." /></label>
+          <div className="variable-card__actions">
+            <button type="button" className="quiet-button" disabled={preview.busy || !raws.length || !(rule.to.trim() || rule.notes.trim())} onClick={() => void runPreview()}><Sparkles size={16} aria-hidden="true" /> {preview.busy ? "Trying…" : "Try on 3 leads"}</button>
+            {!!campaign && leads.some((lead) => lead.spoken?.[variable]) && <button type="button" className="text-link" disabled={forgot} onClick={() => void api("/api/ai/forget", { method: "POST", body: JSON.stringify({ campaign, variable }) }).then(() => setForgot(true))}>{forgot ? "Will regenerate as you call" : "Regenerate for all leads"}</button>}
+          </div>
+          {preview.error && <p className="form-error" role="alert">{preview.error}</p>}
+          {preview.results && <ul className="variable-card__preview">{preview.results.map(([from, to], index) => <li key={index}><small>{from}</small><b>{to}</b></li>)}</ul>}
+          <small className="variable-card__note">Changes apply to leads not cleaned yet. Leads already cleaned keep theirs until you regenerate.</small>
+        </div>
+      )}
+    </article>
   );
 }
 
@@ -3784,6 +3920,7 @@ function Settings({
   onSignOut,
   connection,
   bookingUrl,
+  ai,
   onRefresh,
   onNotice,
 }: {
@@ -3795,6 +3932,7 @@ function Settings({
   onSignOut: () => void;
   connection: Connection | null;
   bookingUrl: string;
+  ai: State["ai"];
   onRefresh: () => Promise<unknown>;
   onNotice: (message: string) => void;
 }) {
@@ -3892,6 +4030,7 @@ function Settings({
       { id: "team", label: "Team", icon: Users },
       { id: "fields", label: "Custom fields", icon: SlidersHorizontal },
       { id: "booking", label: "Booking link", icon: CalendarPlus },
+      { id: "ai", label: "AI", icon: Sparkles },
       ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : []),
     ],
     account: [
@@ -4083,10 +4222,71 @@ function Settings({
       </article>
           </section>
         ) : (
-          <SettingsPanel page={page} me={me} workspace={workspace} team={team} emailReady={emailReady} companies={companies} onSignOut={onSignOut} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} onRefresh={onRefresh} />
+          <SettingsPanel page={page} me={me} workspace={workspace} team={team} emailReady={emailReady} companies={companies} onSignOut={onSignOut} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} ai={ai} onRefresh={onRefresh} />
         )}
         </div>
       </div>
+    </section>
+  );
+}
+
+// The company's own AI key, used to clean script variables. Saving checks the key with one tiny request.
+const aiModels: Record<string, string> = { groq: "openai/gpt-oss-20b", openrouter: "google/gemma-4-26b-a4b-it:free" };
+function AiSettings({ ai, onRefresh, onNotice }: { ai: State["ai"]; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
+  const [provider, setProvider] = useState(ai?.provider || "groq");
+  const [model, setModel] = useState(ai?.model || aiModels[ai?.provider || "groq"]);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api("/api/ai/settings", { method: "PUT", body: JSON.stringify({ provider, model, key }) });
+      setKey("");
+      await onRefresh();
+      onNotice("AI key checked and saved.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Couldn't save the key.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const remove = async () => {
+    await api("/api/ai/settings", { method: "DELETE" }).catch(() => {});
+    await onRefresh();
+    onNotice("AI key removed.");
+  };
+  return (
+    <section className="settings-panel">
+      <span className="panel-kicker">Workspace</span>
+      <h2>AI</h2>
+      <p>Cleans script variables while you call, following the example and notes you give each variable in a campaign's settings. Only that variable's text is sent, never phone numbers.</p>
+      <form className="settings-form" onSubmit={save}>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <label>
+          Provider
+          <select value={provider} onChange={(event) => { setProvider(event.target.value); setModel(aiModels[event.target.value]); }}>
+            <option value="groq">Groq (fast, free plan)</option>
+            <option value="openrouter">OpenRouter</option>
+          </select>
+        </label>
+        <label>
+          API key
+          <input type="password" value={key} onChange={(event) => setKey(event.target.value)} placeholder={ai?.hint && ai.provider === provider ? `Saved: ${ai.hint}. Paste a new one to replace it` : provider === "groq" ? "gsk_…" : "sk-or-…"} autoComplete="off" spellCheck={false} />
+          <small>{provider === "groq" ? "Create one at console.groq.com, API Keys." : "Create one at openrouter.ai, Keys."}</small>
+        </label>
+        <label>
+          Model
+          <input value={model} onChange={(event) => setModel(event.target.value)} autoComplete="off" spellCheck={false} />
+        </label>
+        <div className="settings-form-actions">
+          <button className="primary-button" type="submit" disabled={busy}>{busy ? "Checking…" : "Check and save"}</button>
+          {ai?.hint && <button type="button" className="quiet-button" onClick={() => void remove()}>Remove key</button>}
+        </div>
+        {!ai?.hint && ai?.ready && <small>Using the key from the server's .env file. A key saved here replaces it for this company.</small>}
+      </form>
     </section>
   );
 }
@@ -4180,8 +4380,10 @@ function SettingsPanel({
   connection,
   onNotice,
   bookingUrl,
+  ai,
   onRefresh,
 }: {
+  ai: State["ai"];
   page: Exclude<SettingsPage, "numbers">;
   me: Member;
   workspace: { id: string; name: string };
@@ -4227,6 +4429,7 @@ function SettingsPanel({
       </section>
     );
   }
+  if (page === "ai") return <AiSettings ai={ai} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "team") return <TeamSettings me={me} workspace={workspace} team={team} emailReady={emailReady} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "companies") return <CompaniesSettings companies={companies} emailReady={emailReady} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "fields") {

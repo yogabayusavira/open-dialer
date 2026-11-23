@@ -26,7 +26,7 @@ For interface development, run `npm run dev` instead. When `DATABASE_URL` is set
 
 1. Create an Application from this repository and use the included `Dockerfile`.
 2. Set the container port to `3000`.
-3. Add `DATABASE_URL`, `OPEN_DIALER_ENCRYPTION_KEY` and `OPEN_DIALER_PUBLIC_URL` in Dokploy. The public URL must be the HTTPS domain Twilio can reach, and sign-in links in emails use it too. For invite and password-reset emails, also add `RESEND_API_KEY` and `RESEND_FROM_EMAIL`. A hosted copy needs no tunnel.
+3. Add `DATABASE_URL`, `OPEN_DIALER_ENCRYPTION_KEY` and `OPEN_DIALER_PUBLIC_URL` in Dokploy. The public URL must be the HTTPS domain Twilio can reach, and sign-in links in emails use it too. For invite and password-reset emails, also add `RESEND_API_KEY` and `RESEND_FROM_EMAIL`. Each company adds its own AI key (Groq or OpenRouter) in Settings, AI; `GROQ_API_KEY` or `OPENROUTER_API_KEY` here is the fallback. A hosted copy needs no tunnel.
 4. Add a domain and deploy. The application creates its `open_dialer_state` table automatically on its first request.
 
 Before placing real calls, connect Twilio, save the operator phone number that should ring before each lead, and complete the relevant consent/compliance review for your territory. Open Dialer v2 issues a short-lived signed TwiML bridge URL for each call; it does not expose your Twilio Auth Token to the browser.
