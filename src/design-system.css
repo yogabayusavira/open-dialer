@@ -1129,3 +1129,10 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 .variable-card__samples { display: grid; gap: var(--space-1); }
 .variable-card__samples span { display: -webkit-box; overflow: hidden; padding: var(--space-1) var(--space-3); border-radius: var(--radius-control); background: var(--color-surface-raised); color: var(--color-text); font-size: var(--font-size-meta); -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .variable-card__samples small { color: var(--color-text-muted); font-size: var(--font-size-label); }
+/* The examples sit in the dropdown's column, right under it. */
+.variable-card .variable-map label { grid-template-columns: 200px minmax(0, 1fr); }
+.variable-card__samples { margin-top: calc(var(--space-2) * -1); margin-left: calc(200px + var(--space-3)); }
+@media (max-width: 640px) {
+  .variable-card .variable-map label { grid-template-columns: 1fr; }
+  .variable-card__samples { margin-left: 0; }
+}
