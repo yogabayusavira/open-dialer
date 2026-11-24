@@ -1053,9 +1053,6 @@ html[data-theme="light"] .dash-banner .dash-banner__main .dash-progress i { back
 @media (max-width: 640px) { .dash-banner__body { grid-template-columns: minmax(0, 1fr); } .dash-where { max-width: 260px; } }
 
 /* In-call volume for the other person, on top of the leveler. */
-.call-volume { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--color-text-muted); font-size: var(--font-size-meta); font-variant-numeric: tabular-nums; }
-.call-volume input { width: 96px; accent-color: var(--color-text-muted); }
-.call-volume span { min-width: 36px; }
 .setup-steps__optional { margin-left: var(--space-2); padding: 1px 6px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-text-muted); font-size: var(--font-size-label); font-style: normal; font-weight: 500; text-decoration: none; display: inline-block; }
 
 /* Script variables: {{name}} tags in the editor and in the mapping rows; the call screen still uses mark.script-fill / .script-slot. */
@@ -1147,9 +1144,6 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 .pin-button:hover { background: var(--color-surface-raised); color: var(--color-text); }
 .pin-button.is-pinned { color: var(--color-accent-text); }
 @media (hover: none) { .pin-button { opacity: 1; } }
-.call-leveler { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--color-text-muted); font-size: var(--font-size-meta); cursor: pointer; }
-.call-leveler input { margin: 0; accent-color: var(--color-text-muted); }
-.call-volume input:disabled { opacity: 0.4; }
 
 /* Setup tour: the page dims except the spot being explained; the card sits next to it. Clicks still reach the page. */
 .setup-tour { position: fixed; inset: 0; z-index: 200; pointer-events: none; }

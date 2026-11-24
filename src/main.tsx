@@ -58,7 +58,6 @@ import {
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
 import { checkCondition, describeCondition, isOtherwise, parseCondition } from "./conditions";
-import type { AudioProcessor } from "@twilio/voice-sdk";
 import "./styles.css";
 import "./design-system.css";
 
@@ -190,71 +189,6 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   return body;
 }
 
-// Evens out what you hear on a call. The network's ringing arrives loud and a desk phone's voice often quiet,
-// so the call audio goes through a compressor (pulls loud down, lifts quiet up) and then a volume gain.
-// Chrome's compressor adds its own make-up gain, so no extra boost: measured, the ring comes out ~4 dB quieter,
-// a normal voice ~7 dB louder and a quiet desk phone ~13 dB louder. The volume slider adds up to 3x on top.
-const levelerBoost = 1;
-const callVolume = {
-  level: (() => { try { return Number(localStorage.getItem("open-dialer-call-volume")) || 1; } catch { return 1; } })(),
-  // Off (the default) sends the call's sound straight to the speaker, untouched. Read when each call starts.
-  // shortcut: off by default because calls went silent with it on; turn the default back on once it's confirmed on a real call.
-  leveler: (() => { try { return localStorage.getItem("open-dialer-leveler") === "on"; } catch { return false; } })(),
-  gains: new Set<GainNode>(),
-};
-function setLeveler(on: boolean) {
-  callVolume.leveler = on;
-  try { localStorage.setItem("open-dialer-leveler", on ? "on" : "off"); } catch { /* private mode */ }
-  // Off means not plugged in at all, so the call plays exactly the standard Twilio way.
-  if (phoneDevice?.audio) void (on ? phoneDevice.audio.addProcessor(callLeveler, true) : phoneDevice.audio.removeProcessor(callLeveler, true)).catch(() => {});
-}
-function setCallVolume(level: number) {
-  callVolume.level = level;
-  for (const gain of callVolume.gains) gain.gain.value = levelerBoost * level;
-  try { localStorage.setItem("open-dialer-call-volume", String(level)); } catch { /* private mode */ }
-}
-const levelerGraphs = new Map<MediaStream, { context: AudioContext; gain: GainNode }>();
-const callLeveler: AudioProcessor = {
-  async createProcessedStream(stream) {
-    if (!callVolume.leveler) return stream;
-    const context = new AudioContext();
-    if (context.state === "suspended") await context.resume().catch(() => {});
-    // A browser can keep new audio paused until a click; a paused leveler would mean a silent call, so play it untouched.
-    if (context.state !== "running") {
-      console.warn("[Open Dialer] call audio leveler couldn't start; playing the call as is");
-      await context.close().catch(() => {});
-      return stream;
-    }
-    const compressor = context.createDynamicsCompressor();
-    compressor.threshold.value = -30;
-    compressor.knee.value = 12;
-    compressor.ratio.value = 6;
-    compressor.attack.value = 0.005;
-    compressor.release.value = 0.3;
-    const gain = context.createGain();
-    gain.gain.value = levelerBoost * callVolume.level;
-    // A last hard limit so the boost can never clip into a painful peak.
-    const limiter = context.createDynamicsCompressor();
-    limiter.threshold.value = -2;
-    limiter.knee.value = 0;
-    limiter.ratio.value = 20;
-    limiter.attack.value = 0.001;
-    limiter.release.value = 0.1;
-    const output = context.createMediaStreamDestination();
-    context.createMediaStreamSource(stream).connect(compressor).connect(gain).connect(limiter).connect(output);
-    callVolume.gains.add(gain);
-    levelerGraphs.set(output.stream, { context, gain });
-    return output.stream;
-  },
-  async destroyProcessedStream(stream) {
-    const graph = levelerGraphs.get(stream);
-    if (!graph) return;
-    callVolume.gains.delete(graph.gain);
-    levelerGraphs.delete(stream);
-    await graph.context.close().catch(() => {});
-  },
-};
-
 let phoneDevice: Device | null = null;
 let phoneTokenAt = 0;
 let phoneAccount = "";
@@ -271,8 +205,6 @@ async function getPhone(accountSid: string) {
   else {
     phoneDevice = new Device(token, { codecPreferences: [Call.Codec.Opus, Call.Codec.PCMU], closeProtection: "A call is in progress. Leave this page anyway?" });
     phoneDevice.on("error", (error) => console.error("[Open Dialer] phone error", error));
-    // Only when switched on; if the browser can't run the leveler, calls still work, just without it.
-    if (callVolume.leveler) void phoneDevice.audio?.addProcessor(callLeveler, true).catch((error) => console.error("[Open Dialer] call audio leveler unavailable", error));
     // The microphone picked in the call bar last time; if it's unplugged, the browser default is used.
     try { const mic = localStorage.getItem("open-dialer-mic"); if (mic) void phoneDevice.audio?.setInputDevice(mic).catch(() => {}); } catch { /* private mode */ }
   }
@@ -338,25 +270,6 @@ const blobToBase64 = (blob: Blob) => new Promise<string>((resolve, reject) => { 
 
 function usesAppPhone(connection: Connection | null | undefined) {
   return !connection?.bridgeNumber || connection.bridgeNumber === "browser";
-}
-
-// How loud the other person is, 100% to 300%, on top of the leveler. Remembered per browser.
-function CallVolume() {
-  const [level, setLevel] = useState(callVolume.level);
-  const [leveler, setLevelerOn] = useState(callVolume.leveler);
-  return (
-    <>
-      <label className="call-volume" title="Their volume">
-        <Volume2 size={16} aria-hidden="true" />
-        <input type="range" min={1} max={3} step={0.25} value={level} disabled={!leveler} aria-label="Their volume" aria-valuetext={`${Math.round(level * 100)}%`} onChange={(event) => { const next = Number(event.target.value); setLevel(next); setCallVolume(next); }} />
-        <span>{Math.round(level * 100)}%</span>
-      </label>
-      <label className="call-leveler" title="Evens out loud rings and quiet voices. Turn off to hear the call exactly as it comes in. Applies from the next call.">
-        <input type="checkbox" checked={leveler} onChange={(event) => { setLevelerOn(event.target.checked); setLeveler(event.target.checked); }} />
-        Even out volume
-      </label>
-    </>
-  );
 }
 
 type ActiveCall = { lead: Lead; call: Call | null; status: "connecting" | "ringing" | "in-call"; muted: boolean; startedAt: number | null; callId?: string };
@@ -509,15 +422,14 @@ function InCallBar({ active, onMute, onHangUp, onBook, voicemail, onDropVoicemai
         </button>
         {voicemail && <button type="button" className="quiet-button" disabled={!live || dropping} title={`At the beep: plays "${voicemail}" into their voicemail, hangs up and logs a voicemail`} onClick={() => { setDropping(true); void onDropVoicemail().finally(() => setDropping(false)); }}><MessageSquare size={16} /> {dropping ? "Dropping…" : "Voicemail"}</button>}
         <div className="in-call-bar__audio">
-          <button type="button" className="quiet-button icon-button" onClick={() => setAudioOpen((open) => !open)} aria-expanded={audioOpen} aria-label="Sound: microphone and their volume" title="Microphone and their volume"><Volume2 size={16} /></button>
+          <button type="button" className="quiet-button icon-button" onClick={() => setAudioOpen((open) => !open)} aria-expanded={audioOpen} aria-label="Microphone" title="Microphone"><Volume2 size={16} /></button>
           {audioOpen && (
-            <div className="in-call-bar__popover" role="dialog" aria-label="Sound">
+            <div className="in-call-bar__popover" role="dialog" aria-label="Microphone">
               <label className="in-call-bar__mic">Microphone
                 <select value={micId} onChange={(event) => pickMic(event.target.value)}>
                   {mics.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || "Microphone"}</option>)}
                 </select>
               </label>
-              <CallVolume />
             </div>
           )}
         </div>
