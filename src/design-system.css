@@ -1299,3 +1299,45 @@ button.flow-node:hover { border-color: var(--color-accent-text); transform: tran
 .mic-pick select { max-width: 170px; min-height: 32px; padding: 0 var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-size: var(--font-size-meta); }
 .mic-pick__warn { flex-basis: 100%; color: var(--color-danger, #e53e3e); font-size: var(--font-size-meta); font-weight: 600; }
 .in-call-bar { flex-wrap: wrap; width: min(900px, calc(100vw - 2 * var(--space-4))); }
+
+/* Call bar, regrouped: who and the timer, your mic, then the actions with Hang up last. */
+.in-call-bar { flex-wrap: wrap; gap: var(--space-3); width: min(980px, calc(100vw - 2 * var(--space-4))); }
+.in-call-bar__who { display: flex; flex: 0 1 auto; align-items: center; gap: var(--space-3); min-width: 0; }
+.in-call-bar__who > div { display: grid; min-width: 0; }
+.in-call-bar__who b, .in-call-bar__who small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.in-call-bar__actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); margin-left: auto; }
+.in-call-bar__audio { position: relative; }
+.icon-button { display: inline-grid; place-items: center; width: 36px; padding: 0; }
+.in-call-bar__popover { position: absolute; right: 0; bottom: calc(100% + var(--space-2)); display: grid; gap: var(--space-2); width: max-content; padding: var(--space-3) var(--space-4); border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-surface-raised); box-shadow: var(--shadow-dialog); }
+
+/* Mic indicator in the style of the mic taskbar widget: three rounded bars, green when it hears you. */
+.mic-widget { --signal: #6b6b6b; display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 10px 0 12px; border-radius: 12px; background: rgba(32, 32, 32, 0.88); color: #fff; }
+html[data-theme="light"] .mic-widget { background: #2a2a28; }
+.mic-widget__signal { display: flex; align-items: center; justify-content: center; gap: 3px; width: 27px; height: 29px; }
+.mic-widget__signal i { display: block; width: 4px; border-radius: 99px; background: var(--signal); transition: height 70ms cubic-bezier(.2, .8, .3, 1), background 140ms ease; }
+.mic-widget__copy { display: grid; gap: 2px; min-width: 0; }
+.mic-widget__copy strong { font-size: 12px; font-weight: 650; }
+.mic-widget__copy select { max-width: 150px; height: 20px; padding: 0 18px 0 6px; border: 0; border-radius: 4px; background: rgba(255, 255, 255, 0.08); color: #fff; font: 11px/18px inherit; cursor: pointer; text-overflow: ellipsis; }
+.mic-widget__copy select option { background: #1f1f1f; color: #fff; }
+.mic-widget[data-state="heard"] { --signal: #3ee58f; }
+.mic-widget[data-state="muted"] { --signal: #6b6b6b; }
+.mic-widget[data-state="muted"] strong { color: #c5c5c5; }
+.mic-widget[data-state="silent"] { --signal: #ee7777; }
+.mic-widget[data-state="silent"] strong { color: #f3a3a3; }
+@media (prefers-reduced-motion: reduce) { .mic-widget__signal i { transition: none; } }
+.in-call-bar .mic-widget { background: #161616; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06); }
+.in-call-bar .mic-widget .mic-widget__copy select { width: auto; max-width: 160px; height: 20px; min-height: 0; padding: 0 18px 0 6px; border: 0; border-radius: 4px; background-color: rgba(255, 255, 255, 0.08); color: #fff; font-size: 11px; line-height: 18px; }
+.in-call-bar { width: min(1080px, calc(100vw - 2 * var(--space-4))); }
+.in-call-bar .mic-widget { flex: none; }
+@media (min-width: 1100px) { .in-call-bar__actions { flex-wrap: nowrap; } }
+.in-call-bar .mic-widget { flex: 0 0 auto; min-width: 210px; overflow: hidden; }
+.in-call-bar .in-call-bar__actions { flex: 0 0 auto; min-width: auto; }
+.in-call-bar .in-call-bar__who { flex: 1 1 auto; min-width: 0; }
+/* Just the bars from the mic taskbar widget. */
+.mic-bars { --signal: #6b6b6b; display: flex; flex: none; align-items: center; justify-content: center; gap: 3px; width: 27px; height: 29px; }
+.mic-bars i { display: block; width: 4px; border-radius: 99px; background: var(--signal); transition: height 70ms cubic-bezier(.2, .8, .3, 1), background 140ms ease; }
+.mic-bars[data-state="heard"] { --signal: #3ee58f; }
+.mic-bars[data-state="silent"] { --signal: #ee7777; }
+.in-call-bar__mic { display: grid; gap: var(--space-1); color: var(--color-text-muted); font-size: var(--font-size-meta); font-weight: 600; }
+.in-call-bar__mic select { max-width: 260px; min-height: 32px; padding: 0 var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-weight: 400; }
+@media (prefers-reduced-motion: reduce) { .mic-bars i { transition: none; } }

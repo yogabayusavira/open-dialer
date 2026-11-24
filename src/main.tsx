@@ -427,6 +427,7 @@ function AutoDialBar({ next, onPause, onSkip, onCallNow, onStop }: { next: { lea
 
 function InCallBar({ active, onMute, onHangUp, onBook, voicemail, onDropVoicemail }: { active: ActiveCall; onMute: () => void; onHangUp: () => void; onBook: () => void; voicemail: string | null; onDropVoicemail: () => Promise<void> }) {
   const [dropping, setDropping] = useState(false);
+  const [audioOpen, setAudioOpen] = useState(false);
   // How loud your microphone is right now (0 to 1), and how long it has been silent, to catch a wrong or dead mic.
   const [micLevel, setMicLevel] = useState(0);
   const [silentFor, setSilentFor] = useState(0);
@@ -486,32 +487,45 @@ function InCallBar({ active, onMute, onHangUp, onBook, voicemail, onDropVoicemai
   const status = active.status === "in-call" ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : active.status === "ringing" ? "Ringing…" : "Connecting…";
   return (
     <div className="in-call-bar" role="region" aria-label="Call in progress">
-      <span className={`in-call-bar__dot${active.status === "in-call" ? " is-live" : ""}`} aria-hidden="true" />
-      <div>
-        <b>{leadLabel(active.lead)}</b>
-        <small>{formatPhone(active.lead.phone, active.lead.extension)} · {status}</small>
+      <div className="in-call-bar__who">
+        <span className={`in-call-bar__dot${active.status === "in-call" ? " is-live" : ""}`} aria-hidden="true" />
+        <div>
+          <b>{leadLabel(active.lead)}</b>
+          <small>{formatPhone(active.lead.phone, active.lead.extension)} · {status}</small>
+        </div>
       </div>
-      <button type="button" className="quiet-button" onClick={onMute} disabled={active.status !== "in-call"} aria-pressed={active.muted}>
-        {active.muted ? <MicOff size={16} /> : <Mic size={16} />} {active.muted ? "Unmute" : "Mute"}
-      </button>
-      <label className="mic-pick" title={live && !active.muted && silentFor >= 5 ? "No sound from this microphone. Pick another one." : "Your microphone"}>
-        <span className={`mic-pick__meter${live && !active.muted && silentFor >= 5 ? " is-silent" : ""}`} aria-hidden="true"><i style={{ width: `${Math.min(100, Math.round(micLevel * 140))}%` }} /></span>
-        <select value={micId} onChange={(event) => pickMic(event.target.value)} aria-label="Microphone">
-          {mics.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || "Microphone"}</option>)}
-        </select>
-      </label>
-      {live && !active.muted && silentFor >= 5 && <small className="mic-pick__warn" role="status">They can't hear you: no sound from this mic. Pick another one.</small>}
-      <CallVolume />
-      {voicemail && <button type="button" className="quiet-button" disabled={!live || dropping} title={`At the beep: plays "${voicemail}" into their voicemail, hangs up and logs a voicemail`} onClick={() => { setDropping(true); void onDropVoicemail().finally(() => setDropping(false)); }}><MessageSquare size={16} /> {dropping ? "Dropping…" : "Drop voicemail"}</button>}
-      <button type="button" className="quiet-button" onClick={() => setKeypadOpen((open) => !open)} disabled={!live} aria-expanded={keypadOpen}>
-        <Grid3x3 size={16} /> Keypad
-      </button>
-      <button type="button" className="quiet-button" onClick={onBook}>
-        <CalendarPlus size={16} /> Book a call
-      </button>
-      <button type="button" className="hang-up-button" onClick={onHangUp}>
-        <PhoneOff size={16} /> Hang up
-      </button>
+      {/* Your mic at a glance: the mic taskbar widget's three bars, green when it hears you, red when it hears nothing. */}
+      <div className="mic-bars" data-state={active.muted ? "muted" : live && silentFor >= 5 ? "silent" : micLevel > 0.02 ? "heard" : "listening"} role="img" aria-label={active.muted ? "Muted" : live && silentFor >= 5 ? "No sound from your mic: they can't hear you" : micLevel > 0.02 ? "Your mic hears you" : "Your mic is listening"} title={active.muted ? "Muted" : live && silentFor >= 5 ? "No sound from your mic: they can't hear you. Pick another mic under the speaker button." : "Your mic"}>
+        {[[8, 12], [15, 14], [10, 13]].map(([base, range], index) => <i key={index} style={{ height: base + Math.min(1, micLevel / 0.25) * range }} />)}
+      </div>
+      <div className="in-call-bar__actions">
+        <button type="button" className="quiet-button" onClick={onMute} disabled={active.status !== "in-call"} aria-pressed={active.muted}>
+          {active.muted ? <MicOff size={16} /> : <Mic size={16} />} {active.muted ? "Unmute" : "Mute"}
+        </button>
+        <button type="button" className="quiet-button" onClick={() => setKeypadOpen((open) => !open)} disabled={!live} aria-expanded={keypadOpen}>
+          <Grid3x3 size={16} /> Keypad
+        </button>
+        <button type="button" className="quiet-button" onClick={onBook}>
+          <CalendarPlus size={16} /> Book
+        </button>
+        {voicemail && <button type="button" className="quiet-button" disabled={!live || dropping} title={`At the beep: plays "${voicemail}" into their voicemail, hangs up and logs a voicemail`} onClick={() => { setDropping(true); void onDropVoicemail().finally(() => setDropping(false)); }}><MessageSquare size={16} /> {dropping ? "Dropping…" : "Voicemail"}</button>}
+        <div className="in-call-bar__audio">
+          <button type="button" className="quiet-button icon-button" onClick={() => setAudioOpen((open) => !open)} aria-expanded={audioOpen} aria-label="Sound: microphone and their volume" title="Microphone and their volume"><Volume2 size={16} /></button>
+          {audioOpen && (
+            <div className="in-call-bar__popover" role="dialog" aria-label="Sound">
+              <label className="in-call-bar__mic">Microphone
+                <select value={micId} onChange={(event) => pickMic(event.target.value)}>
+                  {mics.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || "Microphone"}</option>)}
+                </select>
+              </label>
+              <CallVolume />
+            </div>
+          )}
+        </div>
+        <button type="button" className="hang-up-button" onClick={onHangUp}>
+          <PhoneOff size={16} /> Hang up
+        </button>
+      </div>
       {keypadOpen && live && (
         <section className="in-call-keypad" aria-label="Keypad">
           <output aria-live="polite" className={typed ? undefined : "is-empty"}>{typed || "Press a key or type numbers"}</output>
