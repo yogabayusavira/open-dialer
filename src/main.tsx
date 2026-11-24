@@ -53,6 +53,7 @@ import {
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
+import { checkCondition, describeCondition, isOtherwise, parseCondition } from "./conditions";
 import type { AudioProcessor } from "@twilio/voice-sdk";
 import "./styles.css";
 import "./design-system.css";
@@ -2885,8 +2886,30 @@ function ScriptView({ text, lead, variables }: { text: string; lead?: Lead; vari
     if (list.length) blocks.push(<ul key={`list-${blocks.length}`}>{list.map((item, index) => <li key={index}><ScriptInline text={item} lead={lead} variables={variables} /></li>)}</ul>);
     list = [];
   };
+  // "If {{variable}} rule:" and "Otherwise:" pick which indented block is said for this lead. A chain of them
+  // shows the first match (or Otherwise); with no lead (a preview), every block shows under its rule.
+  let chainMatched: boolean | null = null;
+  const indented = (text: string | undefined) => /^(\s{2,}|\t)\S/.test(text || "");
   for (let index = 0; index < lines.length; index += 1) {
     const raw = lines[index];
+    const condition = indented(raw) ? null : parseCondition(raw);
+    const otherwise = !condition && chainMatched !== null && !indented(raw) && isOtherwise(raw);
+    if (condition || otherwise) {
+      flushList();
+      const body: string[] = [];
+      while (index + 1 < lines.length && (indented(lines[index + 1]) || (!lines[index + 1].trim() && indented(lines[index + 2])))) body.push(lines[++index].replace(/^(\s{2}|\t)/, ""));
+      const matches: boolean = condition ? !chainMatched && checkCondition(condition, lead ? rawVariable(condition.variable, lead, variables) : "") : !chainMatched;
+      if (condition) chainMatched = Boolean(chainMatched) || matches;
+      else chainMatched = null;
+      if (lead ? matches : true) blocks.push(
+        <div className="script-branch script-if" key={`if-${index}`}>
+          <small className="script-if__rule">{condition ? `Because ${describeCondition(condition)}` : "Otherwise"}</small>
+          <ScriptView text={body.join("\n")} lead={lead} variables={variables} />
+        </div>,
+      );
+      continue;
+    }
+    if (raw.trim() && !indented(raw)) chainMatched = null;
     // A run of indented lines is a branch: rendered the same way, inside an indented rule.
     if (/^(\s{2,}|\t)\S/.test(raw)) {
       flushList();
@@ -3062,7 +3085,10 @@ function ScriptEditor({ initial, editorRef, onTextChange }: { initial: string; e
     selection?.addRange(range);
   };
   function markLabel(line: HTMLElement) {
-    line.classList.toggle("is-label", line.dataset.type === "p" && isLabelText(line.textContent || ""));
+    const rule = line.dataset.type === "p" && (Boolean(parseCondition(lineText(line))) || isOtherwise(lineText(line)));
+    line.classList.toggle("is-condition", rule);
+    line.classList.toggle("is-otherwise", rule && isOtherwise(lineText(line)));
+    line.classList.toggle("is-label", !rule && line.dataset.type === "p" && isLabelText(line.textContent || ""));
   }
   const setType = (line: HTMLElement, type: ScriptBlockType) => {
     line.dataset.type = type;
@@ -3223,6 +3249,26 @@ function ScriptEditor({ initial, editorRef, onTextChange }: { initial: string; e
           onMouseDown={(event) => { event.preventDefault(); const selection = window.getSelection(); savedRange.current = selection?.rangeCount && editorRef.current?.contains(selection.anchorNode) ? selection.getRangeAt(0).cloneRange() : null; }}
           onClick={() => setVariableOpen((open) => !open)}
         >{"{{ }}"} Variable</button>
+        <button
+          type="button"
+          title="Lines that only show when a lead's value matches, e.g. If {{lead_type}} is no website"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            // A rule line plus one indented line to say; change the variable, the rule and the words in place.
+            const editor = editorRef.current;
+            if (!editor) return;
+            const variable = known()[0] || "lead_type";
+            const rule = blockElement("p", 0, `If ${variableChip(variable)}&#8203; is no website:`);
+            const say = blockElement("say", 1, "What to say when it matches");
+            markLabel(rule);
+            const line = currentLine();
+            if (line && editor.contains(line)) line.after(rule, say);
+            else editor.append(rule, say);
+            placeCaret(rule, Number.MAX_SAFE_INTEGER);
+            normalize();
+            changed();
+          }}
+        >Only if</button>
       </div>
       {variableOpen && (
         <div className="script-variable-box" role="group" aria-label="Insert a variable">

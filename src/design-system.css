@@ -1188,3 +1188,10 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 /* Pinnable sections: the pin shows on the section title too; a pinned section sits under the pinned cards, open. */
 summary:hover .pin-button, summary .pin-button.is-pinned { opacity: 1; }
 .call-more.is-pinned-section { margin-top: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-control); padding: 0 var(--space-3); background: var(--color-surface-raised); }
+
+/* "Only if" rules: in the editor the rule line is tagged; on a call only the matching block shows, with why. */
+.se-line.is-condition { margin-top: var(--space-2); color: var(--color-accent-text); font-size: var(--font-size-meta); font-weight: 600; }
+.se-line.is-condition::before { content: "Only if"; margin-right: var(--space-2); padding: 1px 6px; border-radius: 4px; background: var(--color-surface-raised); color: var(--color-text-muted); font-size: var(--font-size-label); }
+.script-if { border-left-color: var(--color-accent-text); }
+.script-if__rule { display: block; margin-bottom: var(--space-1); color: var(--color-text-muted); font-size: var(--font-size-label); }
+.se-line.is-condition.is-otherwise::before { content: "If none match"; }
