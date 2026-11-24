@@ -1341,3 +1341,4 @@ html[data-theme="light"] .mic-widget { background: #2a2a28; }
 .in-call-bar__mic { display: grid; gap: var(--space-1); color: var(--color-text-muted); font-size: var(--font-size-meta); font-weight: 600; }
 .in-call-bar__mic select { max-width: 260px; min-height: 32px; padding: 0 var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-weight: 400; }
 @media (prefers-reduced-motion: reduce) { .mic-bars i { transition: none; } }
+.in-call-bar__who > .mic-bars { display: flex; min-width: 27px; }

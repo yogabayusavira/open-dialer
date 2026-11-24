@@ -488,15 +488,14 @@ function InCallBar({ active, onMute, onHangUp, onBook, voicemail, onDropVoicemai
   return (
     <div className="in-call-bar" role="region" aria-label="Call in progress">
       <div className="in-call-bar__who">
-        <span className={`in-call-bar__dot${active.status === "in-call" ? " is-live" : ""}`} aria-hidden="true" />
+        {/* Your mic at a glance: the mic taskbar widget's three bars, green when it hears you, red when it hears nothing. */}
+        <div className="mic-bars" data-state={active.muted ? "muted" : live && silentFor >= 5 ? "silent" : micLevel > 0.02 ? "heard" : "listening"} role="img" aria-label={active.muted ? "Muted" : live && silentFor >= 5 ? "No sound from your mic: they can't hear you" : micLevel > 0.02 ? "Your mic hears you" : "Your mic is listening"} title={active.muted ? "Muted" : live && silentFor >= 5 ? "No sound from your mic: they can't hear you. Pick another mic under the speaker button." : "Your mic"}>
+          {[[8, 12], [15, 14], [10, 13]].map(([base, range], index) => <i key={index} style={{ height: base + Math.min(1, micLevel / 0.25) * range }} />)}
+        </div>
         <div>
           <b>{leadLabel(active.lead)}</b>
           <small>{formatPhone(active.lead.phone, active.lead.extension)} · {status}</small>
         </div>
-      </div>
-      {/* Your mic at a glance: the mic taskbar widget's three bars, green when it hears you, red when it hears nothing. */}
-      <div className="mic-bars" data-state={active.muted ? "muted" : live && silentFor >= 5 ? "silent" : micLevel > 0.02 ? "heard" : "listening"} role="img" aria-label={active.muted ? "Muted" : live && silentFor >= 5 ? "No sound from your mic: they can't hear you" : micLevel > 0.02 ? "Your mic hears you" : "Your mic is listening"} title={active.muted ? "Muted" : live && silentFor >= 5 ? "No sound from your mic: they can't hear you. Pick another mic under the speaker button." : "Your mic"}>
-        {[[8, 12], [15, 14], [10, 13]].map(([base, range], index) => <i key={index} style={{ height: base + Math.min(1, micLevel / 0.25) * range }} />)}
       </div>
       <div className="in-call-bar__actions">
         <button type="button" className="quiet-button" onClick={onMute} disabled={active.status !== "in-call"} aria-pressed={active.muted}>
