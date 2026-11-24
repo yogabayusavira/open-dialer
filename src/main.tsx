@@ -2090,12 +2090,14 @@ function Queue({
   const upcoming = callQueue(state.leads, state.calls);
   // What the list shows: everything in calling order, only new leads, or callbacks (follow-ups and set call-back times).
   const [view, setView] = useState<"all" | "new" | "callbacks">(() => { try { return (localStorage.getItem("open-dialer-queue-view") as "all" | "new" | "callbacks") || "all"; } catch { return "all"; } });
-  const [order, setOrder] = useState<"queue" | "newest">(() => { try { return localStorage.getItem("open-dialer-queue-order") === "newest" ? "newest" : "queue"; } catch { return "queue"; } });
+  const [order, setOrder] = useState<"queue" | "newest" | "location">(() => { try { const saved = localStorage.getItem("open-dialer-queue-order"); return saved === "newest" || saved === "location" ? saved : "queue"; } catch { return "queue"; } });
   const remember = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* private mode */ } };
   const isCallback = (lead: Lead) => lead.status === "Follow-up" || /^\d{4}-\d{2}-\d{2}/.test(lead.due);
   const addedAt = (lead: Lead) => Number(lead.id.split("_")[1]) || 0;
   const filtered = upcoming.filter((lead) => view === "all" || (view === "new" ? lead.status === "New" && !isCallback(lead) : isCallback(lead)));
-  const shown = order === "newest" ? [...filtered].sort((left, right) => addedAt(right) - addedAt(left)) : view === "callbacks" ? [...filtered].sort((left, right) => (left.due || "").localeCompare(right.due || "")) : filtered;
+  // Location: by state name, then city (from a "City" column), leads with no state last; calling order breaks ties.
+  const place = (lead: Lead) => [leadState(lead)?.[1] || "\uffff", Object.entries(lead.details || {}).find(([key]) => /^(city|town)$/i.test(key.trim()))?.[1]?.trim() || "\uffff"].join("|").toLowerCase();
+  const shown = order === "newest" ? [...filtered].sort((left, right) => addedAt(right) - addedAt(left)) : order === "location" ? [...filtered].sort((left, right) => place(left).localeCompare(place(right))) : view === "callbacks" ? [...filtered].sort((left, right) => (left.due || "").localeCompare(right.due || "")) : filtered;
   const counts = { all: upcoming.length, new: upcoming.filter((lead) => lead.status === "New" && !isCallback(lead)).length, callbacks: upcoming.filter(isCallback).length };
   // The script of the lead's first campaign that has one.
   const scriptCampaign = scriptCampaignOf(selected, state.campaignSettings || {});
@@ -2165,9 +2167,10 @@ function Queue({
                 <button key={key} type="button" className={view === key ? "is-active" : ""} aria-pressed={view === key} onClick={() => { setView(key); remember("open-dialer-queue-view", key); }}>{label} <small>{counts[key]}</small></button>
               ))}
             </div>
-            <select value={order} aria-label="Order" onChange={(event) => { const next = event.target.value as "queue" | "newest"; setOrder(next); remember("open-dialer-queue-order", next); }}>
+            <select value={order} aria-label="Order" onChange={(event) => { const next = event.target.value as "queue" | "newest" | "location"; setOrder(next); remember("open-dialer-queue-order", next); }}>
               <option value="queue">{view === "callbacks" ? "Soonest first" : "Calling order"}</option>
               <option value="newest">Newest added</option>
+              <option value="location">Location (state, then city)</option>
             </select>
           </div>
           {!shown.length && <p className="call-list__empty">{view === "callbacks" ? "No callbacks waiting." : view === "new" ? "No new leads left to call." : "Nothing left to call."}</p>}
