@@ -1180,7 +1180,7 @@ function App() {
             )}
           </div>
           <div className="top-actions">
-            {(screen === "home" || screen === "leads" || screen === "pipeline" || screen === "analytics") && picker}
+            {(screen === "home" || screen === "leads" || screen === "pipeline" || screen === "analytics" || screen === "scripts" || screen === "automations") && picker}
             <button
               className="quick-tour-button"
               onClick={() => setGuideOpen(true)}
@@ -1373,8 +1373,8 @@ function App() {
             onGo={setScreen}
           />
         )}
-        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} onEdit={editCampaign} />}
-        {screen === "automations" && <AutomationsPage leads={state.leads} settings={state.campaignSettings || {}} onEdit={editCampaign} />}
+        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={activeCampaign} onEdit={editCampaign} />}
+        {screen === "automations" && <AutomationsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={activeCampaign} onPick={setCampaign} onEdit={editCampaign} />}
         {screen === "campaigns" && (
           <Campaigns
             leads={state.leads}
@@ -3925,8 +3925,8 @@ function voicemailValues(settings: CampaignSettings) {
 }
 
 // One card per campaign: what its script has, with links into that campaign's Settings popup.
-function ScriptsPage({ leads, settings, onEdit }: { leads: Lead[]; settings: Record<string, CampaignSettings>; onEdit: (name: string, tab: CampaignTab) => void }) {
-  const names = allCampaigns(leads, settings);
+function ScriptsPage({ leads, settings, campaign, onEdit }: { leads: Lead[]; settings: Record<string, CampaignSettings>; campaign: string; onEdit: (name: string, tab: CampaignTab) => void }) {
+  const names = allCampaigns(leads, settings).filter((name) => !campaign || name === campaign);
   return (
     <section className="campaigns-page">
       <div className="campaigns-head"><p>Each campaign's script, its variables and voicemails. Edit them in the campaign's settings.</p></div>
@@ -3956,37 +3956,126 @@ function ScriptsPage({ leads, settings, onEdit }: { leads: Lead[]; settings: Rec
   );
 }
 
-// What already runs on its own for each campaign. Each is set in the campaign's Settings popup.
-function AutomationsPage({ leads, settings, onEdit }: { leads: Lead[]; settings: Record<string, CampaignSettings>; onEdit: (name: string, tab: CampaignTab) => void }) {
-  const names = allCampaigns(leads, settings);
+// The "If {{…}}" chains in a script: each chain is one switch, each rule (or Otherwise) one way out, with the
+// first line said under it.
+function scriptChains(text = "") {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const chains: { variable: string; branches: { rule: string; say: string }[] }[] = [];
+  let open = false;
+  for (let index = 0; index < lines.length; index++) {
+    const raw = lines[index];
+    if (/^(\s{2,}|\t)\S/.test(raw) || !raw.trim()) continue;
+    const rule = parseCondition(raw);
+    const otherwise = !rule && open && isOtherwise(raw);
+    if (!rule && !otherwise) { open = false; continue; }
+    const say = (lines.slice(index + 1).find((line) => /^(\s{2,}|\t)\S/.test(line)) || "").trim().replace(/^>\s?|^["“]|["”]$/g, "");
+    const nextTop = lines.slice(index + 1).findIndex((line) => line.trim() && !/^(\s{2,}|\t)\S/.test(line));
+    const body = nextTop === -1 ? lines.slice(index + 1) : lines.slice(index + 1, index + 1 + nextTop);
+    const said = body.some((line) => line.trim()) ? say : "";
+    if (!open) chains.push({ variable: rule ? rule.variable : "", branches: [] });
+    chains[chains.length - 1].branches.push({ rule: rule ? `${describeCondition(rule).replace(`${rule.variable} `, "")}` : "Otherwise", say: said });
+    open = true;
+  }
+  return chains;
+}
+
+type FlowNode = { title: string; detail?: string; kind: "trigger" | "switch" | "action" | "empty"; onClick?: () => void };
+const flowIcon = { trigger: PhoneCall, switch: Workflow, action: MessageSquare, empty: Plus };
+// One lane of the canvas: a trigger, an optional switch, then one node per way out, joined by curved lines.
+function FlowLane({ trigger, middle, outputs }: { trigger: FlowNode; middle?: FlowNode; outputs: FlowNode[] }) {
+  const width = 232, height = 64, gap = 20, column = width + 56;
+  const rows = Math.max(1, outputs.length);
+  const laneHeight = rows * height + (rows - 1) * gap;
+  const center = laneHeight / 2;
+  const outY = (index: number) => index * (height + gap) + height / 2;
+  const columns = middle ? [0, column, column * 2] : [0, column];
+  const curve = (x1: number, y1: number, x2: number, y2: number) => `M ${x1} ${y1} C ${x1 + 36} ${y1}, ${x2 - 36} ${y2}, ${x2} ${y2}`;
+  const node = (item: FlowNode, x: number, y: number, key: string) => {
+    const Icon = flowIcon[item.kind];
+    const Tag = item.onClick ? "button" : "div";
+    return (
+      <Tag key={key} type={item.onClick ? "button" : undefined} className={`flow-node flow-node--${item.kind}`} style={{ left: x, top: y - height / 2, width, height }} onClick={item.onClick}>
+        <span className="flow-node__icon" aria-hidden="true"><Icon size={18} /></span>
+        <span className="flow-node__text"><b>{item.title}</b>{item.detail && <small>{item.detail}</small>}</span>
+      </Tag>
+    );
+  };
+  const last = columns[columns.length - 1];
   return (
-    <section className="campaigns-page">
-      <div className="campaigns-head"><p>What each campaign does on its own: script lines picked per lead, voicemail drops and AI cleanup.</p></div>
-      {!names.length && <div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div>}
-      <div className="campaign-list">
-        {names.map((name) => {
-          const own = settings[name] || {};
-          const rules = scriptRules(own.script);
-          const recordings = voicemailValues(own);
-          const cleaned = Object.keys(own.clean || {});
-          return (
-            <article className="campaign-card automation-card" key={name}>
-              <header><h2>{name}</h2></header>
-              <section>
-                <h3>Only-if script lines <button type="button" className="text-link" onClick={() => onEdit(name, "script")}>Edit</button></h3>
-                {rules.length ? <ul>{rules.map((rule, index) => <li key={index}>{rule}</li>)}</ul> : <p>None. In the script, use the Only if button, or type a line like If {"{{lead_type}}"} is no website: with the lines to say indented under it.</p>}
-              </section>
-              <section>
-                <h3>Voicemail drop <button type="button" className="text-link" onClick={() => onEdit(name, "voicemail")}>Edit</button></h3>
-                {recordings.length ? <p>{own.voicemail?.variable ? <>Picked by {`{{${own.voicemail.variable}}}`}: {recordings.join(", ")}</> : "One message for everyone"}</p> : <p>None. Record or upload a message in Voicemail.</p>}
-              </section>
-              <section>
-                <h3>AI cleanup <button type="button" className="text-link" onClick={() => onEdit(name, "variables")}>Edit</button></h3>
-                {cleaned.length ? <ul>{cleaned.map((variable) => <li key={variable}>{`{{${variable}}}`}{own.clean![variable].to ? `: "${own.clean![variable].from}" said as "${own.clean![variable].to}"` : ""}</li>)}</ul> : <p>None. In Variables, give an example of how you'd say a value.</p>}
-              </section>
-            </article>
-          );
-        })}
+    <div className="flow-lane" style={{ height: laneHeight, width: last + width }}>
+      <svg className="flow-lane__wires" width={last + width} height={laneHeight} aria-hidden="true">
+        {middle && <path d={curve(width, center, column, center)} />}
+        {outputs.map((_, index) => <path key={index} d={curve(columns[columns.length - 2] + width, center, last, outY(index))} />)}
+      </svg>
+      {node(trigger, 0, center, "trigger")}
+      {middle && node(middle, column, center, "middle")}
+      {outputs.map((item, index) => node(item, last, outY(index), `out-${index}`))}
+    </div>
+  );
+}
+
+// What runs on its own in a campaign, drawn like a workflow canvas: script lines picked per lead, voicemail drops
+// and AI cleanup. Every node opens the part of the campaign's Settings where it's set.
+function AutomationsPage({ leads, settings, campaign, onPick, onEdit }: { leads: Lead[]; settings: Record<string, CampaignSettings>; campaign: string; onPick: (name: string) => void; onEdit: (name: string, tab: CampaignTab) => void }) {
+  const names = allCampaigns(leads, settings);
+  if (!names.length) return <section className="campaigns-page"><div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div></section>;
+  if (!campaign || !names.includes(campaign)) {
+    return (
+      <section className="campaigns-page">
+        <div className="campaigns-head"><p>Pick a campaign to see what runs on its own: script lines chosen per lead, voicemail drops and AI cleanup.</p></div>
+        <div className="campaign-list">
+          {names.map((name) => {
+            const own = settings[name] || {};
+            const count = scriptChains(own.script).length + (voicemailValues(own).length ? 1 : 0) + Object.keys(own.clean || {}).length;
+            return (
+              <button type="button" className="campaign-card flow-pick" key={name} onClick={() => onPick(name)}>
+                <header><h2>{name}</h2><span>{count ? `${count} automation${count === 1 ? "" : "s"}` : "Nothing yet"}</span></header>
+                <span className="flow-pick__open">Open the flow <ChevronRight size={16} aria-hidden="true" /></span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    );
+  }
+  const own = settings[campaign] || {};
+  const edit = (tab: CampaignTab) => () => onEdit(campaign, tab);
+  const chains = scriptChains(own.script);
+  const recordings = Object.keys(own.voicemail?.files || {}).sort((left, right) => (left === "*" ? 1 : right === "*" ? -1 : left.localeCompare(right)));
+  const cleaned = Object.entries(own.clean || {});
+  return (
+    <section className="flow-page">
+      <div className="campaigns-head"><p>What runs on its own in {campaign}. Click any step to change it.</p></div>
+      <div className="flow-canvas">
+        <section className="flow-section">
+          <h3>Script lines picked per lead</h3>
+          {chains.length ? chains.map((chain, index) => (
+            <FlowLane key={index}
+              trigger={{ kind: "trigger", title: "Lead comes up", detail: "On the call screen", onClick: edit("script") }}
+              middle={{ kind: "switch", title: `Check {{${chain.variable}}}`, detail: `${chain.branches.length} way${chain.branches.length === 1 ? "" : "s"}`, onClick: edit("script") }}
+              outputs={chain.branches.map((branch) => ({ kind: "action", title: branch.rule === "Otherwise" ? "Otherwise" : `If ${branch.rule}`, detail: branch.say ? `Say: ${branch.say}` : "Nothing to say yet", onClick: edit("script") }))}
+            />
+          )) : <FlowLane trigger={{ kind: "trigger", title: "Lead comes up", detail: "On the call screen" }} outputs={[{ kind: "empty", title: "Add an Only-if rule", detail: "In the script: If {{lead_type}} is no website", onClick: edit("script") }]} />}
+        </section>
+        <section className="flow-section">
+          <h3>Voicemail drop</h3>
+          {recordings.length ? (
+            <FlowLane
+              trigger={{ kind: "trigger", title: "You press Drop voicemail", detail: "At the beep", onClick: edit("voicemail") }}
+              middle={own.voicemail?.variable ? { kind: "switch", title: `Check {{${own.voicemail.variable}}}`, detail: `${recordings.length} recording${recordings.length === 1 ? "" : "s"}`, onClick: edit("voicemail") } : undefined}
+              outputs={recordings.map((key) => ({ kind: "action", title: key === "*" ? (own.voicemail?.variable ? "Everyone else" : "Everyone") : `If ${key}`, detail: `Play ${own.voicemail!.files[key].name}, hang up, follow up in 2 days`, onClick: edit("voicemail") }))}
+            />
+          ) : <FlowLane trigger={{ kind: "trigger", title: "You press Drop voicemail", detail: "At the beep" }} outputs={[{ kind: "empty", title: "Record a voicemail", detail: "One for everyone, or one per value", onClick: edit("voicemail") }]} />}
+        </section>
+        <section className="flow-section">
+          <h3>AI cleanup</h3>
+          {cleaned.length ? (
+            <FlowLane
+              trigger={{ kind: "trigger", title: "Next 5 leads", detail: "While you call", onClick: edit("variables") }}
+              outputs={cleaned.map(([variable, rule]) => ({ kind: "action", title: `Clean {{${variable}}}`, detail: rule.to ? `"${rule.from}" → "${rule.to}"` : rule.notes, onClick: edit("variables") }))}
+            />
+          ) : <FlowLane trigger={{ kind: "trigger", title: "Next 5 leads", detail: "While you call" }} outputs={[{ kind: "empty", title: "Clean a variable with AI", detail: "Give an example of how you'd say it", onClick: edit("variables") }]} />}
+        </section>
       </div>
     </section>
   );

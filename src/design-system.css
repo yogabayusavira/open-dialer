@@ -1231,3 +1231,27 @@ summary:hover .pin-button, summary .pin-button.is-pinned { opacity: 1; }
 .home-campaigns .text-link { color: var(--color-text-muted); font-size: var(--font-size-meta); }
 /* On phones the page actions (campaign picker, Setup guide, Add lead) wrap under the title instead of running off the screen. */
 @media (max-width: 640px) { .topbar, .top-actions { flex-wrap: wrap; } }
+
+/* Automations canvas (workflow style): dotted grid, rounded nodes with an icon block, curved wires between them. */
+.flow-page { display: grid; gap: var(--space-4); min-width: 0; }
+.flow-canvas { display: grid; gap: var(--space-6, 32px); padding: var(--space-6, 32px) var(--space-5); overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius-surface); background-color: var(--color-surface); background-image: radial-gradient(var(--color-border-strong) 1px, transparent 1.2px); background-size: 20px 20px; }
+.flow-section { display: grid; gap: var(--space-3); }
+.flow-section h3 { margin: 0; color: var(--color-text-muted); font-size: var(--font-size-meta); font-weight: 600; }
+.flow-lane { position: relative; flex: none; }
+.flow-lane + .flow-lane { margin-top: var(--space-4); }
+.flow-lane__wires { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.flow-lane__wires path { fill: none; stroke: var(--color-border-strong); stroke-width: 2; }
+.flow-node { position: absolute; display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-3) 0 0; overflow: hidden; border: 1px solid var(--color-border-strong); border-radius: 12px; background: var(--color-surface-raised); color: var(--color-text); font: inherit; text-align: left; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+button.flow-node { cursor: pointer; transition: border-color 120ms ease, transform 120ms ease; }
+button.flow-node:hover { border-color: var(--color-accent-text); transform: translateY(-1px); }
+.flow-node__icon { display: grid; flex: none; place-items: center; align-self: stretch; width: 48px; border-right: 1px solid var(--color-border); }
+.flow-node--trigger .flow-node__icon { color: var(--color-warn, #d69e2e); }
+.flow-node--switch .flow-node__icon { color: var(--color-accent-text); }
+.flow-node--action .flow-node__icon { color: var(--color-good, #3fb27f); }
+.flow-node--empty { border-style: dashed; background: transparent; color: var(--color-text-muted); box-shadow: none; }
+.flow-node__text { display: grid; gap: 2px; min-width: 0; }
+.flow-node__text b { overflow: hidden; font-size: var(--font-size-body); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.flow-node__text small { overflow: hidden; color: var(--color-text-muted); font-size: var(--font-size-label); text-overflow: ellipsis; white-space: nowrap; }
+.flow-pick { display: grid; gap: var(--space-3); width: 100%; font: inherit; text-align: left; cursor: pointer; }
+.flow-pick__open { display: inline-flex; align-items: center; gap: 4px; color: var(--color-accent-text); font-size: var(--font-size-meta); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { button.flow-node { transition: none; } button.flow-node:hover { transform: none; } }
