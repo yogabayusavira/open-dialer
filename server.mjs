@@ -174,6 +174,8 @@ function normalizeState(stored) {
     dncNumbers: Array.isArray(stored.dncNumbers) ? [...new Set(stored.dncNumbers.map(phoneKey))] : [],
     connection: stored.connection || null,
     settings: stored.settings && typeof stored.settings === "object" ? stored.settings : {},
+    // The voicemail vault: recordings any campaign can use. The audio itself is stored on its own (voicemail-file:<id>).
+    voicemails: Array.isArray(stored.voicemails) ? stored.voicemails : [],
   };
 }
 
@@ -696,8 +698,8 @@ function statusToken(ws, leadId) {
 function voicemailKey(value) {
   return cleanText(String(value || ""), 120).toLowerCase() || "*";
 }
-function voicemailSignature(ws, campaign, key) {
-  return createHmac("sha256", encryptionKey()).update(`voicemail:${ws}:${campaign}:${key}`).digest("base64url");
+function voicemailSignature(ws, id) {
+  return createHmac("sha256", encryptionKey()).update(`voicemail:${ws}:${id}`).digest("base64url");
 }
 function audioType(bytes) {
   const head = bytes.subarray(0, 12);
@@ -918,11 +920,10 @@ async function route(req, res, url) {
     }
     if (url.pathname === "/api/twilio/voice/voicemail" && req.method === "GET") {
       const ws = url.searchParams.get("ws") || "";
-      const campaign = campaignName(url.searchParams.get("campaign"));
-      const key = url.searchParams.get("key") || "";
-      if (!ws || !campaign || !key || !safeEqual(url.searchParams.get("sig") || "", voicemailSignature(ws, campaign, key))) return json(res, 403, { error: "Invalid voicemail link." });
+      const id = url.searchParams.get("id") || "";
+      if (!ws || !/^vm_\w+$/.test(id) || !safeEqual(url.searchParams.get("sig") || "", voicemailSignature(ws, id))) return json(res, 403, { error: "Invalid voicemail link." });
       requestContext.getStore().ws = ws;
-      const file = await readBlob(scopedBlob(`voicemail:${campaign}:${key}`));
+      const file = await readBlob(scopedBlob(`voicemail-file:${id}`));
       if (!file) return json(res, 404, { error: "No recording." });
       res.writeHead(200, { "content-type": file.type || "audio/wav", "cache-control": "no-store" });
       return res.end(Buffer.from(file.data, "base64"));
@@ -1039,7 +1040,7 @@ async function route(req, res, url) {
     const ownerOnly = [
       ["POST", /^\/api\/twilio\/(validate|connection)$/], ["DELETE", /^\/api\/twilio\/connection$/], ["PATCH", /^\/api\/twilio\/connection$/], ["GET", /^\/api\/twilio\/account-check$/],
       ["PATCH", /^\/api\/settings$/], ["PUT", /^\/api\/settings\/fields$/], ["POST", /^\/api\/leads\/(import|delete|assign)$/], ["DELETE", /^\/api\/leads\/[^/]+$/], ["DELETE", /^\/api\/dnc\/[^/]+$/], ["POST", /^\/api\/dnc$/],
-      ["PUT", /^\/api\/campaigns\/script$/], ["POST", /^\/api\/campaigns\/script-pdf$/], ["DELETE", /^\/api\/campaigns\/script-pdf$/], ["POST", /^\/api\/campaigns\/voicemail$/], ["DELETE", /^\/api\/campaigns\/voicemail$/],
+      ["PUT", /^\/api\/campaigns\/script$/], ["POST", /^\/api\/campaigns\/script-pdf$/], ["DELETE", /^\/api\/campaigns\/script-pdf$/], ["PUT", /^\/api\/campaigns\/voicemail$/], ["POST", /^\/api\/voicemails$/], ["PATCH", /^\/api\/voicemails\/[^/]+$/], ["DELETE", /^\/api\/voicemails\/[^/]+$/],
       ["POST", /^\/api\/team$/], ["PATCH", /^\/api\/team\/[^/]+$/], ["DELETE", /^\/api\/team\/[^/]+$/], ["PATCH", /^\/api\/workspace$/],
       ["PUT", /^\/api\/ai\/settings$/], ["DELETE", /^\/api\/ai\/settings$/], ["POST", /^\/api\/ai\/(preview|forget)$/],
     ];
@@ -1196,7 +1197,7 @@ async function route(req, res, url) {
       return json(res, 201, lead);
     }
     if (url.pathname === "/api/campaigns/script" && req.method === "PUT") {
-      const { campaign, script, variables, value, clean, pinned, voicemailVariable } = await getBody(req);
+      const { campaign, script, variables, value, clean, pinned } = await getBody(req);
       const name = campaignName(campaign);
       if (!name) return json(res, 400, { error: "Choose a campaign." });
       // What one won deal in this campaign is worth; blank clears it.
@@ -1214,7 +1215,6 @@ async function route(req, res, url) {
       if (amount === null) delete state.campaignSettings[name].value;
       else if (amount !== undefined) state.campaignSettings[name].value = amount;
       // Lead details shown first on the call screen for this campaign, in the order they were pinned.
-      if (typeof voicemailVariable === "string") state.campaignSettings[name].voicemail = { files: {}, ...(current.voicemail || {}), variable: cleanText(voicemailVariable, 60) };
       if (Array.isArray(pinned)) state.campaignSettings[name].pinned = [...new Set(pinned.map((label) => cleanText(label, 60)).filter(Boolean))].slice(0, 6);
       // AI cleanup per variable: an example (raw → how you'd say it) and notes. Turning one off drops its saved versions.
       if (clean && typeof clean === "object" && !Array.isArray(clean)) {
@@ -1228,45 +1228,75 @@ async function route(req, res, url) {
       await writeState(state);
       return json(res, 200, state.campaignSettings[name]);
     }
-    if (url.pathname === "/api/campaigns/voicemail") {
-      const query = req.method === "GET" || req.method === "DELETE";
-      const body = query ? {} : await getBody(req);
-      const name = campaignName(query ? url.searchParams.get("campaign") : body.campaign);
-      const key = voicemailKey(query ? url.searchParams.get("value") : body.value);
-      if (!name) return json(res, 400, { error: "Choose a campaign." });
-      const blobId = scopedBlob(`voicemail:${name}:${key}`);
-      if (req.method === "GET") {
-        const allowed = isOwner() || (await readState()).leads.some((lead) => canSee(lead) && lead.campaigns?.includes(name));
-        const file = allowed && (await readBlob(blobId));
+    // The voicemail vault: add (record or upload), rename, delete, and listen.
+    if (url.pathname === "/api/voicemails" && req.method === "POST") {
+      const body = await getBody(req);
+      const bytes = typeof body.data === "string" ? Buffer.from(body.data, "base64") : Buffer.alloc(0);
+      const type = audioType(bytes);
+      if (!type) return json(res, 400, { error: "Use an MP3 or WAV file, or record one here." });
+      const item = { id: `vm_${Date.now()}_${randomBytes(3).toString("hex")}`, name: cleanText(body.name, 80) || "Voicemail", size: bytes.length, seconds: Math.max(0, Math.round(Number(body.seconds) || 0)), createdAt: new Date().toISOString() };
+      await writeBlob(scopedBlob(`voicemail-file:${item.id}`), { type, data: bytes.toString("base64") });
+      await updateState((state) => {
+        state.voicemails.unshift(item);
+        activity(state, "Voicemail recording saved", item.name);
+      });
+      return json(res, 201, item);
+    }
+    const vaultMatch = url.pathname.match(/^\/api\/voicemails\/(vm_\w+)(\/audio)?$/);
+    if (vaultMatch) {
+      const id = vaultMatch[1];
+      if (vaultMatch[2] && req.method === "GET") {
+        const file = await readBlob(scopedBlob(`voicemail-file:${id}`));
         if (!file) return json(res, 404, { error: "No recording." });
         res.writeHead(200, { "content-type": file.type || "audio/wav", "cache-control": "no-store" });
         return res.end(Buffer.from(file.data, "base64"));
       }
-      if (req.method === "POST") {
-        const bytes = typeof body.data === "string" ? Buffer.from(body.data, "base64") : Buffer.alloc(0);
-        const type = audioType(bytes);
-        if (!type) return json(res, 400, { error: "Use an MP3 or WAV file, or record one here." });
-        const label = cleanText(body.fileName, 120) || (type === "audio/mpeg" ? "voicemail.mp3" : "voicemail.wav");
-        await writeBlob(blobId, { name: label, type, data: bytes.toString("base64") });
-        const state = await readState();
+      if (!vaultMatch[2] && req.method === "PATCH") {
+        const { name } = await getBody(req);
+        const label = cleanText(name, 80);
+        if (!label) return json(res, 400, { error: "Give it a name." });
+        const found = await updateState((state) => {
+          const item = state.voicemails.find((entry) => entry.id === id);
+          if (!item) return false;
+          item.name = label;
+          return true;
+        });
+        return found ? json(res, 200, { ok: true }) : json(res, 404, { error: "That recording is gone." });
+      }
+      if (!vaultMatch[2] && req.method === "DELETE") {
+        await writeBlob(scopedBlob(`voicemail-file:${id}`), null);
+        await updateState((state) => {
+          const item = state.voicemails.find((entry) => entry.id === id);
+          state.voicemails = state.voicemails.filter((entry) => entry.id !== id);
+          // Campaigns that used it stop using it.
+          for (const settings of Object.values(state.campaignSettings)) {
+            for (const [key, used] of Object.entries(settings.voicemail?.use || {})) if (used === id) delete settings.voicemail.use[key];
+          }
+          activity(state, "Voicemail recording deleted", item?.name || "");
+        });
+        return json(res, 200, { ok: true });
+      }
+    }
+    // Which vault recording a campaign plays for each value of its chosen variable ("*" = everyone else).
+    if (url.pathname === "/api/campaigns/voicemail" && req.method === "PUT") {
+      const body = await getBody(req);
+      const name = campaignName(body.campaign);
+      if (!name) return json(res, 400, { error: "Choose a campaign." });
+      const result = await updateState((state) => {
         const current = state.campaignSettings[name] || {};
-        const voicemail = { variable: "", ...(current.voicemail || {}) };
-        voicemail.files = { ...(voicemail.files || {}), [key]: { name: label, size: bytes.length, updatedAt: new Date().toISOString() } };
+        const voicemail = { variable: current.voicemail?.variable || "", use: { ...(current.voicemail?.use || {}) } };
+        if (typeof body.variable === "string") voicemail.variable = cleanText(body.variable, 60);
+        if (body.value !== undefined) {
+          const key = voicemailKey(body.value);
+          if (body.recordingId && !state.voicemails.some((entry) => entry.id === body.recordingId)) return "missing";
+          if (body.recordingId) voicemail.use[key] = body.recordingId;
+          else delete voicemail.use[key];
+        }
         state.campaignSettings[name] = { ...current, voicemail };
-        activity(state, "Voicemail recording saved", `${name} · ${key === "*" ? "everyone else" : key}`);
-        await writeState(state);
-        return json(res, 200, state.campaignSettings[name]);
-      }
-      if (req.method === "DELETE") {
-        await writeBlob(blobId, null);
-        const state = await readState();
-        const files = { ...(state.campaignSettings[name]?.voicemail?.files || {}) };
-        delete files[key];
-        if (state.campaignSettings[name]) state.campaignSettings[name].voicemail = { variable: state.campaignSettings[name].voicemail?.variable || "", files };
-        activity(state, "Voicemail recording removed", `${name} · ${key === "*" ? "everyone else" : key}`);
-        await writeState(state);
-        return json(res, 200, state.campaignSettings[name] || {});
-      }
+        activity(state, "Voicemail drop updated", name);
+        return state.campaignSettings[name];
+      });
+      return result === "missing" ? json(res, 404, { error: "That recording is gone." }) : json(res, 200, result);
     }
     // During a call: play the campaign's recording to the lead (their voicemail) and hang up their side.
     if (url.pathname === "/api/calls/drop-voicemail" && req.method === "POST") {
@@ -1276,20 +1306,20 @@ async function route(req, res, url) {
       if (!call || !findLead(state, call.leadId)) return json(res, 404, { error: "That call isn't running anymore." });
       if (!call.leadLegSid) return json(res, 409, { error: "The lead's side hasn't picked up yet. Wait for the beep, then drop it." });
       const name = campaignName(campaign);
-      const files = state.campaignSettings[name]?.voicemail?.files || {};
-      const key = files[voicemailKey(value)] ? voicemailKey(value) : files["*"] ? "*" : "";
-      if (!key) return json(res, 400, { error: "This campaign has no voicemail recording for this lead. Add one in the campaign's Settings, Voicemail." });
+      const use = state.campaignSettings[name]?.voicemail?.use || {};
+      const id = use[voicemailKey(value)] || use["*"];
+      const recording = id && state.voicemails.find((entry) => entry.id === id);
+      if (!recording) return json(res, 400, { error: "This campaign has no voicemail for this lead. Pick one in Automations or the campaign's Settings, Voicemail." });
       const audio = new URL("/api/twilio/voice/voicemail", publicOrigin(req));
       audio.searchParams.set("ws", currentWorkspace());
-      audio.searchParams.set("campaign", name);
-      audio.searchParams.set("key", key);
-      audio.searchParams.set("sig", voicemailSignature(currentWorkspace(), name, key));
+      audio.searchParams.set("id", recording.id);
+      audio.searchParams.set("sig", voicemailSignature(currentWorkspace(), recording.id));
       try {
         await twilioRequest(state.connection, `/Calls/${call.leadLegSid}.json`, { Twiml: `<Response><Play>${escapeXml(audio.toString())}</Play><Hangup/></Response>` });
       } catch (error) {
         return json(res, 502, { error: error.message });
       }
-      return json(res, 200, { name: files[key].name, key });
+      return json(res, 200, { name: recording.name });
     }
     if (url.pathname === "/api/campaigns/script-pdf") {
       const name = campaignName(req.method === "GET" || req.method === "DELETE" ? url.searchParams.get("campaign") : "");

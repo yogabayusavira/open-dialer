@@ -1255,3 +1255,38 @@ button.flow-node:hover { border-color: var(--color-accent-text); transform: tran
 .flow-pick { display: grid; gap: var(--space-3); width: 100%; font: inherit; text-align: left; cursor: pointer; }
 .flow-pick__open { display: inline-flex; align-items: center; gap: 4px; color: var(--color-accent-text); font-size: var(--font-size-meta); font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { button.flow-node { transition: none; } button.flow-node:hover { transform: none; } }
+
+/* Voicemail vault: one card per recording. */
+.vault-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--space-3); }
+.vault-item { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-surface); background: var(--color-surface); }
+.vault-item__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+.vault-item__name { padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; font-size: var(--font-size-body); font-weight: 600; text-align: left; cursor: text; }
+.vault-item__head small, .vault-item__foot small { color: var(--color-text-muted); font-size: var(--font-size-label); font-variant-numeric: tabular-nums; }
+.vault-item__head input { width: 100%; min-height: 32px; padding: 0 var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; }
+.vault-item audio, .recorder audio { width: 100%; height: 36px; }
+.vault-item__foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+
+/* The recorder: one big button, the time, and your script above it. */
+.recorder { width: min(100%, 480px); }
+.recorder__script { padding: var(--space-3) var(--space-4); border-left: 3px solid var(--color-accent-text); border-radius: var(--radius-control); background: var(--color-surface-raised); }
+.recorder__script small { color: var(--color-text-muted); font-size: var(--font-size-label); }
+.recorder__script p { margin: var(--space-1) 0 0; color: var(--color-text); font-size: var(--font-size-body); line-height: 1.5; }
+.recorder__stage { display: grid; justify-items: center; gap: var(--space-2); padding: var(--space-4) 0; }
+.recorder__stage b { font-size: var(--font-size-title); font-variant-numeric: tabular-nums; }
+.recorder__stage small { color: var(--color-text-muted); font-size: var(--font-size-meta); }
+.recorder__stage .recorder__warn { color: var(--color-warn, #d69e2e); }
+.recorder__button { display: grid; place-items: center; width: 72px; height: 72px; border: 0; border-radius: 50%; background: var(--color-accent); color: #fff; cursor: pointer; }
+.recorder__button.is-recording { background: var(--color-danger, #e53e3e); }
+.recorder__button.is-recording span { width: 22px; height: 22px; border-radius: 4px; background: #fff; }
+.recorder__button:disabled { opacity: 0.5; cursor: default; }
+
+/* Picking recordings: value, recording dropdown, a player under it. */
+.voicemail-assign { display: grid; gap: var(--space-3); }
+.voicemail-row select { min-height: 36px; max-width: 260px; padding: 0 var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-size: var(--font-size-meta); }
+.voicemail-assign__vault { justify-self: start; }
+
+/* A canvas node's own settings, in a panel on the right; the canvas stays in view. */
+.flow-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 60; display: grid; align-content: start; gap: var(--space-4); width: min(440px, 100vw); padding: var(--space-5); overflow-y: auto; border-left: 1px solid var(--color-border-strong); background: var(--color-surface); box-shadow: var(--shadow-dialog); }
+.flow-panel header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.flow-panel h2 { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--font-size-title); }
+.flow-panel .close-button { position: static; }

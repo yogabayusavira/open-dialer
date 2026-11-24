@@ -53,6 +53,7 @@ import {
   LayoutDashboard,
   ScrollText,
   Workflow,
+  Voicemail,
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
@@ -102,8 +103,9 @@ type CallRecord = {
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
 type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[]; voicemail?: VoicemailSettings };
-// Voicemail drop: which variable picks the recording, and one recording per value ("*" = everyone else).
-type VoicemailSettings = { variable: string; files: Record<string, { name: string; size: number; updatedAt: string }> };
+// Voicemail drop: which variable picks the recording, and which vault recording each value plays ("*" = everyone else).
+type VoicemailSettings = { variable: string; use: Record<string, string> };
+type Recording = { id: string; name: string; size: number; seconds: number; createdAt: string };
 type CleanRule = { from: string; to: string; notes: string };
 // A won lead is worth its own value if set, else its campaign's deal value.
 function dealValue(lead: Lead, settings: Record<string, CampaignSettings>) {
@@ -120,6 +122,7 @@ type State = {
   callbackReachable?: boolean;
   settings?: { bookingUrl?: string; fields?: string[] };
   ai?: { provider?: string; model?: string; hint?: string; ready: boolean };
+  voicemails?: Recording[];
   me: Member;
   workspace: { id: string; name: string };
   team: Member[];
@@ -131,7 +134,7 @@ type Member = { id: string; name: string; role: "owner" | "caller"; email?: stri
 type LinkResult = { emailed?: boolean; link?: string; emailError?: string };
 type NumberOption = { sid: string; number: string; label: string };
 type Session = { authenticated: boolean };
-type Screen = "home" | "queue" | "scripts" | "automations" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "analytics" | "settings";
+type Screen = "home" | "queue" | "scripts" | "automations" | "voicemails" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "analytics" | "settings";
 type SettingsArea = "general" | "account";
 type SettingsPage =
   | "numbers"
@@ -159,6 +162,7 @@ const nav = [
   { id: "dashboard", key: "queue", label: "Dialer", icon: Activity, sub: true },
   { id: "scripts", key: "scripts", label: "Scripts", icon: ScrollText, sub: true },
   { id: "automations", key: "automations", label: "Automations", icon: Workflow, sub: true },
+  { id: "voicemails", key: "voicemails", label: "Voicemails", icon: Voicemail, sub: true },
   { id: "analytics", key: "analytics", label: "Analytics", icon: ChartColumn, sub: true },
   { id: "leads", key: "leads", label: "Leads", icon: Users },
   { id: "calls", key: "calls", label: "Calls", icon: Phone },
@@ -286,17 +290,18 @@ function voicemailFollowUp() {
 }
 
 // Which recording a lead gets: its campaign with voicemail recordings, and the value of the variable that campaign picks.
-function voicemailFor(lead: Lead, settings: Record<string, CampaignSettings>) {
-  const campaign = [scriptCampaignOf(lead, settings), ...(lead.campaigns || [])].find((name) => name && Object.keys(settings[name]?.voicemail?.files || {}).length);
+function voicemailFor(lead: Lead, settings: Record<string, CampaignSettings>, vault: Recording[] = []) {
+  const campaign = [scriptCampaignOf(lead, settings), ...(lead.campaigns || [])].find((name) => name && Object.keys(settings[name]?.voicemail?.use || {}).length);
   if (!campaign) return null;
   const config = settings[campaign];
   const value = config.voicemail!.variable ? rawVariable(config.voicemail!.variable, lead, config.variables).trim().toLowerCase() : "";
-  const files = config.voicemail!.files;
-  const key = files[value] ? value : files["*"] ? "*" : "";
-  return key ? { campaign, value, name: files[key].name } : null;
+  const use = config.voicemail!.use;
+  const recording = vault.find((item) => item.id === (use[value] || use["*"]));
+  return recording ? { campaign, value, name: recording.name } : null;
 }
 
-// Browser recordings come out as WebM, which Twilio can't play: decode and save as a 16 kHz mono WAV.
+// Browser recordings come out as WebM, which Twilio can't play: decode, trim the silence at both ends, bring the
+// loudest part up to a steady level, and save as a 16 kHz mono WAV. Returns the file and its length in seconds.
 async function toWav(blob: Blob) {
   const decoded = await new AudioContext().decodeAudioData(await blob.arrayBuffer());
   const rate = 16000;
@@ -305,15 +310,28 @@ async function toWav(blob: Blob) {
   source.buffer = decoded;
   source.connect(offline.destination);
   source.start();
-  const samples = (await offline.startRendering()).getChannelData(0);
+  const all = (await offline.startRendering()).getChannelData(0);
+  const loud = (sample: number) => Math.abs(sample) > 0.02;
+  const pad = Math.round(rate * 0.25);
+  const first = all.findIndex(loud);
+  let last = all.length - 1;
+  while (last > 0 && !loud(all[last])) last--;
+  const samples = first < 0 ? all : all.slice(Math.max(0, first - pad), Math.min(all.length, last + pad));
+  const peak = samples.reduce((max, sample) => Math.max(max, Math.abs(sample)), 0) || 1;
+  const gain = Math.min(4, 0.9 / peak);
   const view = new DataView(new ArrayBuffer(44 + samples.length * 2));
   const text = (at: number, value: string) => [...value].forEach((char, index) => view.setUint8(at + index, char.charCodeAt(0)));
   text(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); text(8, "WAVE"); text(12, "fmt ");
   view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, rate, true);
   view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); text(36, "data"); view.setUint32(40, samples.length * 2, true);
-  samples.forEach((sample, index) => view.setInt16(44 + index * 2, Math.max(-1, Math.min(1, sample)) * 0x7fff, true));
-  return new Blob([view], { type: "audio/wav" });
+  samples.forEach((sample, index) => view.setInt16(44 + index * 2, Math.max(-1, Math.min(1, sample * gain)) * 0x7fff, true));
+  return { blob: new Blob([view], { type: "audio/wav" }), seconds: Math.round(samples.length / rate) };
 }
+// The length of an uploaded MP3 or WAV, when the browser can read it.
+async function audioSeconds(blob: Blob) {
+  try { return Math.round((await new AudioContext().decodeAudioData(await blob.arrayBuffer())).duration); } catch { return 0; }
+}
+const clockOf = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 const blobToBase64 = (blob: Blob) => new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1] || ""); reader.onerror = () => reject(reader.error); reader.readAsDataURL(blob); });
 
 function usesAppPhone(connection: Connection | null | undefined) {
@@ -710,7 +728,7 @@ function Welcome({ token, onDone }: { token: string; onDone: () => void }) {
 // The current screen (and the open lead on the dashboard) lives in the address, e.g. #dashboard/lead_123,
 // so reload, back/forward and bookmarks keep it.
 // #dashboard stays the Dialer so old links keep working; the Dashboard page is #home.
-const screenHashes: Record<Screen, string> = { home: "home", queue: "dashboard", scripts: "scripts", automations: "automations", campaigns: "campaigns", leads: "leads", calls: "calls", followups: "tasks", activity: "activity", pipeline: "pipeline", analytics: "analytics", settings: "settings" };
+const screenHashes: Record<Screen, string> = { home: "home", queue: "dashboard", scripts: "scripts", automations: "automations", voicemails: "voicemails", campaigns: "campaigns", leads: "leads", calls: "calls", followups: "tasks", activity: "activity", pipeline: "pipeline", analytics: "analytics", settings: "settings" };
 // The logo is the owner's artwork; which color version shows is set in CSS by theme.
 function Brand() {
   return (
@@ -1180,7 +1198,7 @@ function App() {
             )}
           </div>
           <div className="top-actions">
-            {(screen === "home" || screen === "leads" || screen === "pipeline" || screen === "analytics" || screen === "scripts" || screen === "automations") && picker}
+            {(screen === "home" || screen === "leads" || screen === "pipeline" || screen === "analytics" || screen === "scripts" || screen === "automations" || screen === "voicemails") && picker}
             <button
               className="quick-tour-button"
               onClick={() => setGuideOpen(true)}
@@ -1208,9 +1226,9 @@ function App() {
               if (activeCall.call) activeCall.call.disconnect();
               else setActiveCall(null);
             }}
-            voicemail={voicemailFor(activeCall.lead, state.campaignSettings || {})?.name || null}
+            voicemail={voicemailFor(activeCall.lead, state.campaignSettings || {}, state.voicemails)?.name || null}
             onDropVoicemail={async () => {
-              const pick = voicemailFor(activeCall.lead, state.campaignSettings || {});
+              const pick = voicemailFor(activeCall.lead, state.campaignSettings || {}, state.voicemails);
               if (!pick || !activeCall.callId) return;
               droppedVoicemail.current = pick.name;
               try {
@@ -1374,7 +1392,8 @@ function App() {
           />
         )}
         {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={activeCampaign} onEdit={editCampaign} />}
-        {screen === "automations" && <AutomationsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={activeCampaign} onPick={setCampaign} onEdit={editCampaign} />}
+        {screen === "automations" && <AutomationsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={activeCampaign} vault={state.voicemails || []} onPick={setCampaign} onEdit={editCampaign} onRefresh={refresh} onOpenVault={() => setScreen("voicemails")} />}
+        {screen === "voicemails" && <VoicemailsPage vault={state.voicemails || []} settings={state.campaignSettings || {}} campaign={activeCampaign} onRefresh={refresh} onNotice={setNotice} />}
         {screen === "campaigns" && (
           <Campaigns
             leads={state.leads}
@@ -1413,6 +1432,8 @@ function App() {
           columns={[...new Set([...(state.settings?.fields || []), ...state.leads.filter((lead) => !scriptFor || lead.campaigns?.includes(scriptFor)).flatMap((lead) => Object.keys(lead.details || {}))])].sort()}
           leads={state.leads.filter((lead) => lead.campaigns?.includes(scriptFor))}
           aiReady={Boolean(state.ai?.ready)}
+          vault={state.voicemails || []}
+          onOpenVault={() => { setScriptFor(null); setScreen("voicemails"); }}
           onImport={() => { setCampaign(scriptFor); setScriptFor(null); setImportOpen("campaign"); }}
           onViewPdf={() => setPdfFor(scriptFor)}
           onClose={() => setScriptFor(null)}
@@ -3417,7 +3438,7 @@ function VariableMap({ names, value, columns, onChange, auto }: { names: string[
 // One campaign's settings, one part at a time from a sidebar: General (name, deal value, leads), Script (text, PDF),
 // Variables (what fills each {{variable}}, and how AI should clean it). Every part stays mounted, so switching keeps edits.
 type CampaignTab = "general" | "script" | "variables" | "voicemail";
-function ScriptDialog({ campaign, initialTab = "script", settings, columns, leads, aiReady, onImport, onViewPdf, onClose, onChanged }: { campaign: string; initialTab?: CampaignTab; settings: CampaignSettings; columns: string[]; leads: Lead[]; aiReady: boolean; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
+function ScriptDialog({ campaign, initialTab = "script", settings, columns, leads, aiReady, vault = [], onOpenVault = () => {}, onImport, onViewPdf, onClose, onChanged }: { campaign: string; initialTab?: CampaignTab; settings: CampaignSettings; columns: string[]; leads: Lead[]; aiReady: boolean; vault?: Recording[]; onOpenVault?: () => void; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   // An empty campaign name means a new campaign: name it, write the script, then import its leads.
   const isNew = !campaign;
@@ -3513,7 +3534,7 @@ function ScriptDialog({ campaign, initialTab = "script", settings, columns, lead
             </section>
             {!isNew && (
               <section hidden={tab !== "voicemail"} className="campaign-settings__section">
-                <VoicemailSettingsPanel campaign={campaign} settings={settings} leads={leads} columns={columns} scriptNames={names} onChanged={(message) => onChanged(message, false, campaign)} />
+                <VoicemailAssign campaign={campaign} settings={settings} leads={leads} columns={columns} scriptNames={names} vault={vault} onChanged={() => onChanged("Saved.", false, campaign)} onOpenVault={onOpenVault} />
               </section>
             )}
             <section hidden={tab !== "variables"} className="campaign-settings__section">
@@ -3548,86 +3569,176 @@ function ScriptDialog({ campaign, initialTab = "script", settings, columns, lead
   );
 }
 
-// Voicemail drop recordings for one campaign: pick the variable that decides which message a lead gets, then
-// record or upload one per value, plus one for everyone else. Saved right away, like the script PDF.
-function VoicemailSettingsPanel({ campaign, settings, leads, columns, scriptNames, onChanged }: { campaign: string; settings: CampaignSettings; leads: Lead[]; columns: string[]; scriptNames: string[]; onChanged: (message: string) => Promise<void> }) {
-  const voicemail = settings.voicemail || { variable: "", files: {} };
-  const [variable, setVariable] = useState(voicemail.variable);
-  const [busy, setBusy] = useState<string | null>(null);
+// Which vault recording a campaign plays: pick the variable that decides (or one for everyone), then a recording
+// per value plus one for everyone else. New recordings are made on the Voicemails page. Saved right away.
+function VoicemailAssign({ campaign, settings, leads, columns, scriptNames, vault, onChanged, onOpenVault }: { campaign: string; settings: CampaignSettings; leads: Lead[]; columns: string[]; scriptNames: string[]; vault: Recording[]; onChanged: () => Promise<unknown>; onOpenVault: () => void }) {
+  // Settings saved before the vault had no "use" list; read those as nothing picked yet.
+  const voicemail = { variable: settings.voicemail?.variable || "", use: settings.voicemail?.use || {} };
   const [error, setError] = useState<string | null>(null);
-  const [recording, setRecording] = useState<{ key: string; recorder: MediaRecorder } | null>(null);
-  const [version, setVersion] = useState(0);
+  const variable = voicemail.variable;
   const choices = [...new Set([...scriptNames, ...columns])];
-  // Each value the chosen variable has in this campaign's leads, most common first.
   const counts = new Map<string, number>();
   if (variable) for (const lead of leads) { const value = rawVariable(variable, lead, settings.variables).trim().toLowerCase(); if (value) counts.set(value, (counts.get(value) || 0) + 1); }
   const rows: [string, string][] = [...[...counts.entries()].sort((a, b) => b[1] - a[1]).map(([value, count]) => [value, `${value} (${count})`] as [string, string]), ["*", variable ? "Everyone else" : "Everyone"]];
-  const run = async (key: string, work: () => Promise<unknown>, message: string) => {
-    setBusy(key);
+  const save = async (change: Record<string, unknown>) => {
     setError(null);
     try {
-      await work();
-      await onChanged(message);
-      setVersion((current) => current + 1);
+      await api("/api/campaigns/voicemail", { method: "PUT", body: JSON.stringify({ campaign, ...change }) });
+      await onChanged();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Couldn't save the recording.");
-    } finally {
-      setBusy(null);
-    }
-  };
-  const upload = (key: string, blob: Blob, fileName: string) => run(key, async () => {
-    if (blob.size > 3_500_000) throw new Error("That recording is over 3.5 MB. Keep voicemails under a minute or so.");
-    await api("/api/campaigns/voicemail", { method: "POST", body: JSON.stringify({ campaign, value: key, fileName, data: await blobToBase64(blob) }) });
-  }, "Voicemail recording saved.");
-  const record = async (key: string) => {
-    if (recording) {
-      recording.recorder.stop();
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      const chunks: Blob[] = [];
-      recorder.ondataavailable = (event) => chunks.push(event.data);
-      recorder.onstop = () => {
-        stream.getTracks().forEach((track) => track.stop());
-        setRecording(null);
-        void toWav(new Blob(chunks, { type: recorder.mimeType })).then((wav) => upload(key, wav, "Recorded voicemail.wav"));
-      };
-      recorder.start();
-      setRecording({ key, recorder });
-    } catch {
-      setError("Allow the microphone for this site to record, or upload an MP3 or WAV instead.");
+      setError(cause instanceof Error ? cause.message : "Couldn't save.");
     }
   };
   return (
-    <>
-      <p className="campaign-settings__hint">During a call, press Drop voicemail at the beep: your recording plays into their voicemail, the call ends, and it's logged as a voicemail with a follow-up. In the US, prerecorded messages to cell phones need the person's prior consent.</p>
+    <div className="voicemail-assign">
+      <p className="campaign-settings__hint">Press Drop voicemail at the beep and the lead gets the recording picked here. In the US, prerecorded messages to cell phones need the person's prior consent.</p>
       {error && <p className="form-error" role="alert">{error}</p>}
       <label>
         Pick the message by
-        <select value={variable} onChange={(event) => { const next = event.target.value; setVariable(next); void run("variable", () => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign, voicemailVariable: next }) }), "Saved."); }}>
+        <select value={variable} onChange={(event) => void save({ variable: event.target.value })}>
           <option value="">One message for everyone</option>
           {choices.map((name) => <option key={name} value={name}>{name}</option>)}
         </select>
       </label>
       <div className="voicemail-list">
         {rows.map(([key, label]) => {
-          const file = voicemail.files[key];
+          const picked = vault.find((item) => item.id === voicemail.use[key]);
           return (
             <div className="voicemail-row" key={key}>
-              <span><b>{label}</b><small>{file ? file.name : "No recording yet"}</small></span>
-              {file && <audio controls preload="none" src={`/api/campaigns/voicemail?campaign=${encodeURIComponent(campaign)}&value=${encodeURIComponent(key)}&v=${version}`} />}
-              <div className="voicemail-row__actions">
-                <button type="button" className={recording?.key === key ? "primary-button" : "quiet-button"} disabled={Boolean(busy) || Boolean(recording && recording.key !== key)} onClick={() => void record(key)}><Mic size={15} aria-hidden="true" /> {recording?.key === key ? "Stop and save" : file ? "Re-record" : "Record"}</button>
-                <label className="quiet-button script-dialog__file">Upload<input type="file" accept="audio/mpeg,audio/wav,.mp3,.wav" onChange={(event) => { const picked = event.target.files?.[0]; if (picked) void upload(key, picked, picked.name); event.target.value = ""; }} /></label>
-                {file && <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={() => void run(key, () => api(`/api/campaigns/voicemail?campaign=${encodeURIComponent(campaign)}&value=${encodeURIComponent(key)}`, { method: "DELETE" }), "Recording removed.")}>Remove</button>}
-              </div>
+              <span><b>{label}</b><small>{picked ? clockOf(picked.seconds) : "No recording"}</small></span>
+              <select value={picked?.id || ""} aria-label={`Recording for ${label}`} onChange={(event) => void save({ value: key, recordingId: event.target.value || null })}>
+                <option value="">{vault.length ? "None" : "No recordings yet"}</option>
+                {vault.map((item) => <option key={item.id} value={item.id}>{item.name} ({clockOf(item.seconds)})</option>)}
+              </select>
+              {picked && <audio controls preload="none" src={`/api/voicemails/${picked.id}/audio`} />}
             </div>
           );
         })}
       </div>
-    </>
+      <button type="button" className="quiet-button voicemail-assign__vault" onClick={onOpenVault}><Mic size={15} aria-hidden="true" /> Record or upload in Voicemails</button>
+    </div>
+  );
+}
+
+// A focused recorder: name it, record (your script stays in view), listen back, retake or save. Upload works too.
+function RecorderDialog({ script, onClose, onSaved }: { script: string; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+  const [name, setName] = useState("");
+  const [state, setState] = useState<"idle" | "recording" | "ready" | "saving">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [take, setTake] = useState<{ blob: Blob; seconds: number; url: string; fileName: string } | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const recorder = useRef<MediaRecorder | null>(null);
+  useEffect(() => {
+    if (state !== "recording") return;
+    const started = Date.now();
+    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 250);
+    return () => window.clearInterval(timer);
+  }, [state]);
+  useEffect(() => () => { if (take) URL.revokeObjectURL(take.url); }, [take]);
+  const start = async () => {
+    setError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const media = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      media.ondataavailable = (event) => chunks.push(event.data);
+      media.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop());
+        void toWav(new Blob(chunks, { type: media.mimeType })).then(({ blob, seconds }) => { setTake({ blob, seconds, url: URL.createObjectURL(blob), fileName: "recording.wav" }); setState("ready"); }).catch(() => { setError("Couldn't read that recording. Try again."); setState("idle"); });
+      };
+      recorder.current = media;
+      setElapsed(0);
+      media.start();
+      setState("recording");
+    } catch {
+      setError("Allow the microphone for this site to record, or upload an MP3 or WAV instead.");
+    }
+  };
+  const upload = async (file: File | undefined) => {
+    if (!file) return;
+    setTake({ blob: file, seconds: await audioSeconds(file), url: URL.createObjectURL(file), fileName: file.name });
+    if (!name.trim()) setName(file.name.replace(/\.(mp3|wav)$/i, ""));
+    setState("ready");
+  };
+  const save = async () => {
+    if (!take) return;
+    if (take.blob.size > 3_500_000) return setError("That recording is over 3.5 MB. Keep voicemails short.");
+    setState("saving");
+    try {
+      await api("/api/voicemails", { method: "POST", body: JSON.stringify({ name: name.trim() || "Voicemail", seconds: take.seconds, data: await blobToBase64(take.blob) }) });
+      await onSaved(`${name.trim() || "Voicemail"} saved.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Couldn't save the recording.");
+      setState("ready");
+    }
+  };
+  return (
+    <div className="modal-backdrop">
+      <section className="lead-form recorder" role="dialog" aria-modal="true" aria-labelledby="recorder-title">
+        <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
+        <h2 id="recorder-title">New voicemail</h2>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="No website, friendly" maxLength={80} autoFocus /></label>
+        {script && <div className="recorder__script"><small>What to say</small><p>{script}</p></div>}
+        <div className="recorder__stage">
+          {state === "recording"
+            ? <button type="button" className="recorder__button is-recording" onClick={() => recorder.current?.stop()} aria-label="Stop recording"><span /></button>
+            : <button type="button" className="recorder__button" onClick={() => void start()} disabled={state === "saving"} aria-label={take ? "Record again" : "Start recording"}><Mic size={28} aria-hidden="true" /></button>}
+          <b>{state === "recording" ? clockOf(elapsed) : take ? clockOf(take.seconds) : "0:00"}</b>
+          <small>{state === "recording" ? "Recording. Press to stop." : take ? "Listen back, then save or record again." : "Press to record."}</small>
+          {state === "recording" && elapsed >= 30 && <small className="recorder__warn">Over 30 seconds: many voicemail boxes cut off around here.</small>}
+          {take && state !== "recording" && <audio controls src={take.url} />}
+          {take && take.seconds > 30 && state !== "recording" && <small className="recorder__warn">{clockOf(take.seconds)} long. Many voicemail boxes cut off around 30 seconds.</small>}
+        </div>
+        <div className="task-dialog__actions">
+          <label className="quiet-button script-dialog__file">Upload MP3 or WAV<input type="file" accept="audio/mpeg,audio/wav,.mp3,.wav" onChange={(event) => { void upload(event.target.files?.[0]); event.target.value = ""; }} /></label>
+          <button type="button" className="primary-button" disabled={!take || state !== "ready"} onClick={() => void save()}>{state === "saving" ? "Saving…" : "Save to Voicemails"}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+// The voicemail vault: every recording once, reusable in any campaign.
+function VoicemailsPage({ vault, settings, campaign, onRefresh, onNotice }: { vault: Recording[]; settings: Record<string, CampaignSettings>; campaign: string; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
+  const [recording, setRecording] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const usedIn = (id: string) => Object.entries(settings).filter(([, config]) => Object.values(config.voicemail?.use || {}).includes(id)).map(([name]) => name);
+  // While recording, the picked campaign's first voicemail line (a Note or line mentioning voicemail) is shown as a prompt.
+  const prompt = (settings[campaign]?.script || "").split("\n").map((line) => line.trim()).find((line) => /voicemail/i.test(line) && line.length > 20)?.replace(/^(>|note:|example:)\s*/i, "") || "";
+  const act = async (work: () => Promise<unknown>, message: string) => {
+    try { await work(); await onRefresh(); onNotice(message); } catch (cause) { onNotice(cause instanceof Error ? cause.message : "Something went wrong."); }
+  };
+  return (
+    <section className="campaigns-page">
+      <div className="campaigns-head">
+        <p>Your recorded voicemails. Record once, then pick them in any campaign's automations.</p>
+        <div className="campaigns-head__actions"><button type="button" className="primary-button" onClick={() => setRecording(true)}><Mic size={16} aria-hidden="true" /> New voicemail</button></div>
+      </div>
+      {!vault.length && <div className="empty-state">No voicemails yet. Press New voicemail to record one in your own voice, or upload an MP3.</div>}
+      <div className="vault-list">
+        {vault.map((item) => {
+          const campaigns = usedIn(item.id);
+          return (
+            <article className="vault-item" key={item.id}>
+              <div className="vault-item__head">
+                {renaming === item.id
+                  ? <form onSubmit={(event) => { event.preventDefault(); setRenaming(null); void act(() => api(`/api/voicemails/${item.id}`, { method: "PATCH", body: JSON.stringify({ name: draft }) }), "Renamed."); }}><input value={draft} onChange={(event) => setDraft(event.target.value)} autoFocus maxLength={80} aria-label="New name" onBlur={() => setRenaming(null)} /></form>
+                  : <button type="button" className="vault-item__name" title="Rename" onClick={() => { setRenaming(item.id); setDraft(item.name); }}>{item.name}</button>}
+                <small>{clockOf(item.seconds)}{item.seconds > 30 ? " · long" : ""}</small>
+              </div>
+              <audio controls preload="none" src={`/api/voicemails/${item.id}/audio`} />
+              <div className="vault-item__foot">
+                <small>{campaigns.length ? `Used in ${campaigns.join(", ")}` : "Not used in a campaign yet"}</small>
+                <button type="button" className="text-link" onClick={() => { if (window.confirm(`Delete ${item.name}?${campaigns.length ? " Campaigns using it will stop dropping it." : ""}`)) void act(() => api(`/api/voicemails/${item.id}`, { method: "DELETE" }), `${item.name} deleted.`); }}>Delete</button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+      {recording && <RecorderDialog script={prompt} onClose={() => setRecording(false)} onSaved={async (message) => { setRecording(false); await onRefresh(); onNotice(message); }} />}
+    </section>
   );
 }
 
@@ -3921,7 +4032,7 @@ function scriptRules(text = "") {
 }
 // Which values have a voicemail recording, "*" read as everyone else.
 function voicemailValues(settings: CampaignSettings) {
-  return Object.keys(settings.voicemail?.files || {}).sort((left, right) => (left === "*" ? 1 : right === "*" ? -1 : left.localeCompare(right))).map((value) => (value === "*" ? "Everyone else" : value));
+  return Object.keys(settings.voicemail?.use || {}).sort((left, right) => (left === "*" ? 1 : right === "*" ? -1 : left.localeCompare(right))).map((value) => (value === "*" ? "Everyone else" : value));
 }
 
 // One card per campaign: what its script has, with links into that campaign's Settings popup.
@@ -4016,8 +4127,9 @@ function FlowLane({ trigger, middle, outputs }: { trigger: FlowNode; middle?: Fl
 
 // What runs on its own in a campaign, drawn like a workflow canvas: script lines picked per lead, voicemail drops
 // and AI cleanup. Every node opens the part of the campaign's Settings where it's set.
-function AutomationsPage({ leads, settings, campaign, onPick, onEdit }: { leads: Lead[]; settings: Record<string, CampaignSettings>; campaign: string; onPick: (name: string) => void; onEdit: (name: string, tab: CampaignTab) => void }) {
+function AutomationsPage({ leads, settings, campaign, vault, onPick, onEdit, onRefresh, onOpenVault }: { leads: Lead[]; settings: Record<string, CampaignSettings>; campaign: string; vault: Recording[]; onPick: (name: string) => void; onEdit: (name: string, tab: CampaignTab) => void; onRefresh: () => Promise<unknown>; onOpenVault: () => void }) {
   const names = allCampaigns(leads, settings);
+  const [panel, setPanel] = useState<"voicemail" | null>(null);
   if (!names.length) return <section className="campaigns-page"><div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div></section>;
   if (!campaign || !names.includes(campaign)) {
     return (
@@ -4041,7 +4153,10 @@ function AutomationsPage({ leads, settings, campaign, onPick, onEdit }: { leads:
   const own = settings[campaign] || {};
   const edit = (tab: CampaignTab) => () => onEdit(campaign, tab);
   const chains = scriptChains(own.script);
-  const recordings = Object.keys(own.voicemail?.files || {}).sort((left, right) => (left === "*" ? 1 : right === "*" ? -1 : left.localeCompare(right)));
+  const recordings = Object.keys(own.voicemail?.use || {}).filter((key) => vault.some((item) => item.id === own.voicemail!.use[key])).sort((left, right) => (left === "*" ? 1 : right === "*" ? -1 : left.localeCompare(right)));
+  const openVoicemail = () => setPanel("voicemail");
+  const campaignLeads = leads.filter((lead) => lead.campaigns?.includes(campaign));
+  const columns = [...new Set(campaignLeads.flatMap((lead) => Object.keys(lead.details || {})))].sort();
   const cleaned = Object.entries(own.clean || {});
   return (
     <section className="flow-page">
@@ -4061,11 +4176,11 @@ function AutomationsPage({ leads, settings, campaign, onPick, onEdit }: { leads:
           <h3>Voicemail drop</h3>
           {recordings.length ? (
             <FlowLane
-              trigger={{ kind: "trigger", title: "You press Drop voicemail", detail: "At the beep", onClick: edit("voicemail") }}
-              middle={own.voicemail?.variable ? { kind: "switch", title: `Check {{${own.voicemail.variable}}}`, detail: `${recordings.length} recording${recordings.length === 1 ? "" : "s"}`, onClick: edit("voicemail") } : undefined}
-              outputs={recordings.map((key) => ({ kind: "action", title: key === "*" ? (own.voicemail?.variable ? "Everyone else" : "Everyone") : `If ${key}`, detail: `Play ${own.voicemail!.files[key].name}, hang up, follow up in 2 days`, onClick: edit("voicemail") }))}
+              trigger={{ kind: "trigger", title: "You press Drop voicemail", detail: "At the beep", onClick: openVoicemail }}
+              middle={own.voicemail?.variable ? { kind: "switch", title: `Check {{${own.voicemail.variable}}}`, detail: `${recordings.length} recording${recordings.length === 1 ? "" : "s"}`, onClick: openVoicemail } : undefined}
+              outputs={recordings.map((key) => ({ kind: "action", title: key === "*" ? (own.voicemail?.variable ? "Everyone else" : "Everyone") : `If ${key}`, detail: `Play ${vault.find((item) => item.id === own.voicemail!.use[key])?.name}, hang up, follow up in 2 days`, onClick: openVoicemail }))}
             />
-          ) : <FlowLane trigger={{ kind: "trigger", title: "You press Drop voicemail", detail: "At the beep" }} outputs={[{ kind: "empty", title: "Record a voicemail", detail: "One for everyone, or one per value", onClick: edit("voicemail") }]} />}
+          ) : <FlowLane trigger={{ kind: "trigger", title: "You press Drop voicemail", detail: "At the beep" }} outputs={[{ kind: "empty", title: "Add a voicemail", detail: "Pick one from your Voicemails", onClick: openVoicemail }]} />}
         </section>
         <section className="flow-section">
           <h3>AI cleanup</h3>
@@ -4077,6 +4192,15 @@ function AutomationsPage({ leads, settings, campaign, onPick, onEdit }: { leads:
           ) : <FlowLane trigger={{ kind: "trigger", title: "Next 5 leads", detail: "While you call" }} outputs={[{ kind: "empty", title: "Clean a variable with AI", detail: "Give an example of how you'd say it", onClick: edit("variables") }]} />}
         </section>
       </div>
+      {panel === "voicemail" && (
+        <aside className="flow-panel" role="dialog" aria-labelledby="flow-panel-title">
+          <header>
+            <h2 id="flow-panel-title"><Voicemail size={18} aria-hidden="true" /> Voicemail drop</h2>
+            <button type="button" className="close-button" onClick={() => setPanel(null)} aria-label="Close"><X size={18} /></button>
+          </header>
+          <VoicemailAssign campaign={campaign} settings={own} leads={campaignLeads} columns={columns} scriptNames={scriptVariables(own.script || "")} vault={vault} onChanged={onRefresh} onOpenVault={onOpenVault} />
+        </aside>
+      )}
     </section>
   );
 }
