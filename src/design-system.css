@@ -1290,3 +1290,12 @@ button.flow-node:hover { border-color: var(--color-accent-text); transform: tran
 .flow-panel header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .flow-panel h2 { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--font-size-title); }
 .flow-panel .close-button { position: static; }
+
+/* Call bar: which microphone, and a live level so a silent mic is obvious. */
+.mic-pick { display: inline-flex; align-items: center; gap: var(--space-2); }
+.mic-pick__meter { position: relative; width: 36px; height: 6px; overflow: hidden; border-radius: 3px; background: var(--color-border); }
+.mic-pick__meter i { position: absolute; inset: 0 auto 0 0; background: var(--color-good, #3fb27f); transition: width 80ms linear; }
+.mic-pick__meter.is-silent { background: var(--color-danger, #e53e3e); }
+.mic-pick select { max-width: 170px; min-height: 32px; padding: 0 var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-size: var(--font-size-meta); }
+.mic-pick__warn { flex-basis: 100%; color: var(--color-danger, #e53e3e); font-size: var(--font-size-meta); font-weight: 600; }
+.in-call-bar { flex-wrap: wrap; width: min(900px, calc(100vw - 2 * var(--space-4))); }

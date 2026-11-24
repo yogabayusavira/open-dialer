@@ -273,6 +273,8 @@ async function getPhone(accountSid: string) {
     phoneDevice.on("error", (error) => console.error("[Open Dialer] phone error", error));
     // Only when switched on; if the browser can't run the leveler, calls still work, just without it.
     if (callVolume.leveler) void phoneDevice.audio?.addProcessor(callLeveler, true).catch((error) => console.error("[Open Dialer] call audio leveler unavailable", error));
+    // The microphone picked in the call bar last time; if it's unplugged, the browser default is used.
+    try { const mic = localStorage.getItem("open-dialer-mic"); if (mic) void phoneDevice.audio?.setInputDevice(mic).catch(() => {}); } catch { /* private mode */ }
   }
   phoneTokenAt = Date.now();
   phoneAccount = accountSid;
@@ -425,6 +427,32 @@ function AutoDialBar({ next, onPause, onSkip, onCallNow, onStop }: { next: { lea
 
 function InCallBar({ active, onMute, onHangUp, onBook, voicemail, onDropVoicemail }: { active: ActiveCall; onMute: () => void; onHangUp: () => void; onBook: () => void; voicemail: string | null; onDropVoicemail: () => Promise<void> }) {
   const [dropping, setDropping] = useState(false);
+  // How loud your microphone is right now (0 to 1), and how long it has been silent, to catch a wrong or dead mic.
+  const [micLevel, setMicLevel] = useState(0);
+  const [silentFor, setSilentFor] = useState(0);
+  const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
+  const [micId, setMicId] = useState(() => phoneDevice?.audio?.inputDevice?.deviceId || "");
+  useEffect(() => {
+    const call = active.call;
+    if (!call) return;
+    let quietSince = Date.now();
+    const onVolume = (input: number) => {
+      setMicLevel(input);
+      if (input > 0.02) quietSince = Date.now();
+      setSilentFor(Math.floor((Date.now() - quietSince) / 1000));
+    };
+    call.on("volume", onVolume);
+    const audio = phoneDevice?.audio;
+    const list = () => { setMics([...(audio?.availableInputDevices.values() || [])].filter((device) => device.deviceId !== "communications")); setMicId(audio?.inputDevice?.deviceId || "default"); };
+    list();
+    audio?.on("deviceChange", list);
+    return () => { call.removeListener("volume", onVolume); audio?.removeListener("deviceChange", list); };
+  }, [active.call]);
+  const pickMic = (deviceId: string) => {
+    setMicId(deviceId);
+    try { localStorage.setItem("open-dialer-mic", deviceId); } catch { /* private mode */ }
+    void phoneDevice?.audio?.setInputDevice(deviceId).catch(() => {});
+  };
   const [, setTick] = useState(0);
   const [keypadOpen, setKeypadOpen] = useState(false);
   const [typed, setTyped] = useState("");
@@ -466,6 +494,13 @@ function InCallBar({ active, onMute, onHangUp, onBook, voicemail, onDropVoicemai
       <button type="button" className="quiet-button" onClick={onMute} disabled={active.status !== "in-call"} aria-pressed={active.muted}>
         {active.muted ? <MicOff size={16} /> : <Mic size={16} />} {active.muted ? "Unmute" : "Mute"}
       </button>
+      <label className="mic-pick" title={live && !active.muted && silentFor >= 5 ? "No sound from this microphone. Pick another one." : "Your microphone"}>
+        <span className={`mic-pick__meter${live && !active.muted && silentFor >= 5 ? " is-silent" : ""}`} aria-hidden="true"><i style={{ width: `${Math.min(100, Math.round(micLevel * 140))}%` }} /></span>
+        <select value={micId} onChange={(event) => pickMic(event.target.value)} aria-label="Microphone">
+          {mics.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || "Microphone"}</option>)}
+        </select>
+      </label>
+      {live && !active.muted && silentFor >= 5 && <small className="mic-pick__warn" role="status">They can't hear you: no sound from this mic. Pick another one.</small>}
       <CallVolume />
       {voicemail && <button type="button" className="quiet-button" disabled={!live || dropping} title={`At the beep: plays "${voicemail}" into their voicemail, hangs up and logs a voicemail`} onClick={() => { setDropping(true); void onDropVoicemail().finally(() => setDropping(false)); }}><MessageSquare size={16} /> {dropping ? "Dropping…" : "Drop voicemail"}</button>}
       <button type="button" className="quiet-button" onClick={() => setKeypadOpen((open) => !open)} disabled={!live} aria-expanded={keypadOpen}>
