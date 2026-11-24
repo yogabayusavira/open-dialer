@@ -1185,3 +1185,6 @@ button.se-var:hover { border-color: var(--color-text-muted); }
 .call-list__views small { color: var(--color-text-faint, var(--color-text-muted)); font-size: var(--font-size-label); font-variant-numeric: tabular-nums; }
 .call-list__filters select { min-height: 32px; padding: 0 var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-input, var(--color-surface)); color: var(--color-text); font: inherit; font-size: var(--font-size-meta); }
 .call-list__empty { margin: 0; padding: var(--space-4) var(--space-3); color: var(--color-text-muted); font-size: var(--font-size-meta); }
+/* Pinnable sections: the pin shows on the section title too; a pinned section sits under the pinned cards, open. */
+summary:hover .pin-button, summary .pin-button.is-pinned { opacity: 1; }
+.call-more.is-pinned-section { margin-top: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-control); padding: 0 var(--space-3); background: var(--color-surface-raised); }

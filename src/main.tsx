@@ -2116,9 +2116,18 @@ function Queue({
       onNotice(error instanceof Error ? error.message : "Couldn't pin that.");
     }
   };
-  const pin = (label: string) => (pinCampaign && state.me.role === "owner"
-    ? <button type="button" className={`pin-button${pinned.includes(label) ? " is-pinned" : ""}`} aria-pressed={pinned.includes(label)} aria-label={`${pinned.includes(label) ? "Unpin" : "Pin"} ${label}`} title={pinned.includes(label) ? `Unpin for ${pinCampaign}` : `Pin to the top for every lead in ${pinCampaign}`} onClick={() => void togglePin(label)}><Pin size={13} aria-hidden="true" /></button>
+  const pin = (label: string, name = label) => (pinCampaign && state.me.role === "owner"
+    ? <button type="button" className={`pin-button${pinned.includes(label) ? " is-pinned" : ""}`} aria-pressed={pinned.includes(label)} aria-label={`${pinned.includes(label) ? "Unpin" : "Pin"} ${name}`} title={pinned.includes(label) ? `Unpin for ${pinCampaign}` : `Pin to the top for every lead in ${pinCampaign}`} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void togglePin(label); }}><Pin size={13} aria-hidden="true" /></button>
     : null);
+  // Whole sections can be pinned too ("@research", "@sources"): they move up under the pinned cards and stay open.
+  const section = (key: "@research" | "@sources", title: string, items: [string, string][]) => items.length > 0 && (
+    <details className={`call-more${pinned.includes(key) ? " is-pinned-section" : ""}`} open={pinned.includes(key) || undefined}>
+      <summary><ChevronRight size={16} aria-hidden="true" /> {title} <small>{items.length}</small>{pin(key, title)}</summary>
+      <dl>{items.map(([label, value]) => <div key={label}><dt>{label}{pin(label)}</dt><dd><DetailValue value={value} /></dd></div>)}</dl>
+    </details>
+  );
+  const researchSection = section("@research", "Research", groups.research);
+  const sourcesSection = section("@sources", "Sources & history", groups.sources);
   // While calling, clean the script values of this lead and the next 4 in the background (5 at a time, saved once).
   const nextFive = [selected, ...upcoming.filter((lead) => lead.id !== selected.id).slice(0, 4)];
   const pending = state.ai?.ready ? cleanupItems(nextFive, state.campaignSettings || {}) : [];
@@ -2281,6 +2290,8 @@ function Queue({
               ))}
             </dl>
           )}
+          {pinned.includes("@sources") && sourcesSection}
+          {pinned.includes("@research") && researchSection}
           {groups.quick.length > 0 && (
             <dl className="call-facts">
               {groups.quick.map(([label, value]) => (
@@ -2320,18 +2331,8 @@ function Queue({
               </div>
             </details>
           )}
-          {groups.research.length > 0 && (
-            <details className="call-more">
-              <summary><ChevronRight size={16} aria-hidden="true" /> Research <small>{groups.research.length}</small></summary>
-              <dl>{groups.research.map(([label, value]) => <div key={label}><dt>{label}{pin(label)}</dt><dd><DetailValue value={value} /></dd></div>)}</dl>
-            </details>
-          )}
-          {groups.sources.length > 0 && (
-            <details className="call-more">
-              <summary><ChevronRight size={16} aria-hidden="true" /> Sources &amp; history <small>{groups.sources.length}</small></summary>
-              <dl>{groups.sources.map(([label, value]) => <div key={label}><dt>{label}{pin(label)}</dt><dd><DetailValue value={value} /></dd></div>)}</dl>
-            </details>
-          )}
+          {!pinned.includes("@research") && researchSection}
+          {!pinned.includes("@sources") && sourcesSection}
         </article>
       </section>
     </div>
