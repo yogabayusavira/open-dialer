@@ -97,7 +97,9 @@ type CallRecord = {
 };
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
-type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[] };
+type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[]; voicemail?: VoicemailSettings };
+// Voicemail drop: which variable picks the recording, and one recording per value ("*" = everyone else).
+type VoicemailSettings = { variable: string; files: Record<string, { name: string; size: number; updatedAt: string }> };
 type CleanRule = { from: string; to: string; notes: string };
 // A won lead is worth its own value if set, else its campaign's deal value.
 function dealValue(lead: Lead, settings: Record<string, CampaignSettings>) {
@@ -265,6 +267,47 @@ async function getPhone(accountSid: string) {
   return phoneDevice;
 }
 
+// A voicemail's follow-up: two business days out at 10:00, as datetime-local text.
+function voicemailFollowUp() {
+  const date = new Date();
+  for (let added = 0; added < 2; ) {
+    date.setDate(date.getDate() + 1);
+    if (date.getDay() !== 0 && date.getDay() !== 6) added += 1;
+  }
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T10:00`;
+}
+
+// Which recording a lead gets: its campaign with voicemail recordings, and the value of the variable that campaign picks.
+function voicemailFor(lead: Lead, settings: Record<string, CampaignSettings>) {
+  const campaign = [scriptCampaignOf(lead, settings), ...(lead.campaigns || [])].find((name) => name && Object.keys(settings[name]?.voicemail?.files || {}).length);
+  if (!campaign) return null;
+  const config = settings[campaign];
+  const value = config.voicemail!.variable ? rawVariable(config.voicemail!.variable, lead, config.variables).trim().toLowerCase() : "";
+  const files = config.voicemail!.files;
+  const key = files[value] ? value : files["*"] ? "*" : "";
+  return key ? { campaign, value, name: files[key].name } : null;
+}
+
+// Browser recordings come out as WebM, which Twilio can't play: decode and save as a 16 kHz mono WAV.
+async function toWav(blob: Blob) {
+  const decoded = await new AudioContext().decodeAudioData(await blob.arrayBuffer());
+  const rate = 16000;
+  const offline = new OfflineAudioContext(1, Math.ceil(decoded.duration * rate), rate);
+  const source = offline.createBufferSource();
+  source.buffer = decoded;
+  source.connect(offline.destination);
+  source.start();
+  const samples = (await offline.startRendering()).getChannelData(0);
+  const view = new DataView(new ArrayBuffer(44 + samples.length * 2));
+  const text = (at: number, value: string) => [...value].forEach((char, index) => view.setUint8(at + index, char.charCodeAt(0)));
+  text(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); text(8, "WAVE"); text(12, "fmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); text(36, "data"); view.setUint32(40, samples.length * 2, true);
+  samples.forEach((sample, index) => view.setInt16(44 + index * 2, Math.max(-1, Math.min(1, sample)) * 0x7fff, true));
+  return new Blob([view], { type: "audio/wav" });
+}
+const blobToBase64 = (blob: Blob) => new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1] || ""); reader.onerror = () => reject(reader.error); reader.readAsDataURL(blob); });
+
 function usesAppPhone(connection: Connection | null | undefined) {
   return !connection?.bridgeNumber || connection.bridgeNumber === "browser";
 }
@@ -288,7 +331,7 @@ function CallVolume() {
   );
 }
 
-type ActiveCall = { lead: Lead; call: Call | null; status: "connecting" | "ringing" | "in-call"; muted: boolean; startedAt: number | null };
+type ActiveCall = { lead: Lead; call: Call | null; status: "connecting" | "ringing" | "in-call"; muted: boolean; startedAt: number | null; callId?: string };
 
 function loadScript(src: string) {
   return new Promise<void>((resolve, reject) => {
@@ -354,7 +397,8 @@ function AutoDialBar({ next, onPause, onSkip, onCallNow, onStop }: { next: { lea
   );
 }
 
-function InCallBar({ active, onMute, onHangUp, onBook }: { active: ActiveCall; onMute: () => void; onHangUp: () => void; onBook: () => void }) {
+function InCallBar({ active, onMute, onHangUp, onBook, voicemail, onDropVoicemail }: { active: ActiveCall; onMute: () => void; onHangUp: () => void; onBook: () => void; voicemail: string | null; onDropVoicemail: () => Promise<void> }) {
+  const [dropping, setDropping] = useState(false);
   const [, setTick] = useState(0);
   const [keypadOpen, setKeypadOpen] = useState(false);
   const [typed, setTyped] = useState("");
@@ -397,6 +441,7 @@ function InCallBar({ active, onMute, onHangUp, onBook }: { active: ActiveCall; o
         {active.muted ? <MicOff size={16} /> : <Mic size={16} />} {active.muted ? "Unmute" : "Mute"}
       </button>
       <CallVolume />
+      {voicemail && <button type="button" className="quiet-button" disabled={!live || dropping} title={`At the beep: plays "${voicemail}" into their voicemail, hangs up and logs a voicemail`} onClick={() => { setDropping(true); void onDropVoicemail().finally(() => setDropping(false)); }}><MessageSquare size={16} /> {dropping ? "Dropping…" : "Drop voicemail"}</button>}
       <button type="button" className="quiet-button" onClick={() => setKeypadOpen((open) => !open)} disabled={!live} aria-expanded={keypadOpen}>
         <Grid3x3 size={16} /> Keypad
       </button>
@@ -800,6 +845,8 @@ function App() {
   // Auto-dial: after a missed call or a saved outcome, count down and call the next lead in the queue.
   const [autoNext, setAutoNext] = useState<{ lead: Lead; seconds: number; paused: boolean; skipped: string[] } | null>(null);
   const hungUpByMe = useRef(false);
+  // Set while a voicemail drop is under way, so the hang-up that follows logs it instead of asking.
+  const droppedVoicemail = useRef<string | null>(null);
   const nextInQueue = (fresh: State, exclude: string[]) => {
     const inCampaign = campaign && fresh.leads.some((lead) => lead.campaigns?.includes(campaign)) ? fresh.leads.filter((lead) => lead.campaigns?.includes(campaign)) : fresh.leads;
     return callQueue(inCampaign, fresh.calls).find((lead) => !exclude.includes(lead.id)) || null;
@@ -826,7 +873,7 @@ function App() {
       const start = await api<{ callId: string; leadId: string; token: string; userId: string }>("/api/calls/browser-start", { method: "POST", body: JSON.stringify({ leadId: lead.id }) });
       const phone = await getPhone(state?.connection?.accountSid || "");
       const call = await phone.connect({ params: { leadId: start.leadId, callId: start.callId, token: start.token, userId: start.userId } });
-      setActiveCall((current) => current && { ...current, call });
+      setActiveCall((current) => current && { ...current, call, callId: start.callId });
       const end = (message?: string, isError = false) => {
         setActiveCall(null);
         void refresh();
@@ -837,6 +884,16 @@ function App() {
       let connected = false;
       call.on("accept", () => { connected = true; setActiveCall((current) => current && { ...current, status: "in-call", startedAt: Date.now() }); });
       call.on("disconnect", () => {
+        if (droppedVoicemail.current) {
+          const recording = droppedVoicemail.current;
+          droppedVoicemail.current = null;
+          setActiveCall(null);
+          void api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: "Voicemail", note: `Voicemail dropped: ${recording}`, followUpAt: voicemailFollowUp() }) })
+            .then(() => refresh())
+            .then((fresh) => advanceFrom(fresh, lead, `Voicemail dropped for ${leadLabel(lead)}. Follow-up set for 2 business days out.`))
+            .catch((error) => showError(error instanceof Error ? error.message : "Couldn't log the voicemail."));
+          return;
+        }
         if (connected) {
           end();
           return setOutcomeLead(lead);
@@ -1138,6 +1195,18 @@ function App() {
               hungUpByMe.current = activeCall.status !== "in-call";
               if (activeCall.call) activeCall.call.disconnect();
               else setActiveCall(null);
+            }}
+            voicemail={voicemailFor(activeCall.lead, state.campaignSettings || {})?.name || null}
+            onDropVoicemail={async () => {
+              const pick = voicemailFor(activeCall.lead, state.campaignSettings || {});
+              if (!pick || !activeCall.callId) return;
+              droppedVoicemail.current = pick.name;
+              try {
+                await api("/api/calls/drop-voicemail", { method: "POST", body: JSON.stringify({ callId: activeCall.callId, campaign: pick.campaign, value: pick.value }) });
+              } catch (error) {
+                droppedVoicemail.current = null;
+                showError(error instanceof Error ? error.message : "Couldn't drop the voicemail.");
+              }
             }}
             onBook={() => {
               const url = state.settings?.bookingUrl;
@@ -3322,7 +3391,7 @@ function VariableMap({ names, value, columns, onChange, auto }: { names: string[
 // Add or edit a campaign's script: write it in the live editor and/or upload a PDF.
 // One campaign's settings, one part at a time from a sidebar: General (name, deal value, leads), Script (text, PDF),
 // Variables (what fills each {{variable}}, and how AI should clean it). Every part stays mounted, so switching keeps edits.
-type CampaignTab = "general" | "script" | "variables";
+type CampaignTab = "general" | "script" | "variables" | "voicemail";
 function ScriptDialog({ campaign, settings, columns, leads, aiReady, onImport, onViewPdf, onClose, onChanged }: { campaign: string; settings: CampaignSettings; columns: string[]; leads: Lead[]; aiReady: boolean; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   // An empty campaign name means a new campaign: name it, write the script, then import its leads.
@@ -3379,7 +3448,7 @@ function ScriptDialog({ campaign, settings, columns, leads, aiReady, onImport, o
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="campaign-settings__body">
           <nav className="campaign-settings__nav" aria-label="Campaign settings">
-            {([["general", "General"], ["script", "Script"], ["variables", "Variables"]] as [CampaignTab, string][]).map(([id, label]) => (
+            {([["general", "General"], ["script", "Script"], ["variables", "Variables"], ...(isNew ? [] : [["voicemail", "Voicemail"]])] as [CampaignTab, string][]).map(([id, label]) => (
               <button key={id} type="button" className={tab === id ? "is-active" : ""} aria-current={tab === id ? "page" : undefined} onClick={() => setTab(id)}>
                 {label}{id === "variables" && names.length > 0 && <small>{names.length}</small>}
               </button>
@@ -3417,6 +3486,11 @@ function ScriptDialog({ campaign, settings, columns, leads, aiReady, onImport, o
                 )}
               </div>
             </section>
+            {!isNew && (
+              <section hidden={tab !== "voicemail"} className="campaign-settings__section">
+                <VoicemailSettingsPanel campaign={campaign} settings={settings} leads={leads} columns={columns} scriptNames={names} onChanged={(message) => onChanged(message, false, campaign)} />
+              </section>
+            )}
             <section hidden={tab !== "variables"} className="campaign-settings__section">
               {names.length ? (
                 <>
@@ -3446,6 +3520,89 @@ function ScriptDialog({ campaign, settings, columns, leads, aiReady, onImport, o
         </div>
       </form>
     </div>
+  );
+}
+
+// Voicemail drop recordings for one campaign: pick the variable that decides which message a lead gets, then
+// record or upload one per value, plus one for everyone else. Saved right away, like the script PDF.
+function VoicemailSettingsPanel({ campaign, settings, leads, columns, scriptNames, onChanged }: { campaign: string; settings: CampaignSettings; leads: Lead[]; columns: string[]; scriptNames: string[]; onChanged: (message: string) => Promise<void> }) {
+  const voicemail = settings.voicemail || { variable: "", files: {} };
+  const [variable, setVariable] = useState(voicemail.variable);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [recording, setRecording] = useState<{ key: string; recorder: MediaRecorder } | null>(null);
+  const [version, setVersion] = useState(0);
+  const choices = [...new Set([...scriptNames, ...columns])];
+  // Each value the chosen variable has in this campaign's leads, most common first.
+  const counts = new Map<string, number>();
+  if (variable) for (const lead of leads) { const value = rawVariable(variable, lead, settings.variables).trim().toLowerCase(); if (value) counts.set(value, (counts.get(value) || 0) + 1); }
+  const rows: [string, string][] = [...[...counts.entries()].sort((a, b) => b[1] - a[1]).map(([value, count]) => [value, `${value} (${count})`] as [string, string]), ["*", variable ? "Everyone else" : "Everyone"]];
+  const run = async (key: string, work: () => Promise<unknown>, message: string) => {
+    setBusy(key);
+    setError(null);
+    try {
+      await work();
+      await onChanged(message);
+      setVersion((current) => current + 1);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Couldn't save the recording.");
+    } finally {
+      setBusy(null);
+    }
+  };
+  const upload = (key: string, blob: Blob, fileName: string) => run(key, async () => {
+    if (blob.size > 3_500_000) throw new Error("That recording is over 3.5 MB. Keep voicemails under a minute or so.");
+    await api("/api/campaigns/voicemail", { method: "POST", body: JSON.stringify({ campaign, value: key, fileName, data: await blobToBase64(blob) }) });
+  }, "Voicemail recording saved.");
+  const record = async (key: string) => {
+    if (recording) {
+      recording.recorder.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => chunks.push(event.data);
+      recorder.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop());
+        setRecording(null);
+        void toWav(new Blob(chunks, { type: recorder.mimeType })).then((wav) => upload(key, wav, "Recorded voicemail.wav"));
+      };
+      recorder.start();
+      setRecording({ key, recorder });
+    } catch {
+      setError("Allow the microphone for this site to record, or upload an MP3 or WAV instead.");
+    }
+  };
+  return (
+    <>
+      <p className="campaign-settings__hint">During a call, press Drop voicemail at the beep: your recording plays into their voicemail, the call ends, and it's logged as a voicemail with a follow-up. In the US, prerecorded messages to cell phones need the person's prior consent.</p>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <label>
+        Pick the message by
+        <select value={variable} onChange={(event) => { const next = event.target.value; setVariable(next); void run("variable", () => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign, voicemailVariable: next }) }), "Saved."); }}>
+          <option value="">One message for everyone</option>
+          {choices.map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+      </label>
+      <div className="voicemail-list">
+        {rows.map(([key, label]) => {
+          const file = voicemail.files[key];
+          return (
+            <div className="voicemail-row" key={key}>
+              <span><b>{label}</b><small>{file ? file.name : "No recording yet"}</small></span>
+              {file && <audio controls preload="none" src={`/api/campaigns/voicemail?campaign=${encodeURIComponent(campaign)}&value=${encodeURIComponent(key)}&v=${version}`} />}
+              <div className="voicemail-row__actions">
+                <button type="button" className={recording?.key === key ? "primary-button" : "quiet-button"} disabled={Boolean(busy) || Boolean(recording && recording.key !== key)} onClick={() => void record(key)}><Mic size={15} aria-hidden="true" /> {recording?.key === key ? "Stop and save" : file ? "Re-record" : "Record"}</button>
+                <label className="quiet-button script-dialog__file">Upload<input type="file" accept="audio/mpeg,audio/wav,.mp3,.wav" onChange={(event) => { const picked = event.target.files?.[0]; if (picked) void upload(key, picked, picked.name); event.target.value = ""; }} /></label>
+                {file && <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={() => void run(key, () => api(`/api/campaigns/voicemail?campaign=${encodeURIComponent(campaign)}&value=${encodeURIComponent(key)}`, { method: "DELETE" }), "Recording removed.")}>Remove</button>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 
@@ -4001,12 +4158,7 @@ function CallOutcome({ lead, bookingUrl, onBook, onClose, onSaved }: { lead: Lea
   const pickOutcome = (value: string) => {
     setOutcome(value);
     if (value !== "Voicemail" || followUpAt) return;
-    const date = new Date();
-    for (let added = 0; added < 2; ) {
-      date.setDate(date.getDate() + 1);
-      if (date.getDay() !== 0 && date.getDay() !== 6) added += 1;
-    }
-    setFollowUpAt(`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T10:00`);
+    setFollowUpAt(voicemailFollowUp());
   };
   // A callback or a meeting without a time never becomes a task, so those two need one.
   const needsDate = outcome === "Callback" || outcome === "Meeting booked";

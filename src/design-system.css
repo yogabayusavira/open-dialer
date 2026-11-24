@@ -1195,3 +1195,13 @@ summary:hover .pin-button, summary .pin-button.is-pinned { opacity: 1; }
 .script-if { border-left-color: var(--color-accent-text); }
 .script-if__rule { display: block; margin-bottom: var(--space-1); color: var(--color-text-muted); font-size: var(--font-size-label); }
 .se-line.is-condition.is-otherwise::before { content: "If none match"; }
+
+/* Campaign settings, Voicemail: one row per value of the chosen variable, with its recording. */
+.voicemail-list { display: grid; gap: var(--space-2); }
+.voicemail-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2) var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-control); }
+.voicemail-row > span { display: grid; gap: 2px; min-width: 0; }
+.voicemail-row > span b { color: var(--color-text); font-weight: 600; overflow-wrap: anywhere; }
+.voicemail-row > span small { color: var(--color-text-muted); font-size: var(--font-size-label); }
+.voicemail-row audio { grid-column: 1 / -1; width: 100%; height: 36px; }
+.voicemail-row__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+.voicemail-row__actions svg { vertical-align: -2px; }
