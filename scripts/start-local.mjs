@@ -51,9 +51,14 @@ if (/^DATABASE_URL=.*@127\.0\.0\.1:5433\//m.test(envText)) {
     for (let tries = 0; tries < 60 && !dockerUp(); tries++) pause(3);
   }
   log("Starting the local database (Docker)…");
-  const started = spawnSync("docker", ["start", "open-dialer-db"], { encoding: "utf8" });
+  // Right after Docker Desktop opens, starting the container can fail for a while (its Y: drive share isn't ready yet), so retry.
+  let started = spawnSync("docker", ["start", "open-dialer-db"], { encoding: "utf8" });
+  for (let tries = 0; tries < 40 && started.status !== 0; tries++) {
+    pause(3);
+    started = spawnSync("docker", ["start", "open-dialer-db"], { encoding: "utf8" });
+  }
   if (started.status !== 0) {
-    log("Couldn't start the database. Open Docker Desktop, wait until it says it's running, then start Open Dialer again.");
+    log(`Couldn't start the database: ${(started.stderr || "").trim().split("\n")[0] || "Docker didn't answer"}. Open Docker Desktop, wait until it says it's running, then start Open Dialer again.`);
     process.exit(1);
   }
   let ready = false;
