@@ -50,6 +50,9 @@ import {
   Play,
   SkipForward,
   Pin,
+  LayoutDashboard,
+  ScrollText,
+  Workflow,
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
@@ -73,6 +76,7 @@ type Lead = {
   details?: Record<string, string>;
   campaigns?: string[];
   value?: number;
+  wonAt?: string;
   taskDone?: { at: string; due: string };
   followUpSince?: string;
   followUpReason?: string;
@@ -127,7 +131,7 @@ type Member = { id: string; name: string; role: "owner" | "caller"; email?: stri
 type LinkResult = { emailed?: boolean; link?: string; emailError?: string };
 type NumberOption = { sid: string; number: string; label: string };
 type Session = { authenticated: boolean };
-type Screen = "queue" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "analytics" | "settings";
+type Screen = "home" | "queue" | "scripts" | "automations" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "analytics" | "settings";
 type SettingsArea = "general" | "account";
 type SettingsPage =
   | "numbers"
@@ -148,14 +152,18 @@ class ApiError extends Error {
   }
 }
 
+// Campaigns govern the dialer, scripts, automations and analytics, so those sit under it (sub: indented).
 const nav = [
-  { id: "dashboard", key: "queue", label: "Dialer", icon: Activity },
+  { id: "home", key: "home", label: "Dashboard", icon: LayoutDashboard },
   { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Tag },
+  { id: "dashboard", key: "queue", label: "Dialer", icon: Activity, sub: true },
+  { id: "scripts", key: "scripts", label: "Scripts", icon: ScrollText, sub: true },
+  { id: "automations", key: "automations", label: "Automations", icon: Workflow, sub: true },
+  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartColumn, sub: true },
   { id: "leads", key: "leads", label: "Leads", icon: Users },
   { id: "calls", key: "calls", label: "Calls", icon: Phone },
   { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock },
   { id: "pipeline", key: "pipeline", label: "Pipeline", icon: SlidersHorizontal },
-  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartColumn },
   { id: "logs", key: "activity", label: "Logs", icon: ClipboardList },
 ] as const;
 
@@ -701,7 +709,8 @@ function Welcome({ token, onDone }: { token: string; onDone: () => void }) {
 
 // The current screen (and the open lead on the dashboard) lives in the address, e.g. #dashboard/lead_123,
 // so reload, back/forward and bookmarks keep it.
-const screenHashes: Record<Screen, string> = { queue: "dashboard", campaigns: "campaigns", leads: "leads", calls: "calls", followups: "tasks", activity: "activity", pipeline: "pipeline", analytics: "analytics", settings: "settings" };
+// #dashboard stays the Dialer so old links keep working; the Dashboard page is #home.
+const screenHashes: Record<Screen, string> = { home: "home", queue: "dashboard", scripts: "scripts", automations: "automations", campaigns: "campaigns", leads: "leads", calls: "calls", followups: "tasks", activity: "activity", pipeline: "pipeline", analytics: "analytics", settings: "settings" };
 // The logo is the owner's artwork; which color version shows is set in CSS by theme.
 function Brand() {
   return (
@@ -716,7 +725,7 @@ function hashParts() {
   return { page, lead: lead ? decodeURIComponent(lead) : null };
 }
 function screenFromHash(): Screen {
-  return (Object.keys(screenHashes) as Screen[]).find((key) => screenHashes[key] === hashParts().page) || "leads";
+  return (Object.keys(screenHashes) as Screen[]).find((key) => screenHashes[key] === hashParts().page) || "home";
 }
 
 function App() {
@@ -984,6 +993,9 @@ function App() {
     }
   };
   const [scriptFor, setScriptFor] = useState<string | null>(null);
+  // Which part of the campaign Settings popup opens first (Scripts and Automations link straight to one).
+  const [scriptTab, setScriptTab] = useState<CampaignTab>("script");
+  const editCampaign = (name: string, tab: CampaignTab = "script") => { setScriptTab(tab); setScriptFor(name); };
   const [pdfFor, setPdfFor] = useState<string | null>(null);
   // The task dialog: "new" to add one, or the task being viewed and edited.
   const [taskDialog, setTaskDialog] = useState<{ task?: Task; leadId?: string } | null>(null);
@@ -1046,10 +1058,10 @@ function App() {
       <Welcome
         token={welcomeToken}
         onDone={() => {
-          window.history.replaceState(null, "", "#dashboard");
+          window.history.replaceState(null, "", "#home");
           setWelcomeToken(null);
           setNeedsLogin(false);
-          setScreen("queue");
+          setScreen("home");
           void refresh();
         }}
       />
@@ -1116,11 +1128,11 @@ function App() {
         <Brand />
         <div className="workspace-label">Workspace</div>
         <nav aria-label="Workspace navigation">
-          {nav.map(({ id, key, label, icon: Icon }) => (
+          {nav.map(({ id, key, label, icon: Icon, ...item }) => (
             <button
               key={id}
               data-tour={`nav-${key}`}
-              className={screen === key ? "nav-item nav-item--active" : "nav-item"}
+              className={`nav-item${"sub" in item ? " nav-item--sub" : ""}${screen === key ? " nav-item--active" : ""}`}
               onClick={() => { setLeadsView("all"); setCallsView("conversations"); setScreen(key); }}
             >
               <Icon size={18} />
@@ -1168,7 +1180,7 @@ function App() {
             )}
           </div>
           <div className="top-actions">
-            {(screen === "leads" || screen === "pipeline" || screen === "analytics") && picker}
+            {(screen === "home" || screen === "leads" || screen === "pipeline" || screen === "analytics") && picker}
             <button
               className="quick-tour-button"
               onClick={() => setGuideOpen(true)}
@@ -1261,7 +1273,7 @@ function App() {
             onGuide={() => setGuideOpen(true)}
             onAddTask={(lead) => setTaskDialog({ leadId: lead.id })}
             onOpenPdf={setPdfFor}
-            onEditScript={setScriptFor}
+            onEditScript={(name) => editCampaign(name)}
             onGo={(target) => {
               if (target === "followups") return setScreen("followups");
               if (target === "to-call") { setLeadsView("to-call"); return setScreen("leads"); }
@@ -1351,6 +1363,18 @@ function App() {
           />
         )}
         {screen === "analytics" && <Analytics calls={scoped.calls} team={state.team} isOwner={state.me.role === "owner"} onOpenCalls={() => setScreen("calls")} />}
+        {screen === "home" && (
+          <Home
+            state={scoped}
+            all={state}
+            followUps={followUps}
+            onOpenLead={(id) => { setSelectedId(id); setScreen("queue"); }}
+            onStart={startCampaign}
+            onGo={setScreen}
+          />
+        )}
+        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} onEdit={editCampaign} />}
+        {screen === "automations" && <AutomationsPage leads={state.leads} settings={state.campaignSettings || {}} onEdit={editCampaign} />}
         {screen === "campaigns" && (
           <Campaigns
             leads={state.leads}
@@ -1358,7 +1382,7 @@ function App() {
             onView={(name) => { setCampaign(name); setScreen("leads"); }}
             onStage={(name) => { setCampaign(name); setScreen("pipeline"); }}
             settings={state.campaignSettings || {}}
-            onScript={setScriptFor}
+            onScript={(name) => editCampaign(name)}
             onImport={(name) => { if (name) setCampaign(name); setImportOpen("campaign"); }}
           />
         )}
@@ -1384,6 +1408,7 @@ function App() {
       {scriptFor !== null && (
         <ScriptDialog
           campaign={scriptFor}
+          initialTab={scriptTab}
           settings={state.campaignSettings?.[scriptFor] || {}}
           columns={[...new Set([...(state.settings?.fields || []), ...state.leads.filter((lead) => !scriptFor || lead.campaigns?.includes(scriptFor)).flatMap((lead) => Object.keys(lead.details || {}))])].sort()}
           leads={state.leads.filter((lead) => lead.campaigns?.includes(scriptFor))}
@@ -3392,7 +3417,7 @@ function VariableMap({ names, value, columns, onChange, auto }: { names: string[
 // One campaign's settings, one part at a time from a sidebar: General (name, deal value, leads), Script (text, PDF),
 // Variables (what fills each {{variable}}, and how AI should clean it). Every part stays mounted, so switching keeps edits.
 type CampaignTab = "general" | "script" | "variables" | "voicemail";
-function ScriptDialog({ campaign, settings, columns, leads, aiReady, onImport, onViewPdf, onClose, onChanged }: { campaign: string; settings: CampaignSettings; columns: string[]; leads: Lead[]; aiReady: boolean; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
+function ScriptDialog({ campaign, initialTab = "script", settings, columns, leads, aiReady, onImport, onViewPdf, onClose, onChanged }: { campaign: string; initialTab?: CampaignTab; settings: CampaignSettings; columns: string[]; leads: Lead[]; aiReady: boolean; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   // An empty campaign name means a new campaign: name it, write the script, then import its leads.
   const isNew = !campaign;
@@ -3401,7 +3426,7 @@ function ScriptDialog({ campaign, settings, columns, leads, aiReady, onImport, o
   const [text, setText] = useState(settings.script || "");
   const [variables, setVariables] = useState<Record<string, string>>(settings.variables || {});
   const [clean, setClean] = useState<Record<string, CleanRule>>(settings.clean || {});
-  const [tab, setTab] = useState<CampaignTab>(isNew ? "general" : "script");
+  const [tab, setTab] = useState<CampaignTab>(isNew ? "general" : initialTab);
   const names = scriptVariables(text);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -3842,9 +3867,13 @@ function Pipeline({
   );
 }
 
+// Campaigns with leads, plus new ones that so far only have a script.
+function allCampaigns(leads: Lead[], settings: Record<string, CampaignSettings>) {
+  return [...new Set([...campaignsOf(leads), ...Object.keys(settings).filter((name) => settings[name]?.script || settings[name]?.pdf)])].sort((left, right) => left.localeCompare(right));
+}
+
 function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScript }: { leads: Lead[]; onStart: (name: string) => void; onView: (name: string) => void; onStage: (name: string) => void; onImport: (name?: string) => void; settings: Record<string, CampaignSettings>; onScript: (name: string) => void }) {
-  // Campaigns with leads, plus new ones that so far only have a script.
-  const names = [...new Set([...campaignsOf(leads), ...Object.keys(settings).filter((name) => settings[name]?.script || settings[name]?.pdf)])].sort((left, right) => left.localeCompare(right));
+  const names = allCampaigns(leads, settings);
   const untagged = leads.filter((lead) => !lead.campaigns?.length).length;
   return (
     <section className="campaigns-page">
@@ -3882,6 +3911,230 @@ function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScri
         })}
       </div>
       {untagged > 0 && names.length > 0 && <p className="campaigns-note">{untagged} lead{untagged === 1 ? " isn't" : "s aren't"} in a campaign. Add one when you edit a lead, or import the CSV again into a campaign.</p>}
+    </section>
+  );
+}
+
+// The "If {{variable}} rule:" lines in a script (not the indented lines under them), as plain words.
+function scriptRules(text = "") {
+  return text.replace(/\r\n/g, "\n").split("\n").filter((line) => !/^(\s{2,}|\t)\S/.test(line)).map((line) => parseCondition(line)).filter((rule): rule is NonNullable<typeof rule> => Boolean(rule)).map((rule) => `If ${describeCondition(rule)}`);
+}
+// Which values have a voicemail recording, "*" read as everyone else.
+function voicemailValues(settings: CampaignSettings) {
+  return Object.keys(settings.voicemail?.files || {}).sort((left, right) => (left === "*" ? 1 : right === "*" ? -1 : left.localeCompare(right))).map((value) => (value === "*" ? "Everyone else" : value));
+}
+
+// One card per campaign: what its script has, with links into that campaign's Settings popup.
+function ScriptsPage({ leads, settings, onEdit }: { leads: Lead[]; settings: Record<string, CampaignSettings>; onEdit: (name: string, tab: CampaignTab) => void }) {
+  const names = allCampaigns(leads, settings);
+  return (
+    <section className="campaigns-page">
+      <div className="campaigns-head"><p>Each campaign's script, its variables and voicemails. Edit them in the campaign's settings.</p></div>
+      {!names.length && <div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div>}
+      <div className="campaign-list">
+        {names.map((name) => {
+          const own = settings[name] || {};
+          const script = own.script?.trim() ? (own.pdf ? "Text and PDF" : "Text") : own.pdf ? "PDF" : "None";
+          return (
+            <article className="campaign-card" key={name}>
+              <header><h2>{name}</h2><span>{(() => { const count = leads.filter((lead) => lead.campaigns?.includes(name)).length; return `${count} lead${count === 1 ? "" : "s"}`; })()}</span></header>
+              <dl className="campaign-stages campaign-stages--static">
+                <div><dt>Script</dt><dd>{script}</dd></div>
+                <div><dt>Variables</dt><dd>{scriptVariables(own.script || "").length}</dd></div>
+                <div><dt>Only-if rules</dt><dd>{scriptRules(own.script).length}</dd></div>
+                <div><dt>Voicemails</dt><dd>{voicemailValues(own).length}</dd></div>
+              </dl>
+              <div className="campaign-card__actions">
+                <button type="button" className="text-link" onClick={() => onEdit(name, "variables")}>Variables</button>
+                <button type="button" className="primary-button" onClick={() => onEdit(name, "script")}><FileText size={16} aria-hidden="true" /> {script === "None" ? "Write the script" : "Edit script"}</button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// What already runs on its own for each campaign. Each is set in the campaign's Settings popup.
+function AutomationsPage({ leads, settings, onEdit }: { leads: Lead[]; settings: Record<string, CampaignSettings>; onEdit: (name: string, tab: CampaignTab) => void }) {
+  const names = allCampaigns(leads, settings);
+  return (
+    <section className="campaigns-page">
+      <div className="campaigns-head"><p>What each campaign does on its own: script lines picked per lead, voicemail drops and AI cleanup.</p></div>
+      {!names.length && <div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div>}
+      <div className="campaign-list">
+        {names.map((name) => {
+          const own = settings[name] || {};
+          const rules = scriptRules(own.script);
+          const recordings = voicemailValues(own);
+          const cleaned = Object.keys(own.clean || {});
+          return (
+            <article className="campaign-card automation-card" key={name}>
+              <header><h2>{name}</h2></header>
+              <section>
+                <h3>Only-if script lines <button type="button" className="text-link" onClick={() => onEdit(name, "script")}>Edit</button></h3>
+                {rules.length ? <ul>{rules.map((rule, index) => <li key={index}>{rule}</li>)}</ul> : <p>None. In the script, use the Only if button, or type a line like If {"{{lead_type}}"} is no website: with the lines to say indented under it.</p>}
+              </section>
+              <section>
+                <h3>Voicemail drop <button type="button" className="text-link" onClick={() => onEdit(name, "voicemail")}>Edit</button></h3>
+                {recordings.length ? <p>{own.voicemail?.variable ? <>Picked by {`{{${own.voicemail.variable}}}`}: {recordings.join(", ")}</> : "One message for everyone"}</p> : <p>None. Record or upload a message in Voicemail.</p>}
+              </section>
+              <section>
+                <h3>AI cleanup <button type="button" className="text-link" onClick={() => onEdit(name, "variables")}>Edit</button></h3>
+                {cleaned.length ? <ul>{cleaned.map((variable) => <li key={variable}>{`{{${variable}}}`}{own.clean![variable].to ? `: "${own.clean![variable].from}" said as "${own.clean![variable].to}"` : ""}</li>)}</ul> : <p>None. In Variables, give an example of how you'd say a value.</p>}
+              </section>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// Open-Meteo weather codes in a word or two.
+function weatherWords(code: number) {
+  if (code === 0) return "Clear";
+  if (code <= 2) return "Partly cloudy";
+  if (code === 3) return "Cloudy";
+  if (code <= 48) return "Fog";
+  if (code <= 57) return "Drizzle";
+  if (code <= 67) return "Rain";
+  if (code <= 77) return "Snow";
+  if (code <= 82) return "Showers";
+  if (code <= 86) return "Snow showers";
+  return "Thunderstorms";
+}
+// Where most of these leads are: their most common state, and its most common city when the leads have one.
+function leadsPlace(leads: Lead[]) {
+  const top = (values: string[]) => [...values.reduce((map, value) => map.set(value, (map.get(value) || 0) + 1), new Map<string, number>())].sort((left, right) => right[1] - left[1])[0]?.[0];
+  const located = leads.filter((lead) => !lead.dnc).map((lead) => ({ state: leadState(lead), city: Object.entries(lead.details || {}).find(([key]) => /^(city|town|city\/town)$/i.test(key.trim()))?.[1]?.trim() || "" })).filter((place) => place.state);
+  const code = top(located.map((place) => place.state![0]));
+  if (!code) return null;
+  const state = stateZones.find(([key]) => key === code)!;
+  const city = top(located.filter((place) => place.state![0] === code && place.city).map((place) => place.city));
+  return { label: city ? `${city}, ${code}` : state[1], search: city || state[1], state: state[1] };
+}
+const weatherCache = new Map<string, Promise<{ temperature: number; code: number } | null>>();
+function fetchWeather(place: { search: string; state: string }) {
+  const key = `${place.search}|${place.state}`;
+  if (!weatherCache.has(key))
+    weatherCache.set(key, (async () => {
+      const found = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place.search)}&count=10&countryCode=US`).then((response) => response.json());
+      const results: { latitude: number; longitude: number; name: string; admin1?: string }[] = found.results || [];
+      const spot = results.find((result) => result.admin1 === place.state || result.name === place.state) || results[0];
+      if (!spot) return null;
+      const weather = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${spot.latitude}&longitude=${spot.longitude}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`).then((response) => response.json());
+      const current = weather.current;
+      return typeof current?.temperature_2m === "number" ? { temperature: Math.round(current.temperature_2m), code: current.weather_code } : null;
+    })().catch(() => null));
+  return weatherCache.get(key)!;
+}
+function WeatherCard({ leads }: { leads: Lead[] }) {
+  const place = leadsPlace(leads);
+  const [weather, setWeather] = useState<{ temperature: number; code: number } | null>(null);
+  useEffect(() => {
+    let live = true;
+    setWeather(null);
+    if (place) void fetchWeather(place).then((result) => { if (live) setWeather(result); });
+    return () => { live = false; };
+  }, [place?.search, place?.state]);
+  // No place or no answer from the weather service: no card.
+  if (!place || !weather) return null;
+  return (
+    <section className="analytics-card home-weather">
+      <h2>Weather in {place.label}</h2>
+      <p><b>{weather.temperature}°F</b> {weatherWords(weather.code)}</p>
+      <p className="field-hint">Where most of these leads are, right now.</p>
+    </section>
+  );
+}
+
+// The Dashboard: how today and this month are going, at a glance.
+function Home({ state, all, followUps, onOpenLead, onStart, onGo }: { state: State; all: State; followUps: Lead[]; onOpenLead: (id: string) => void; onStart: (campaign: string) => void; onGo: (screen: Screen) => void }) {
+  const now = new Date();
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dayEnd = dayStart.getTime() + 86_400_000;
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const settings = all.campaignSettings || {};
+  const totals = (since: Date) => {
+    const calls = state.calls.filter((call) => new Date(call.at) >= since);
+    const attempts = callAttempts(calls);
+    const won = state.leads.filter((lead) => lead.status === "Won" && lead.wonAt && new Date(lead.wonAt) >= since);
+    return {
+      calls: attempts.length,
+      conversations: attempts.filter((attempt) => attempt.conversation).length,
+      meetings: new Set(calls.filter((call) => call.outcome === "Meeting booked").map((call) => call.leadId)).size,
+      won: won.length,
+      value: won.reduce((sum, lead) => sum + dealValue(lead, settings), 0),
+    };
+  };
+  const today = totals(dayStart);
+  const month = totals(monthStart);
+  const wonUndated = state.leads.some((lead) => lead.status === "Won" && !lead.wonAt);
+  const ids = new Set(state.leads.map((lead) => lead.id));
+  const due = followUps
+    .filter((lead) => ids.has(lead.id) && /^\d{4}-\d{2}-\d{2}/.test(lead.due) && new Date(lead.due).getTime() < dayEnd)
+    .sort((left, right) => left.due.localeCompare(right.due));
+  const followUpDue = (lead: Lead) => lead.status === "Follow-up" && !lead.dnc && (!/^\d{4}-\d{2}-\d{2}/.test(lead.due) || new Date(lead.due).getTime() < dayEnd);
+  const money = (value: number) => (value ? ` · $${value.toLocaleString()}` : "");
+  const campaigns = campaignsOf(state.leads);
+  return (
+    <section className="analytics-page">
+      <div className="analytics-grid">
+        <section className="analytics-card">
+          <h2>Today and this month</h2>
+          <table className="analytics-table">
+            <thead><tr><th scope="col"><span className="sr-only">Measure</span></th><th scope="col">Today</th><th scope="col">This month</th></tr></thead>
+            <tbody>
+              <tr><td>Calls</td><td>{today.calls}</td><td>{month.calls}</td></tr>
+              <tr><td>Conversations</td><td>{today.conversations}</td><td>{month.conversations}</td></tr>
+              <tr><td>Meetings booked</td><td>{today.meetings}</td><td>{month.meetings}</td></tr>
+              <tr><td>Deals won</td><td>{today.won}{money(today.value)}</td><td>{month.won}{money(month.value)}</td></tr>
+            </tbody>
+          </table>
+          {wonUndated && <p className="field-hint">Deals marked won before 25 Nov 2026 have no date, so they only count on the Pipeline.</p>}
+        </section>
+        <section className="analytics-card">
+          <h2>Due today</h2>
+          {due.length ? (
+            <ul className="home-due">
+              {due.slice(0, 8).map((lead) => (
+                <li key={lead.id}>
+                  <button type="button" className="text-link" onClick={() => onOpenLead(lead.id)}>{leadLabel(lead)}</button>
+                  <span>{lead.status === "Meeting booked" ? "Meeting" : "Callback"} · {dueLabel(lead.due).text}</span>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="analytics-empty">No callbacks or meetings due today.</p>}
+          <button type="button" className="text-link home-more" onClick={() => onGo("followups")}>{due.length > 8 ? `See all ${due.length} in Tasks` : "Open Tasks"}</button>
+        </section>
+        <WeatherCard leads={state.leads} />
+      </div>
+      {/* This month so far; in a month's first week, the last 7 days. */}
+      <CallsChart calls={state.calls} range={Math.max(7, now.getDate())} onOpenCalls={() => onGo("calls")} />
+      <section className="analytics-card">
+        <h2>Campaigns</h2>
+        {campaigns.length ? (
+          <ul className="home-campaigns">
+            {campaigns.map((name) => {
+              const items = state.leads.filter((lead) => lead.campaigns?.includes(name));
+              const left = items.filter(inQueue).length;
+              const done = items.length - left;
+              const followUpsDue = items.filter(followUpDue).length;
+              return (
+                <li key={name}>
+                  <div><b>{name}</b>{left > 0 && <button type="button" className="text-link" onClick={() => onStart(name)}>Start calling</button>}</div>
+                  <div className="dash-progress">
+                    <span><i style={{ width: `${items.length ? Math.round((done / items.length) * 100) : 0}%` }} /></span>
+                    <em>{left} left to call · {followUpsDue} follow-up{followUpsDue === 1 ? "" : "s"} due · {done} of {items.length} done</em>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        ) : <p className="analytics-empty">No campaigns yet. Start one on the Campaigns page.</p>}
+      </section>
     </section>
   );
 }
@@ -4233,7 +4486,7 @@ function setupSteps(state: State): SetupStep[] {
     { done: Boolean(state.connection), title: "Choose how you take calls", body: "\"In this app\" plays calls through your browser: use a headset and allow the microphone. You can switch to Zoiper or your phone here instead.", target: "settings", action: "Open Settings", screen: "settings", spot: "answer-on,twilio" },
     { done: Boolean(state.callbackReachable), title: "Start Open Dialer the easy way", body: "On your computer, always start with Start Open Dialer.bat. It opens Docker Desktop and the local database, builds the app, and opens the tunnel Twilio needs to reach you. Keep its window open while you call. A hosted copy needs none of this.", target: null, action: "" },
     { done: state.leads.length > 0, title: "Add your leads", body: "New campaign: name it and write the script first, then import its CSV. Match the columns; only a phone number is required. Leads → Import CSV works too.", target: "campaigns", action: "Open Campaigns", screen: "campaigns", spot: "new-campaign" },
-    { done: scripts, title: "Set up each campaign", body: "Settings on a campaign card. General: what a won deal is worth. Script: type {{name}} or ((NAME)) where lead details go, or use the Variable button. Variables: what fills each one, with real examples from your leads, and Clean with AI to make messy values sound natural.", target: "campaigns", action: "Open Campaigns", optional: true, screen: "campaigns", spot: "campaign-settings,new-campaign" },
+    { done: scripts, title: "Set up each campaign", body: "Settings on a campaign card, or Campaigns → Scripts in the sidebar for every campaign's script at a glance. General: what a won deal is worth. Script: type {{name}} or ((NAME)) where lead details go, or use the Variable button. Variables: what fills each one, with real examples from your leads, and Clean with AI to make messy values sound natural.", target: "campaigns", action: "Open Campaigns", optional: true, screen: "campaigns", spot: "campaign-settings,new-campaign" },
     { done: Boolean(state.settings?.fields?.length), title: "Add custom fields", body: "Extra details your team fills in on every lead, like Territory. They show on each lead's form, in the CSV import, and as script variables.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-fields" },
     { done: Boolean(state.ai?.ready), title: "Connect AI", body: "For cleaning script variables while you call. Pick Groq (fast and free), paste a key (the link opens Groq's keys page) and press Check and save.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-ai" },
     { done: Boolean(state.settings?.bookingUrl), title: "Add your booking link", body: "Your Calendly or Cal.com link, so Book a call opens it during a call. The links there take you to your event types to copy it.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-booking" },

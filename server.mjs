@@ -540,6 +540,8 @@ const followUpReasons = { Interested: "Interested", Callback: "Callback asked", 
 // Follow-up numbers count calls made after this moment, so a lead entering Follow-up starts at "1 of 3".
 function enterStage(lead, next) {
   if (next === "Follow-up" && lead.status !== "Follow-up") lead.followUpSince = new Date().toISOString();
+  // When it was won, so the dashboard can count deals won today and this month.
+  if (next === "Won" && lead.status !== "Won") lead.wonAt = new Date().toISOString();
   lead.status = next;
 }
 function stageAfterOutcome(current, outcome) {
