@@ -57,7 +57,7 @@ if (/^DATABASE_URL=.*@127\.0\.0\.1:5433\//m.test(envText)) {
     process.exit(1);
   }
   let ready = false;
-  for (let tries = 0; tries < 30 && !ready; tries++) {
+  for (let tries = 0; tries < 75 && !ready; tries++) {
     ready = spawnSync("docker", ["exec", "open-dialer-db", "pg_isready", "-U", "opendialer"]).status === 0;
     if (!ready) pause(2);
   }
