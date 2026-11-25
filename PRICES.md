@@ -9,6 +9,7 @@ live in `src/prices.ts`. Providers change prices and free limits, so re-check th
 | Calls to US and Canada numbers | `twilioCall` | $0.014 a minute | 2026-11-25 | same page, "Make calls" |
 | Talking through the app (Browser/App calling) | `twilioBrowser` | $0.004 a minute | 2026-11-25 | same page, "Browser/App Calling" |
 | Twilio live transcription | `twilioTranscription` | $0.027 a minute | 2026-11-25 | same page, "Streaming (Real-Time) Transcription" |
+| Twilio text message (US, Send text step) | `twilioSms` | about $0.0123 a text ($0.0083 + about $0.004 carrier fee); 10DLC registration $4.50 once + monthly campaign fee | 2026-11-26 | https://www.twilio.com/en-us/sms/pricing/us (carrier fees in the CSV there) |
 | Groq (all AI features) | `groq` | Free plan with rate limits | 2026-11-25 | https://groq.com/pricing and https://console.groq.com/settings/limits |
 | Resend (invites, password resets) | `resend` | Free plan: 100 emails a day | 2026-11-25 | https://resend.com/pricing |
 

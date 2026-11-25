@@ -5,6 +5,7 @@ export const prices = {
   twilioCall: { name: "Calls to US and Canada numbers", amount: 0.014, unit: "min", checked: "2026-11-25", source: "https://www.twilio.com/en-us/voice/pricing/us" },
   twilioBrowser: { name: "Talking through this app (Browser/App calling)", amount: 0.004, unit: "min", checked: "2026-11-25", source: "https://www.twilio.com/en-us/voice/pricing/us" },
   twilioTranscription: { name: "Twilio live transcription", amount: 0.027, unit: "min", checked: "2026-11-25", source: "https://www.twilio.com/en-us/voice/pricing/us" },
+  twilioSms: { name: "Twilio text message (US)", amount: 0.0123, unit: "text", setup: "10DLC: $4.50 once + a monthly campaign fee", checked: "2026-11-26", source: "https://www.twilio.com/en-us/sms/pricing/us" },
   groq: { name: "Groq", free: "Free plan with rate limits; paid use costs fractions of a cent per call", checked: "2026-11-25", source: "https://groq.com/pricing" },
   resend: { name: "Resend", free: "Free plan: 100 emails a day; paid plans from about $20 a month", checked: "2026-11-25", source: "https://resend.com/pricing" },
 } as const;

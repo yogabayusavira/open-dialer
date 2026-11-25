@@ -2,6 +2,8 @@ import { FormEvent, Fragment, ReactNode, useEffect, useMemo, useRef, useState } 
 import { createRoot } from "react-dom/client";
 import {
   Inbox,
+  Send,
+  Hourglass,
   Activity,
   BadgeCheck,
   CalendarClock,
@@ -117,6 +119,9 @@ type AutomationStep =
   | { type: "if"; field: string; op: ConditionOp; value: string }
   | { type: "say"; text: string }
   | { type: "ask"; prompt: string; field: string }
+  | { type: "wait"; amount: number; unit: "minutes" | "hours" | "days" }
+  | { type: "email"; to: string; subject: string; body: string }
+  | { type: "sms"; text: string }
   | { type: "play"; recordingId: string }
   | { type: "stage"; stage: string }
   | { type: "followup"; days: number };
@@ -274,6 +279,7 @@ function automationSteps(trigger: AutomationTrigger, lead: Lead, automations: Au
       if (campaign === null) return [];
       const out: { campaign: string; step: AutomationStep }[] = [];
       for (const step of item.steps) {
+        if (step.type === "wait") break;
         if (step.type !== "if") out.push({ campaign, step });
         else if (!matches(step, lead, settings[campaign]?.variables)) break;
       }
@@ -941,7 +947,7 @@ function App() {
           droppedVoicemail.current = null;
           setActiveCall(null);
           const auto = outcomeActions(lead, state?.automations, state?.campaignSettings || {}, "Voicemail");
-          void api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: "Voicemail", note: `Voicemail dropped: ${recording}`, followUpAt: auto.followUpAt || voicemailFollowUp(), stage: auto.stage || undefined }) })
+          void api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: "Voicemail", note: `Voicemail dropped: ${recording}`, followUpAt: auto.followUpAt || voicemailFollowUp() }) })
             .then(() => refresh())
             .then((fresh) => advanceFrom(fresh, lead, `Voicemail dropped for ${leadLabel(lead)}. Follow-up set for 2 business days out.`))
             .catch((error) => showError(error instanceof Error ? error.message : "Couldn't log the voicemail."));
@@ -4063,17 +4069,23 @@ const stepInfo: Record<AutomationStep["type"], { title: string; detail: string; 
   if: { title: "Only continue if", detail: "Stop here unless the lead matches", icon: Filter },
   say: { title: "Show a line", detail: "A line to say, at the top of the call screen", icon: MessageSquare },
   ask: { title: "Ask AI", detail: "Ask about the call and save the answer to a lead field", icon: Sparkles },
+  wait: { title: "Wait", detail: "Pause, then carry on with the next steps", icon: Hourglass },
+  email: { title: "Send email", detail: "Email the lead from your own domain (Settings → Email)", icon: Mail },
+  sms: { title: "Send text", detail: "Text the lead from your Twilio number", icon: Send },
   play: { title: "Play a voicemail", detail: "One of your Voicemails, then hang up", icon: Volume2 },
   stage: { title: "Move to stage", detail: "Put the lead in another pipeline stage", icon: Tag },
   followup: { title: "Follow up later", detail: "Set the follow-up some business days out", icon: CalendarClock },
 };
 // Which steps make sense after each trigger.
-const stepsFor: Record<AutomationTrigger, AutomationStep["type"][]> = { lead: ["if", "say"], outcome: ["if", "stage", "followup"], voicemail: ["if", "play"], transcribed: ["ask", "if", "stage", "followup"] };
+const stepsFor: Record<AutomationTrigger, AutomationStep["type"][]> = { lead: ["if", "say"], outcome: ["if", "wait", "email", "sms", "stage", "followup"], voicemail: ["if", "play"], transcribed: ["ask", "if", "wait", "email", "sms", "stage", "followup"] };
 const conditionOps: ConditionOp[] = ["is", "is not", "contains", "is empty", "is not empty"];
 function newStep(type: AutomationStep["type"]): AutomationStep {
   if (type === "if") return { type, field: "", op: "is", value: "" };
   if (type === "say") return { type, text: "" };
   if (type === "ask") return { type, prompt: "", field: "Call summary" };
+  if (type === "wait") return { type, amount: 1, unit: "days" };
+  if (type === "email") return { type, to: "", subject: "", body: "" };
+  if (type === "sms") return { type, text: "" };
   if (type === "play") return { type, recordingId: "" };
   if (type === "stage") return { type, stage: "Follow-up" };
   return { type, days: 2 };
@@ -4086,6 +4098,9 @@ function stepSummary(step: AutomationStep, vault: Recording[]) {
   if (step.type === "if") return step.field ? `${fieldLabel(step.field)} ${step.op}${step.op.includes("empty") ? "" : ` "${step.value}"`}` : "Pick a field";
   if (step.type === "say") return step.text.trim() || "Write the line";
   if (step.type === "ask") return step.prompt.trim() ? `${step.field}: ${step.prompt}` : "Write the question";
+  if (step.type === "wait") return `${step.amount} ${step.amount === 1 ? step.unit.replace(/s$/, "") : step.unit}`;
+  if (step.type === "email") return step.subject.trim() || "Write the email";
+  if (step.type === "sms") return step.text.trim() || "Write the text";
   if (step.type === "play") return vault.find((item) => item.id === step.recordingId)?.name || (step.recordingId ? "Recording deleted" : "Pick a voicemail");
   if (step.type === "stage") return step.stage;
   return `${step.days} business day${step.days === 1 ? "" : "s"} out, 10:00`;
@@ -4096,7 +4111,7 @@ function triggerSummary(item: Automation) {
   return `${where} · ${item.outcomes?.length ? item.outcomes.join(", ") : "any outcome"}`;
 }
 // A step isn't done until its main field is filled in.
-const stepReady = (step: AutomationStep) => (step.type === "if" ? Boolean(step.field) : step.type === "say" ? Boolean(step.text.trim()) : step.type === "ask" ? Boolean(step.prompt.trim() && step.field.trim()) : step.type === "play" ? Boolean(step.recordingId) : true);
+const stepReady = (step: AutomationStep) => (step.type === "if" ? Boolean(step.field) : step.type === "say" ? Boolean(step.text.trim()) : step.type === "ask" ? Boolean(step.prompt.trim() && step.field.trim()) : step.type === "email" ? Boolean(step.to && step.subject.trim() && step.body.trim()) : step.type === "sms" ? Boolean(step.text.trim()) : step.type === "play" ? Boolean(step.recordingId) : true);
 
 // The Automations page: every automation in the workspace. New ones start by picking a trigger, then open on the
 // canvas, where the trigger node says which campaigns it listens to.
@@ -4318,6 +4333,23 @@ function StepSettings({ step, fields, leads, settings, vault, onOpenVault, onCha
           <label>Question<textarea rows={3} value={step.prompt} onChange={(event) => onChange({ ...step, prompt: event.target.value })} placeholder="Did they agree to a meeting? Answer yes or no." /><small>The AI reads the whole transcript ("You" and "Them") and answers this.</small></label>
           <label>Save the answer to<input value={step.field} onChange={(event) => onChange({ ...step, field: event.target.value })} list="flow-ask-fields" placeholder="Call summary" /><datalist id="flow-ask-fields">{fields.filter(([value]) => value.startsWith("detail:")).map(([value]) => <option key={value} value={value.slice(7)} />)}</datalist><small>A lead field. Add Only continue if after this step to act on the answer. Uses your AI key (Settings → AI).</small></label>
         </>
+      )}
+      {step.type === "wait" && (
+        <div className="flow-wait">
+          <label>For<input type="number" min={1} max={365} value={step.amount} onChange={(event) => onChange({ ...step, amount: Math.max(1, Math.min(365, Number(event.target.value) || 1)) })} /></label>
+          <label>&nbsp;<select value={step.unit} onChange={(event) => onChange({ ...step, unit: event.target.value as "minutes" | "hours" | "days" })}><option value="minutes">minutes</option><option value="hours">hours</option><option value="days">days</option></select></label>
+          <small>Then the steps after this one run. Turning the automation off cancels what's waiting.</small>
+        </div>
+      )}
+      {step.type === "email" && (
+        <>
+          <label>Send to<select value={step.to} onChange={(event) => onChange({ ...step, to: event.target.value })}><option value="" disabled>The lead's email field…</option>{fields.filter(([value]) => value.startsWith("detail:")).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><small>Leads without an email there are skipped.</small></label>
+          <label>Subject<input value={step.subject} onChange={(event) => onChange({ ...step, subject: event.target.value })} placeholder="Following up, {{first_name}}" /></label>
+          <label>Email<textarea rows={6} value={step.body} onChange={(event) => onChange({ ...step, body: event.target.value })} placeholder={"Hi {{first_name}},\n\nThanks for taking my call today…"} /><small>Use {"{{variables}}"} like in the script. Sent from the sender in Settings → Email; free plan: {prices.resend.free.toLowerCase()}.</small></label>
+        </>
+      )}
+      {step.type === "sms" && (
+        <label>Text<textarea rows={4} value={step.text} onChange={(event) => onChange({ ...step, text: event.target.value })} placeholder="Hi {{first_name}}, this is Bayu from Datastreams. Sorry I missed you today." /><small>{step.text.length} characters{step.text.length > 160 ? ` (${Math.ceil(step.text.length / 153)} texts)` : ""}. Sent from your Twilio number, about {money(prices.twilioSms.amount)} a text. Texting US numbers needs your number registered for 10DLC in Twilio first. Leads on Do not call are skipped.</small></label>
       )}
       {step.type === "say" && <label>Line<textarea rows={4} value={step.text} onChange={(event) => onChange({ ...step, text: event.target.value })} placeholder="Hey {{first_name}}, I see you don't have a website yet." /><small>Use {"{{variables}}"} like in the script.</small></label>}
       {step.type === "play" && (vault.length ? (
@@ -4759,7 +4791,7 @@ function CallOutcome({ lead, automations, settings, bookingUrl, onBook, onClose,
   };
   // A callback or a meeting without a time never becomes a task, so those two need one.
   const needsDate = outcome === "Callback" || outcome === "Meeting booked";
-  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt"), stage: outcomeActions(lead, automations, settings, String(form.get("outcome"))).stage || undefined }) }); await onSaved(String(form.get("outcome"))); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
+  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt") }) }); await onSaved(String(form.get("outcome"))); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
   return (
     <div className="modal-backdrop">
       <form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="outcome-title">
@@ -5303,8 +5335,8 @@ function ScriptVariablesList({ settings, leads }: { settings: Record<string, Cam
 // The company's own AI key, used to clean script variables. Saving checks the key with one tiny request.
 const aiModels: Record<string, string> = { groq: "openai/gpt-oss-20b", openrouter: "google/gemma-4-26b-a4b-it:free" };
 // ---- Settings → Features & costs ----
-type Features = { transcription: boolean; captions: boolean; saveTranscripts: boolean; ai: boolean; email: boolean };
-const featureDefaults: Features = { transcription: false, captions: true, saveTranscripts: true, ai: true, email: true };
+type Features = { transcription: boolean; captions: boolean; saveTranscripts: boolean; ai: boolean; email: boolean; sms: boolean };
+const featureDefaults: Features = { transcription: false, captions: true, saveTranscripts: true, ai: true, email: true, sms: true };
 const featuresOf = (state: State) => ({ ...featureDefaults, ...(state.settings?.features || {}) });
 // Twilio bills each call leg by the started minute.
 const billedMinutes = (seconds = 0) => (seconds > 0 ? Math.ceil(seconds / 60) : 0);
@@ -5378,9 +5410,15 @@ function CostsSettings({ state, onOpen, onRefresh, onNotice }: { state: State; o
       price: <PriceTag text="Free to start" free />,
       control: <>{state.email?.saved || state.email?.envFallback ? <button type="button" className="text-link" onClick={() => onOpen("email")}>Sender set</button> : <button type="button" className="text-link" onClick={() => onOpen("email")}>Add a key</button>}<FeatureSwitch label="Email" checked={on.email} onChange={(next) => void set({ email: next })} /></>,
     },
+    {
+      name: "Text messages (SMS)",
+      what: "Send text steps in automations, from your Twilio number. US texting needs 10DLC registration in Twilio first. Off: those steps are skipped.",
+      price: <><PriceTag text={`about ${money(prices.twilioSms.amount)} a text`} /><PriceTag text={prices.twilioSms.setup} /></>,
+      control: <FeatureSwitch label="Text messages" checked={on.sms} onChange={(next) => void set({ sms: next })} />,
+    },
     { name: "Voicemail drop", what: "Plays one of your recordings to the lead's voicemail and hangs up. Only the call minutes you're already on.", price: <PriceTag text="Free" free />, control: null },
     { name: "Booking link", what: "Opens your own Calendly or Cal.com page during a call.", price: <PriceTag text="Free" free />, control: <button type="button" className="text-link" onClick={() => onOpen("booking")}>Booking link</button> },
-    { name: "Automations", what: "Run inside this app. Steps that use AI or transcription cost what those do.", price: <PriceTag text="Free" free />, control: null },
+    { name: "Automations", what: "Run inside this app. Steps that use AI, email, texts or transcription cost what those do.", price: <PriceTag text="Free" free />, control: null },
   ];
   return (
     <section className="settings-panel costs">

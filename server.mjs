@@ -381,7 +381,7 @@ function appUrl(req) {
   return `http://${req.headers.host}`;
 }
 // What's switched on in Settings → Features & costs. Anything not saved yet keeps its default.
-const featureDefaults = { transcription: false, captions: true, saveTranscripts: true, ai: true, email: true };
+const featureDefaults = { transcription: false, captions: true, saveTranscripts: true, ai: true, email: true, sms: true };
 function features(state) {
   return { ...featureDefaults, ...(state?.settings?.features || {}) };
 }
@@ -572,6 +572,10 @@ function cleanAutomations(list) {
       if (step?.type === "if") return { type: "if", field: cleanText(step.field, 120), op: conditionOps.includes(step.op) ? step.op : "is", value: cleanText(step.value, 200) };
       if (step?.type === "say" && trigger === "lead") return { type: "say", text: cleanText(step.text, 1000) };
       if (step?.type === "play" && trigger === "voicemail") return { type: "play", recordingId: /^vm_\w+$/.test(step.recordingId || "") ? step.recordingId : "" };
+      const later = trigger === "outcome" || trigger === "transcribed";
+      if (step?.type === "wait" && later) return { type: "wait", amount: Math.min(365, Math.max(1, Math.round(Number(step.amount) || 1))), unit: ["minutes", "hours", "days"].includes(step.unit) ? step.unit : "days" };
+      if (step?.type === "email" && later) return { type: "email", to: cleanText(step.to, 120), subject: cleanText(step.subject, 200), body: String(step.body || "").replace(/\r\n/g, "\n").slice(0, 5000) };
+      if (step?.type === "sms" && later) return { type: "sms", text: String(step.text || "").replace(/\r\n/g, "\n").slice(0, 640) };
       if (step?.type === "ask" && trigger === "transcribed") return { type: "ask", prompt: cleanText(step.prompt, 1000), field: cleanText(step.field, 60) };
       if (step?.type === "stage" && (trigger === "outcome" || trigger === "transcribed")) return { type: "stage", stage: leadStages.includes(step.stage) ? step.stage : "Follow-up" };
       if (step?.type === "followup" && (trigger === "outcome" || trigger === "transcribed")) return { type: "followup", days: Math.min(60, Math.max(0, Math.round(Number(step.days) || 0))) };
@@ -823,51 +827,159 @@ function automationMatches(step, value) {
   if (step.op === "contains") return have.includes(want);
   return step.op === "is not" ? have !== want : have === want;
 }
-// "Call transcribed" automations: run once the transcript is in and the outcome is logged. Ask AI answers go into
-// lead fields that later steps can check. Without "Save transcripts", the text is dropped afterwards.
-async function runTranscribed(sid) {
+// {{variables}} in an email or text, filled from the lead like a script line.
+function fillTemplate(text, lead, settings, campaign) {
+  return String(text || "").replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_, name) => automationField(name.trim(), lead, settings, campaign));
+}
+// Twilio texts need +1XXXXXXXXXX; leads are stored as typed.
+function smsNumber(phone) {
+  const raw = String(phone || "").trim();
+  if (raw.startsWith("+")) return `+${raw.replace(/\D/g, "")}`;
+  const digits = phoneKey(raw);
+  return digits.length === 10 ? `+1${digits}` : digits ? `+${digits}` : "";
+}
+async function sendPlainEmail(config, to, subject, text) {
+  const html = `<div style="font-family:system-ui,sans-serif;font-size:15px;line-height:1.5;color:#111">${text.split(/\n{2,}/).map((part) => `<p>${escapeHtml(part).replace(/\n/g, "<br>")}</p>`).join("")}</div>`;
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { authorization: `Bearer ${config.key}`, "content-type": "application/json" },
+    body: JSON.stringify({ from: config.from, to: [to], subject, html, text }),
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    throw new Error(`Resend: ${detail.message || response.status}`);
+  }
+}
+const waitMs = { minutes: 60_000, hours: 3_600_000, days: 86_400_000 };
+// Runs one automation's steps for a lead, starting at `from`. Ask AI answers become lead fields later steps can
+// check. A Wait saves the rest as a job in state.scheduled, which the minute ticker picks up when it's due.
+// ctx: { outcome, sid (the transcribed call), keepDue (the caller already picked a follow-up time) }.
+async function runAutomation(item, leadId, ctx, from = 0) {
   const state = await readState();
-  const call = state.calls.find((item) => item.sid === sid);
-  const lead = call && state.leads.find((item) => item.id === call.leadId);
-  if (!call || !lead || call.automated || !call.transcriptDone || !call.loggedOutcome) return;
-  const text = (call.transcript || []).map((line) => `${line.who === "you" ? "You" : "Them"}: ${line.text}`).join("\n");
+  const lead = state.leads.find((entry) => entry.id === leadId);
+  if (!lead) return;
+  const campaign = item.campaigns?.length ? (lead.campaigns || []).find((name) => item.campaigns.includes(name)) : (lead.campaigns || [])[0] || "";
+  if (campaign === undefined) return;
+  const call = ctx.sid ? state.calls.find((entry) => entry.sid === ctx.sid) : null;
+  const text = (call?.transcript || []).map((line) => `${line.who === "you" ? "You" : "Them"}: ${line.text}`).join("\n");
+  const view = { ...lead, details: { ...(lead.details || {}) } };
   const details = {};
+  const log = [];
   let stage = "";
   let due = "";
-  for (const item of state.automations || []) {
-    if (!item.on || item.trigger !== "transcribed" || (item.outcomes?.length && !item.outcomes.includes(call.loggedOutcome))) continue;
-    const campaign = item.campaigns?.length ? (lead.campaigns || []).find((name) => item.campaigns.includes(name)) : (lead.campaigns || [])[0] || "";
-    if (campaign === undefined) continue;
-    const view = { ...lead, details: { ...(lead.details || {}), ...details } };
-    for (const step of item.steps) {
-      if (step.type === "if" && !automationMatches(step, automationField(step.field, view, state.campaignSettings, campaign))) break;
-      if (step.type === "ask") {
-        const config = aiConfig(state);
-        if (!config || !text || !step.prompt || !step.field) break;
+  let wait = null;
+  const blocked = lead.dnc || state.dncNumbers.includes(phoneKey(lead.phone));
+  for (let index = from; index < item.steps.length; index++) {
+    const step = item.steps[index];
+    if (step.type === "if" && !automationMatches(step, automationField(step.field, view, state.campaignSettings, campaign))) break;
+    if (step.type === "ask") {
+      const config = aiConfig(state);
+      if (!config || !text || !step.prompt || !step.field) break;
+      try {
+        const answer = cleanText(await aiChat(config, "You read a sales call transcript and answer one question about it. \"You\" is the caller, \"Them\" is the lead. Answer in plain words, as short as the question allows, and never invent anything the transcript doesn't say.", `Question: ${step.prompt}\n\nTranscript:\n${text}`), 500);
+        details[step.field] = answer;
+        view.details[step.field] = answer;
+      } catch (error) {
+        log.push(["Automation step failed", `${item.name} · Ask AI: ${error.message}`]);
+        break;
+      }
+    }
+    if (step.type === "stage") stage = step.stage;
+    if (step.type === "followup" && !ctx.keepDue) due = businessDaysOut(step.days);
+    if (step.type === "email") {
+      const config = emailConfig(state);
+      const to = automationField(step.to, view, state.campaignSettings, campaign);
+      if (blocked) log.push(["Automation email skipped", `${item.name} · ${leadLabel(lead)} is on Do not call`]);
+      else if (!config) log.push(["Automation email skipped", `${item.name} · email isn't set up (Settings → Email)`]);
+      else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) log.push(["Automation email skipped", `${item.name} · ${leadLabel(lead)} has no email address`]);
+      else {
         try {
-          const answer = cleanText(await aiChat(config, "You read a sales call transcript and answer one question about it. \"You\" is the caller, \"Them\" is the lead. Answer in plain words, as short as the question allows, and never invent anything the transcript doesn't say.", `Question: ${step.prompt}\n\nTranscript:\n${text}`), 500);
-          details[step.field] = answer;
-          view.details[step.field] = answer;
+          await sendPlainEmail(config, to, cleanText(fillTemplate(step.subject, view, state.campaignSettings, campaign), 200), fillTemplate(step.body, view, state.campaignSettings, campaign));
+          log.push(["Automation email sent", `${item.name} · ${leadLabel(lead)} · ${to}`]);
         } catch (error) {
-          console.error(`[open-dialer] Ask AI failed: ${error.message}`);
-          break;
+          log.push(["Automation step failed", `${item.name} · email: ${error.message}`]);
         }
       }
-      if (step.type === "stage") stage = step.stage;
-      if (step.type === "followup") due = businessDaysOut(step.days);
+    }
+    if (step.type === "sms") {
+      const to = smsNumber(lead.phone);
+      if (blocked) log.push(["Automation text skipped", `${item.name} · ${leadLabel(lead)} is on Do not call`]);
+      else if (!features(state).sms) log.push(["Automation text skipped", `${item.name} · texting is switched off (Settings → Features & costs)`]);
+      else if (!state.connection?.selectedNumber || !to) log.push(["Automation text skipped", `${item.name} · no Twilio number or lead phone`]);
+      else {
+        try {
+          await twilioRequest(state.connection, "/Messages.json", { To: to, From: state.connection.selectedNumber, Body: fillTemplate(step.text, view, state.campaignSettings, campaign).slice(0, 1600) });
+          log.push(["Automation text sent", `${item.name} · ${leadLabel(lead)} · ${to}`]);
+        } catch (error) {
+          log.push(["Automation step failed", `${item.name} · text: ${error.message}`]);
+        }
+      }
+    }
+    if (step.type === "wait") {
+      wait = { id: `job_${Date.now()}_${randomBytes(3).toString("hex")}`, automationId: item.id, leadId, next: index + 1, ctx: { outcome: ctx.outcome || "", sid: ctx.sid || "" }, runAt: Date.now() + Math.max(1, step.amount) * (waitMs[step.unit] || waitMs.days) };
+      log.push(["Automation waiting", `${item.name} · ${leadLabel(lead)} · until ${new Date(wait.runAt).toLocaleString("en-US")}`]);
+      break;
     }
   }
+  if (!Object.keys(details).length && !stage && !due && !wait && !log.length) return;
   await updateState((fresh) => {
-    const target = fresh.calls.find((item) => item.sid === sid);
-    const person = target && fresh.leads.find((item) => item.id === target.leadId);
-    if (!target || !person || target.automated) return;
-    target.automated = true;
+    const person = fresh.leads.find((entry) => entry.id === leadId);
+    if (!person) return false;
     if (Object.keys(details).length) person.details = { ...(person.details || {}), ...details };
     if (stage && !person.dnc) enterStage(person, stage);
     if (due && !person.dnc && !["Won", "Lost"].includes(person.status)) person.due = due;
-    if (!features(fresh).saveTranscripts) delete target.transcript;
-    if (Object.keys(details).length || stage || due) activity(fresh, "Call transcribed automation ran", `${leadLabel(person)}${stage ? ` · ${stage}` : ""}`);
+    if (wait) fresh.scheduled = [...(fresh.scheduled || []), wait];
+    for (const [action, detail] of log) activity(fresh, action, detail);
+    if (stage || due || Object.keys(details).length) activity(fresh, "Automation ran", `${item.name} · ${leadLabel(person)}${stage ? ` · ${stage}` : ""}`);
   });
+}
+// Every switched-on automation for a trigger, one after another.
+async function runTrigger(trigger, leadId, ctx) {
+  const state = await readState();
+  for (const item of state.automations || []) {
+    if (!item.on || item.trigger !== trigger || (item.outcomes?.length && !item.outcomes.includes(ctx.outcome))) continue;
+    await runAutomation(item, leadId, ctx);
+  }
+}
+// "Call transcribed": once the transcript is in and the outcome is logged. Without "Save transcripts", the text
+// is dropped afterwards.
+async function runTranscribed(sid) {
+  const state = await readState();
+  const call = state.calls.find((item) => item.sid === sid);
+  if (!call || call.automated || !call.transcriptDone || !call.loggedOutcome) return;
+  const marked = await updateState((fresh) => {
+    const target = fresh.calls.find((item) => item.sid === sid);
+    if (!target || target.automated) return false;
+    target.automated = true;
+    return true;
+  });
+  if (!marked) return;
+  await runTrigger("transcribed", call.leadId, { outcome: call.loggedOutcome, sid });
+  await updateState((fresh) => {
+    const target = fresh.calls.find((item) => item.sid === sid);
+    if (!target?.transcript || features(fresh).saveTranscripts) return false;
+    delete target.transcript;
+  });
+}
+// The minute ticker: picks up automations whose Wait is over, in every workspace.
+async function runDueJobs() {
+  const accounts = await readAccounts();
+  for (const { id: ws } of accounts.workspaces) {
+    await requestContext.run({ ws, locked: false }, async () => {
+      const due = await updateState((state) => {
+        const now = Date.now();
+        const ready = (state.scheduled || []).filter((job) => job.runAt <= now);
+        if (!ready.length) return false;
+        state.scheduled = state.scheduled.filter((job) => job.runAt > now);
+        return ready;
+      });
+      for (const job of due || []) {
+        const item = ((await readState()).automations || []).find((entry) => entry.id === job.automationId);
+        // Switched off or deleted while it waited: it stops here.
+        if (item?.on) await runAutomation(item, job.leadId, job.ctx || {}, job.next);
+      }
+    }).catch((error) => console.error(`[open-dialer] Waiting automations (${ws}): ${error.message}`));
+  }
 }
 
 // Runs after the response, outside the request's state lock, so its own save waits its turn like any other.
@@ -1073,6 +1185,8 @@ createServer(async (req, res) => {
     });
   }
 }).listen(port, "0.0.0.0", () => console.log(`Open Dialer v2 listening on ${port}`));
+// Automations that are waiting (a Wait step) carry on once a minute when they're due.
+setInterval(() => void runDueJobs().catch((error) => console.error(`[open-dialer] ${error.message}`)), 60_000);
 
 async function route(req, res, url) {
     if (url.pathname === "/api/twilio/voice/connect" && req.method === "GET") {
@@ -1802,7 +1916,7 @@ async function route(req, res, url) {
       return json(res, 204, {});
     }
     if (url.pathname === "/api/calls/record" && req.method === "POST") {
-      const { leadId, outcome, note, followUpAt, stage } = await getBody(req);
+      const { leadId, outcome, note, followUpAt } = await getBody(req);
       const state = await readState();
       const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
@@ -1810,8 +1924,6 @@ async function route(req, res, url) {
       const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString(), userId: currentUser().id };
       state.calls.unshift(call);
       enterStage(lead, stageAfterOutcome(lead.status, outcome));
-      // From a "Call outcome logged" automation.
-      if (leadStages.includes(stage) && outcome !== "Do not call") enterStage(lead, stage);
       if (lead.status === "Follow-up" && followUpReasons[outcome]) lead.followUpReason = followUpReasons[outcome];
       delete lead.taskDone;
       const followUp = typeof followUpAt === "string" && followUpAt ? followUpAt : "";
@@ -1828,6 +1940,8 @@ async function route(req, res, url) {
       const heard = state.calls.find((item) => item.sid && item.leadId === lead.id && item.transcribing && !item.loggedOutcome);
       if (heard) heard.loggedOutcome = outcome;
       await writeState(state);
+      // "Call outcome logged" automations: stage and follow-up steps land before the page refreshes.
+      if (outcome !== "Do not call") await runTrigger("outcome", lead.id, { outcome, keepDue: Boolean(followUp) }).catch((error) => console.error(`[open-dialer] ${error.message}`));
       if (heard?.transcriptDone) runTranscribedLater(heard.sid);
       return json(res, 201, call);
     }
