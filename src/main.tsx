@@ -662,6 +662,12 @@ function exportLeads(leads: Lead[], fileName: string) {
 }
 
 // Sign in. Accounts are invite-only; "Forgot password" emails a reset link.
+// Notion-style face for a lead, the same DiceBear "notionists" style as account avatars. Seeded with the lead's
+// random id, so nothing about the lead is sent and each lead keeps the same face.
+function LeadFace({ id }: { id: string }) {
+  return <img src={`https://api.dicebear.com/7.x/notionists/svg?seed=${encodeURIComponent(id)}`} alt="" loading="lazy" />;
+}
+
 function Login({ onSignedIn }: { onSignedIn: () => void }) {
   const [mode, setMode] = useState<"signin" | "forgot" | "setup">("signin");
   // A fresh install has no accounts: whoever installed it creates the owner account first.
@@ -2375,6 +2381,7 @@ function Queue({
               }
               onClick={() => onSelect(lead.id)}
             >
+              <i aria-hidden="true" className="lead-avatar lead-avatar--small"><LeadFace id={lead.id} /></i>
               <span>
                 <b>{leadLabel(lead)}</b>
                 <small>{leadSubtitle(lead)}</small>
@@ -2392,7 +2399,7 @@ function Queue({
           )}
           <div className="lead-heading">
             <div className="lead-heading__identity">
-              <i aria-hidden="true">{leadLabel(selected).split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</i>
+              <i aria-hidden="true" className="lead-avatar"><LeadFace id={selected.id} /></i>
               <div>
                 <h2>{leadLabel(selected)}</h2>
                 <p>{leadSubtitle(selected)}</p>
@@ -2704,12 +2711,6 @@ function LeadList({
           </thead>
           <tbody>
             {visibleLeads.map((lead) => {
-              const initials = leadLabel(lead)
-                .split(" ")
-                .map((part) => part[0])
-                .join("")
-                .slice(0, 2)
-                .toUpperCase();
               const tag = lead.dnc ? "do not call" : lead.due && !["Unscheduled", "Won", "Lost", "Follow up"].includes(lead.due) ? `next: ${lead.due.replace("T", " ")}` : lead.status.toLowerCase();
               const statusLabel = lead.dnc ? "DNC" : lead.status;
               const latest = lastCall.get(lead.id);
@@ -2719,7 +2720,7 @@ function LeadList({
                 <td>
                   <button className="prospect-button" type="button" onClick={() => onOpen(lead.id)}>
                     <span className="prospect-identity">
-                      <i aria-hidden="true">{initials}</i>
+                      <i aria-hidden="true" className="lead-avatar"><LeadFace id={lead.id} /></i>
                       <span>
                         <b>{leadLabel(lead)}</b>
                         <small>{leadSubtitle(lead)}</small>
@@ -3983,7 +3984,7 @@ function Pipeline({
                     onClick={() => setPeekId(lead.id)}
                     onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setPeekId(lead.id); } }}
                   >
-                    <b>{leadLabel(lead)}</b>
+                    <span className="pipeline-card__who"><i aria-hidden="true" className="lead-avatar lead-avatar--small"><LeadFace id={lead.id} /></i><b>{leadLabel(lead)}</b></span>
                     <small>{leadSubtitle(lead)}</small>
                     <span className="pipeline-card__meta">{formatPhone(lead.phone, lead.extension)}</span>
                     <StageLine lead={lead} calls={calls} value={dealValue(lead, settings)} />

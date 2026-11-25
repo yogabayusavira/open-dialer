@@ -39,6 +39,28 @@ Settings and can be switched off. Run it on your own computer or on a server.
   recorded.
 - **Teams:** invite-only accounts, owners and callers, several companies on one install.
 
+## Screenshots
+
+<p align="center"><img src="docs/screenshots/dialer.png" alt="The dialer: the lead's details, local time and opening hours, pinned fields and the call script" width="900"></p>
+<p align="center"><sub>The dialer: who you're calling, their local time and opening hours, pinned details and the script.</sub></p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/automations.png" alt="An automation on the canvas: call outcome, send text, wait, follow up"><br><sub>Automations: a trigger, then steps like send text, wait and follow up.</sub></td>
+    <td width="50%"><img src="docs/screenshots/pipeline.png" alt="The pipeline board with stages"><br><sub>Pipeline: drag leads between stages; deal values add up.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/leads.png" alt="The leads list"><br><sub>Leads: who to call next, follow-ups and the do-not-call list.</sub></td>
+    <td width="50%"><img src="docs/screenshots/features-and-costs.png" alt="Settings, Features and costs"><br><sub>Features & costs: what each part costs, with a switch for paid extras.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/campaigns.png" alt="Campaign cards"><br><sub>Campaigns: each with its script, leads and settings.</sub></td>
+    <td width="50%"><img src="docs/screenshots/dashboard.png" alt="The dashboard"><br><sub>Dashboard: today's calls, follow-ups and results.</sub></td>
+  </tr>
+</table>
+
+<sub>Screenshots use made-up businesses and 555 numbers.</sub>
+
 ## What you need
 
 | | What for | Get it |
