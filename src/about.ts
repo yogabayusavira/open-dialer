@@ -4,7 +4,6 @@ export const about = {
   name: "Open Dialer",
   author: "Yoga Bayu Savira",
   license: "GNU AGPL-3.0, with a keep-the-credit term",
-  // shortcut: points at the current repository; change it when the public repository is set up.
-  sourceUrl: "https://github.com/yogabayusavira/test-feature",
+  sourceUrl: "https://github.com/yogabayusavira/open-dialer",
   contributors: [{ name: "Yoga Bayu Savira", role: "Creator and maintainer" }],
 };

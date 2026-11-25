@@ -157,7 +157,7 @@ type Member = { id: string; name: string; role: "owner" | "caller"; email?: stri
 // What the server says after it makes a sign-in link: emailed, or the link to pass on yourself.
 type LinkResult = { emailed?: boolean; link?: string; emailError?: string };
 type NumberOption = { sid: string; number: string; label: string };
-type Session = { authenticated: boolean };
+type Session = { authenticated: boolean; firstRun?: boolean };
 type Screen = "home" | "queue" | "scripts" | "automations" | "voicemails" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "analytics" | "settings";
 type SettingsArea = "general" | "account";
 type SettingsPage =
@@ -663,7 +663,9 @@ function exportLeads(leads: Lead[], fileName: string) {
 
 // Sign in. Accounts are invite-only; "Forgot password" emails a reset link.
 function Login({ onSignedIn }: { onSignedIn: () => void }) {
-  const [mode, setMode] = useState<"signin" | "forgot">("signin");
+  const [mode, setMode] = useState<"signin" | "forgot" | "setup">("signin");
+  // A fresh install has no accounts: whoever installed it creates the owner account first.
+  useEffect(() => { void api<Session>("/api/session").then((session) => { if (session.firstRun) setMode("setup"); }).catch(() => {}); }, []);
   const [remember, setRemember] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState<string | null>(null);
@@ -674,7 +676,10 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
     setError(null);
     const fields = Object.fromEntries(new FormData(event.currentTarget));
     try {
-      if (mode === "forgot") {
+      if (mode === "setup") {
+        await api("/api/setup", { method: "POST", body: JSON.stringify(fields) });
+        onSignedIn();
+      } else if (mode === "forgot") {
         setSent((await api<{ message: string }>("/api/password/forgot", { method: "POST", body: JSON.stringify(fields) })).message);
       } else {
         await api("/api/session", { method: "POST", body: JSON.stringify({ ...fields, remember }) });
@@ -687,6 +692,23 @@ function Login({ onSignedIn }: { onSignedIn: () => void }) {
     }
   };
   const forgot = mode === "forgot";
+  if (mode === "setup") {
+    return (
+      <main className="login-page">
+        <form className="login-card" onSubmit={submit}>
+          <Brand />
+          <h1>Welcome to Open Dialer</h1>
+          <p>Create the owner account. You can invite your team afterwards in Settings, Team.</p>
+          <label>Your name<input name="name" autoComplete="name" required /></label>
+          <label>Company<input name="company" autoComplete="organization" placeholder="My company" /></label>
+          <label>Email<input name="email" type="email" autoComplete="email" required /></label>
+          <label>Password<input name="password" type="password" autoComplete="new-password" minLength={10} required /><small>At least 10 characters.</small></label>
+          {error && <p className="form-error">{error}</p>}
+          <button className="primary-button" type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <UserPlus size={17} />} Create account</button>
+        </form>
+      </main>
+    );
+  }
   return (
     <main className="login-page">
       <form className="login-card" onSubmit={submit} key={mode}>

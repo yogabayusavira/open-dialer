@@ -25,6 +25,8 @@ The tunnel gets a new address every time you start. That's fine: the app sends t
 
 ## What you need once
 
+The quickest way is to double-click **`Install Open Dialer.bat`** once: it installs what's missing and sets up `.env` and the database. The steps below are what it does, if you'd rather do them yourself.
+
 - **Node.js** (version 22 or newer) and the project's packages: run `npm install` in this folder once.
 - **cloudflared**, Cloudflare's tunnel program. If it's missing, the start window says so. Install it with:
 

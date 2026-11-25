@@ -1327,7 +1327,27 @@ async function route(req, res, url) {
     }
     if (url.pathname === "/api/session" && req.method === "GET") {
       const user = currentUser();
-      return json(res, 200, { authenticated: Boolean(user) });
+      // A fresh install has no accounts yet: the sign-in page offers to create the owner instead.
+      return json(res, 200, { authenticated: Boolean(user), firstRun: !user && (await readAccounts()).users.length === 0 });
+    }
+    // First run only: the person installing Open Dialer creates its owner (and app admin) account and company.
+    if (url.pathname === "/api/setup" && req.method === "POST") {
+      const body = await getBody(req);
+      const name = cleanText(body.name, 120);
+      const email = cleanEmail(body.email);
+      const company = cleanText(body.company, 160) || "My company";
+      if (!name || !email) return json(res, 400, { error: "Enter your name and a valid email." });
+      if (!validPassword(body.password)) return json(res, 400, { error: "Use a password of at least 10 characters." });
+      const user = await updateAccounts((accounts) => {
+        if (accounts.users.length) return false;
+        if (!accounts.workspaces.some((item) => item.id === legacyWorkspace)) accounts.workspaces.push({ id: legacyWorkspace, name: company, createdAt: new Date().toISOString() });
+        const owner = { id: `user_${randomBytes(8).toString("hex")}`, email, name, role: "owner", admin: true, workspace: legacyWorkspace, passwordHash: hashPassword(body.password), sessionVersion: 0, createdAt: new Date().toISOString() };
+        accounts.users.push(owner);
+        return owner;
+      });
+      if (!user) return json(res, 409, { error: "Open Dialer is already set up. Sign in instead." });
+      setSession(res, user, true);
+      return json(res, 204, {});
     }
     if (url.pathname === "/api/session" && req.method === "POST") {
       if (!canAttemptLogin(req)) return json(res, 429, { error: "Too many attempts. Try again in 15 minutes." });
