@@ -25,7 +25,7 @@ The tunnel gets a new address every time you start. That's fine: the app sends t
 
 ## What you need once
 
-The quickest way is the setup wizard, `OpenDialerSetup.exe` from the project's GitHub releases: it installs what's missing and writes `.env` for you. The steps below are what it does, if you'd rather do them yourself. Without a `DATABASE_URL`, the app keeps its data in the `data` folder and needs no database at all; the Docker database below is optional.
+The quickest way is the setup wizard, `OpenDialerSetup.exe` from the project's GitHub releases: it installs what's missing (Node.js, PostgreSQL 17, cloudflared), creates the database and writes `.env` for you. `npm run setup` does the database and `.env` part from a terminal. The steps below are the manual way, using PostgreSQL in Docker.
 
 - **Node.js** (version 22 or newer) and the project's packages: run `npm install` in this folder once.
 - **cloudflared**, Cloudflare's tunnel program. If it's missing, the start window says so. Install it with:
