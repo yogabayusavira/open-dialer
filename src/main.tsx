@@ -1,6 +1,7 @@
 import { FormEvent, Fragment, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  Inbox,
   Activity,
   BadgeCheck,
   CalendarClock,
@@ -1183,6 +1184,12 @@ function App() {
               {id === "tasks" && followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length > 0 && <b>{followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length}</b>}
             </button>
           ))}
+          {/* Unibox: SMS and email replies in one place. Not built yet, so it can't be opened. */}
+          <button className="nav-item nav-item--soon" type="button" disabled aria-disabled="true" title="Coming soon">
+            <Inbox size={18} />
+            <span>Unibox</span>
+            <small className="nav-soon">Soon</small>
+          </button>
           {/* Placeholder for tools that come later; for now it opens the logs. */}
           <button className="nav-item" type="button" onClick={() => setScreen("activity")}>
             <MoreHorizontal size={18} />
@@ -4825,7 +4832,7 @@ function setupSteps(state: State): SetupStep[] {
     { done: state.leads.length > 0, title: "Add your leads", body: "New campaign: name it and write the script first, then import its CSV. Match the columns; only a phone number is required. Leads → Import CSV works too.", target: "campaigns", action: "Open Campaigns", screen: "campaigns", spot: "new-campaign" },
     { done: scripts, title: "Set up each campaign", body: "Settings on a campaign card, or Campaigns → Scripts in the sidebar for every campaign's script at a glance. General: what a won deal is worth. Script: type {{name}} or ((NAME)) where lead details go, or use the Variable button. Variables: what fills each one, with real examples from your leads, and Clean with AI to make messy values sound natural.", target: "campaigns", action: "Open Campaigns", optional: true, screen: "campaigns", spot: "campaign-settings,new-campaign" },
     { done: Boolean(state.settings?.fields?.length), title: "Add custom fields", body: "Extra details your team fills in on every lead, like Territory. They show on each lead's form, in the CSV import, and as script variables.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-fields" },
-    { done: Boolean(state.ai?.ready), title: "Connect AI", body: "For cleaning script variables while you call. Pick Groq (fast and free), paste a key (the link opens Groq's keys page) and press Check and save.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-ai" },
+    { done: Boolean(state.ai?.ready), title: "Connect AI", body: "Turns on Open Dialer's AI features, like cleaning script variables and Ask AI in automations. Pick Groq (fast and free), paste a key (the link opens Groq's keys page) and press Check and save.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-ai" },
     { done: Boolean(state.settings?.bookingUrl), title: "Add your booking link", body: "Your Calendly or Cal.com link, so Book a call opens it during a call. The links there take you to your event types to copy it.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-booking" },
     { done: state.team.length > 1, title: "Invite your callers", body: "Team → Send invite. Then select leads on the Leads page and use Assign to; callers only see what you assign them. Skip this if you call alone.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-team" },
     { done: Boolean(state.emailReady), title: "Turn on email", body: "So invites and password resets arrive by email: add RESEND_API_KEY and RESEND_FROM_EMAIL (a sender on a domain verified in Resend) to .env, then restart. Until then, you get each sign-in link to send yourself.", target: null, action: "", optional: true },
@@ -5361,7 +5368,7 @@ function CostsSettings({ state, onOpen, onRefresh, onNotice }: { state: State; o
     },
     {
       name: "AI (Groq or OpenRouter)",
-      what: "Cleans script variables while you call and answers Ask AI steps in automations. Uses your own key.",
+      what: "Powers every AI feature in Open Dialer, like cleaning script variables and Ask AI in automations, plus new ones as they arrive. Uses your own key.",
       price: <PriceTag text="Free to start" free />,
       control: <>{state.ai?.ready ? <button type="button" className="text-link" onClick={() => onOpen("ai")}>Key saved</button> : <button type="button" className="text-link" onClick={() => onOpen("ai")}>Add a key</button>}<FeatureSwitch label="AI" checked={on.ai} onChange={(next) => void set({ ai: next })} /></>,
     },
@@ -5516,7 +5523,7 @@ function AiSettings({ ai, onRefresh, onNotice }: { ai: State["ai"]; onRefresh: (
     <section className="settings-panel">
       <span className="panel-kicker">Workspace</span>
       <h2>AI</h2>
-      <p>Cleans script variables while you call, following the example and notes you give each variable in a campaign's settings. Only that variable's text is sent, never phone numbers.</p>
+      <p>Powers every AI feature in Open Dialer: cleaning script variables, Ask AI in automations, and the ones still to come. Each feature sends only what it needs, like a variable's text or a call's transcript, never phone numbers.</p>
       <form className="settings-form" onSubmit={save}>
         {error && <p className="form-error" role="alert">{error}</p>}
         <label>

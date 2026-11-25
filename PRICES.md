@@ -9,7 +9,7 @@ live in `src/prices.ts`. Providers change prices and free limits, so re-check th
 | Calls to US and Canada numbers | `twilioCall` | $0.014 a minute | 2026-11-25 | same page, "Make calls" |
 | Talking through the app (Browser/App calling) | `twilioBrowser` | $0.004 a minute | 2026-11-25 | same page, "Browser/App Calling" |
 | Twilio live transcription | `twilioTranscription` | $0.027 a minute | 2026-11-25 | same page, "Streaming (Real-Time) Transcription" |
-| Groq (AI cleanup, Ask AI) | `groq` | Free plan with rate limits | 2026-11-25 | https://groq.com/pricing and https://console.groq.com/settings/limits |
+| Groq (all AI features) | `groq` | Free plan with rate limits | 2026-11-25 | https://groq.com/pricing and https://console.groq.com/settings/limits |
 | Resend (invites, password resets) | `resend` | Free plan: 100 emails a day | 2026-11-25 | https://resend.com/pricing |
 
 Free in the app, no outside cost: voicemail drop (it plays during a call you're already paying for), booking links
