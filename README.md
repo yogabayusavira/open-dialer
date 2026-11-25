@@ -37,3 +37,11 @@ Before placing real calls, connect Twilio, save the operator phone number that s
 - The validation request sends credentials only to Open Dialer v2's server; responses never include the token.
 - Persisted tokens are AES-256-GCM encrypted using `OPEN_DIALER_ENCRYPTION_KEY`.
 - Accounts are invite-only, with email and password sign-in (scrypt hashes, rate-limited). Each company has its own workspace; callers only see leads assigned to them. Changing a password signs out that account everywhere else.
+
+## License
+
+Open Dialer is © 2026 Yoga Bayu Savira, released under the [GNU AGPL-3.0](LICENSE) with the additional terms in
+[NOTICE.md](NOTICE.md): keep the "Powered by Open Dialer · by Yoga Bayu Savira" credit visible, don't use the Open
+Dialer name or logo for your own version, and share the source of any changed version you let others use.
+White-label and commercial licenses: [COMMERCIAL.md](COMMERCIAL.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributors: [CONTRIBUTORS.md](CONTRIBUTORS.md).

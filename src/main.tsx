@@ -61,6 +61,7 @@ import {
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
 import { money, prices } from "./prices";
+import { about } from "./about";
 import { checkCondition, describeCondition, isOtherwise, parseCondition } from "./conditions";
 import "./styles.css";
 import "./design-system.css";
@@ -165,6 +166,7 @@ type SettingsPage =
   | "fields"
   | "profile"
   | "privacy"
+  | "about"
   | "booking"
   | "ai"
   | "email"
@@ -1220,6 +1222,8 @@ function App() {
             </span>
             <ChevronRight size={15} />
           </button>
+          {/* Required to stay visible: NOTICE.md, additional term 1. */}
+          <a className="sidebar-credit" href={about.sourceUrl} target="_blank" rel="noreferrer">Powered by {about.name} · by {about.author}</a>
         </div>
       </aside>
       <section className="workbench">
@@ -5101,7 +5105,7 @@ function Settings({
       { title: "Workspace", items: [{ id: "team", label: "Team", icon: Users }, { id: "fields", label: "Custom fields", icon: SlidersHorizontal }, ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : [])] },
     ],
     account: [
-      { title: "Account", items: [{ id: "profile", label: "Profile", icon: UserRound }, { id: "privacy", label: "Privacy", icon: ShieldCheck }] },
+      { title: "Account", items: [{ id: "profile", label: "Profile", icon: UserRound }, { id: "privacy", label: "Privacy", icon: ShieldCheck }, { id: "about", label: "About", icon: BadgeCheck }] },
     ],
   };
   return (
@@ -5771,6 +5775,23 @@ function SettingsPanel({
         </form>
         <div className="field-pills">{fields.length ? fields.map((field) => <button key={field} type="button" aria-label={`Remove ${field}`} onClick={() => void saveFields(fields.filter((item) => item !== field))}>{field} <X size={13} /></button>) : <span>No custom fields yet.</span>}</div>
         <ScriptVariablesList settings={campaignSettings} leads={leads} />
+      </section>
+    );
+  }
+  if (page === "about") {
+    return (
+      <section className="settings-panel about">
+        <span className="panel-kicker">Account</span>
+        <h2>About {about.name}</h2>
+        <p className="about__credit">Powered by {about.name} · by {about.author}</p>
+        <dl className="about__facts">
+          <div><dt>Version</dt><dd>{__APP_VERSION__}</dd></div>
+          <div><dt>License</dt><dd>{about.license}. Free to use, change and host; keep the credit visible and share the source of any changed version you let others use.</dd></div>
+          <div><dt>Source code</dt><dd><a className="settings-link" href={about.sourceUrl} target="_blank" rel="noreferrer">{about.sourceUrl.replace(/^https:\/\//, "")} <ExternalLink size={12} aria-hidden="true" /></a></dd></div>
+          <div><dt>White-label or commercial use</dt><dd>Want it under your own brand, without the credit, or closed source? That needs a commercial license from {about.author}. See COMMERCIAL.md in the source.</dd></div>
+        </dl>
+        <h3>Contributors</h3>
+        <ul className="about__people">{about.contributors.map((person) => <li key={person.name}><b>{person.name}</b><small>{person.role}</small></li>)}</ul>
       </section>
     );
   }

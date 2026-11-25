@@ -1427,3 +1427,15 @@ html[data-theme="light"] .mic-widget { background: #2a2a28; }
 .nav-soon { margin-left: auto; padding: 1px 6px; border: 1px solid var(--color-border-strong); border-radius: 999px; color: var(--color-text-muted); font-size: 11px; font-weight: 600; }
 .flow-wait { display: grid; grid-template-columns: 100px 1fr; gap: var(--space-2); }
 .flow-wait small { grid-column: 1 / -1; }
+/* The credit that stays visible (NOTICE.md), and Settings → About. */
+.sidebar-credit { display: block; padding: var(--space-2) var(--space-2) 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.4; text-decoration: none; }
+.sidebar-credit:hover { color: var(--color-text); text-decoration: underline; }
+.about__credit { color: var(--color-accent-text); font-weight: 600; }
+.about__facts { display: grid; gap: var(--space-3); margin: 0; }
+.about__facts div { display: grid; gap: 2px; }
+.about__facts dt { color: var(--color-text-muted); font-size: var(--font-size-label); }
+.about__facts dd { margin: 0; line-height: 1.5; }
+.about h3 { margin: var(--space-4) 0 var(--space-2); font-size: var(--font-size-body); }
+.about__people { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.about__people li { display: grid; gap: 2px; }
+.about__people small { color: var(--color-text-muted); }
