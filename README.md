@@ -4,6 +4,9 @@ An outbound calling CRM you run yourself. Call leads from the browser through yo
 scripts, per-lead variables, voicemail drop, follow-ups, a pipeline, analytics and n8n-style automations. Every
 feature that costs money shows its price in Settings and can be switched off.
 
+Run it on your own computer (there's a Windows setup wizard) or deploy it on a server, see
+[Deploy on a server](#deploy-on-a-server).
+
 **Features**
 
 - **Calling:** call from the browser (or ring your phone or a VoIP app first), from your own Twilio number. Mic
@@ -28,11 +31,15 @@ feature that costs money shows its price in Settings and can be switched off.
 |---|---|---|
 | **Windows 10/11** (or macOS/Linux, see below) | Running the app | |
 | **Node.js 22 or newer** | Runs the app | https://nodejs.org |
-| **cloudflared** | A free tunnel so Twilio can reach your computer | https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ |
+| **cloudflared** (not needed on a server) | A tunnel so Twilio can reach your computer | https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ |
 | **A Twilio account** with a voice-capable number | Placing calls | https://www.twilio.com/try-twilio |
-| Optional: **Docker Desktop** | Only if you want PostgreSQL instead of the built-in file storage | https://www.docker.com/products/docker-desktop/ |
-| Optional: a **Groq** key | AI features (free plan) | https://console.groq.com/keys |
-| Optional: a **Resend** account | Invite and password emails from your domain | https://resend.com |
+| Optional: **Docker Desktop** | Only if you want PostgreSQL instead of the built-in file storage on your computer | https://www.docker.com/products/docker-desktop/ |
+| Recommended: a **Resend** account and **your own domain** | Emails team invites and password resets, sent from your domain (you verify the domain in Resend) | https://resend.com |
+| Optional: a **Groq** key | AI features | https://console.groq.com/keys |
+
+You don't need Resend to get started: the first owner account is created on the first visit, without email. Without
+it, though, you copy each invite link and send it yourself, and nobody can reset a forgotten password by email. Add the
+key and sender in Settings → Integrations → Email.
 
 The Windows setup wizard installs Node.js, cloudflared and (if you pick it) Docker for you. What each part costs is
 listed in [PRICES.md](PRICES.md) and in the app under Settings, Features & costs. The app itself is free.
@@ -76,14 +83,40 @@ Using Claude Code, Codex or another coding agent? Paste this:
 > `.env`. Then run `npm run local`, open http://localhost:3000, and tell me to create my owner account and connect
 > Twilio in Settings → Phone numbers. If a step fails, show me the error and explain it before trying something else.
 
-## Host it on a server instead
+## Deploy on a server
 
-A hosted copy has a fixed public address, so it needs no tunnel. With Dokploy (or any Docker host):
+Open Dialer runs just as well on a server, so your team can use it from anywhere and nothing needs to stay open on your
+computer. A server has a fixed public address, so it needs no tunnel and no cloudflared.
 
-1. Create an application from this repository using the included `Dockerfile`, container port `3000`.
-2. Set `DATABASE_URL` (a Postgres database), `OPEN_DIALER_ENCRYPTION_KEY` (a long random secret) and
-   `OPEN_DIALER_PUBLIC_URL` (its HTTPS address). See [.env.example](.env.example).
-3. Add a domain and deploy. The first visit asks you to create the owner account.
+You need:
+
+- a server or hosting platform that runs Docker (a VPS with Dokploy or Coolify, Railway, Render, Fly.io…),
+- a PostgreSQL database (most platforms can create one for you),
+- a domain or subdomain for the app, like `dialer.yourcompany.com`, with HTTPS,
+- Resend with your domain verified, so invites and password resets go out by email.
+
+Steps:
+
+1. Create an application from this repository. It builds with the included `Dockerfile` and listens on port `3000`.
+2. Set these environment variables (see [.env.example](.env.example)):
+   - `DATABASE_URL`: your PostgreSQL connection string.
+   - `OPEN_DIALER_ENCRYPTION_KEY`: a long random secret. Generate one with
+     `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` and never change it afterwards.
+   - `OPEN_DIALER_PUBLIC_URL`: the app's HTTPS address, like `https://dialer.yourcompany.com`. Twilio and email links
+     use it.
+3. Point your domain at it and deploy. The app creates its database table on first start.
+4. Open the address, create the owner account, then connect Twilio (Settings → Phone numbers) and Resend
+   (Settings → Integrations → Email).
+
+With plain Docker on a server:
+
+```bash
+docker build -t open-dialer .
+docker run -d --name open-dialer --restart unless-stopped -p 3000:3000   -e DATABASE_URL="postgres://user:password@db-host:5432/opendialer"   -e OPEN_DIALER_ENCRYPTION_KEY="your-long-random-secret"   -e OPEN_DIALER_PUBLIC_URL="https://dialer.yourcompany.com"   open-dialer
+```
+
+Then put it behind HTTPS (your platform's proxy, Caddy or nginx). A server copy should always use PostgreSQL: the
+built-in file storage lives inside the container and is lost when it's rebuilt.
 
 Before real calls, check consent and calling rules for where you call. Some US states also require consent for call
 transcription.
