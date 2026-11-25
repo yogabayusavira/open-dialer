@@ -380,20 +380,32 @@ function appUrl(req) {
   if (process.env.NODE_ENV === "production") throw new Error("Set OPEN_DIALER_PUBLIC_URL so sign-in links point at this app.");
   return `http://${req.headers.host}`;
 }
-function emailReady() {
-  return Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL);
+// What's switched on in Settings → Features & costs. Anything not saved yet keeps its default.
+const featureDefaults = { transcription: false, captions: true, saveTranscripts: true, ai: true, email: true };
+function features(state) {
+  return { ...featureDefaults, ...(state?.settings?.features || {}) };
+}
+// Email goes out through the workspace's own Resend key and sender (Settings → Email); the server's .env is the fallback.
+function emailConfig(state) {
+  if (!features(state).email) return null;
+  if (state?.email?.key && state.email.from) return { key: unseal(state.email.key), from: state.email.from };
+  if (process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL) return { key: process.env.RESEND_API_KEY, from: process.env.RESEND_FROM_EMAIL };
+  return null;
+}
+function emailReady(state) {
+  return Boolean(emailConfig(state));
 }
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 }
 // Sends one email through Resend. Returns false when email isn't set up, so the caller can show the link instead.
-async function sendEmail(to, subject, lines, button) {
-  if (!emailReady()) return false;
+async function sendEmail(config, to, subject, lines, button) {
+  if (!config) return false;
   const html = `<div style="font-family:system-ui,sans-serif;font-size:15px;line-height:1.5;color:#111">${lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}<p><a href="${escapeHtml(button.url)}" style="display:inline-block;padding:10px 18px;border-radius:8px;background:#4a0d72;color:#fff;text-decoration:none;font-weight:600">${escapeHtml(button.label)}</a></p><p style="color:#666;font-size:13px">Or paste this link into your browser: ${escapeHtml(button.url)}</p></div>`;
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
-    headers: { authorization: `Bearer ${process.env.RESEND_API_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({ from: process.env.RESEND_FROM_EMAIL, to: [to], subject, html, text: `${lines.join("\n\n")}\n\n${button.label}: ${button.url}` }),
+    headers: { authorization: `Bearer ${config.key}`, "content-type": "application/json" },
+    body: JSON.stringify({ from: config.from, to: [to], subject, html, text: `${lines.join("\n\n")}\n\n${button.label}: ${button.url}` }),
   });
   if (!response.ok) {
     const detail = await response.json().catch(() => ({}));
@@ -403,11 +415,13 @@ async function sendEmail(to, subject, lines, button) {
 }
 async function sendInvite(req, user, token, invitedBy, company) {
   const url = `${appUrl(req)}/#welcome/${token}`;
-  return emailOrLink(url, () => sendEmail(user.email, `${invitedBy} invited you to ${company} on Open Dialer`, [`Hi ${user.name},`, `${invitedBy} added you to ${company} on Open Dialer. Set a password to sign in. This link works for 7 days.`], { label: "Set your password", url }));
+  const config = emailConfig(await readState());
+  return emailOrLink(url, () => sendEmail(config, user.email, `${invitedBy} invited you to ${company} on Open Dialer`, [`Hi ${user.name},`, `${invitedBy} added you to ${company} on Open Dialer. Set a password to sign in. This link works for 7 days.`], { label: "Set your password", url }));
 }
 async function sendReset(req, user, token) {
   const url = `${appUrl(req)}/#welcome/${token}`;
-  return emailOrLink(url, () => sendEmail(user.email, "Reset your Open Dialer password", [`Hi ${user.name},`, "Use this link to choose a new password. It works for 1 hour. If you didn't ask for this, you can ignore this email."], { label: "Choose a new password", url }));
+  const config = emailConfig(await readState());
+  return emailOrLink(url, () => sendEmail(config, user.email, "Reset your Open Dialer password", [`Hi ${user.name},`, "Use this link to choose a new password. It works for 1 hour. If you didn't ask for this, you can ignore this email."], { label: "Choose a new password", url }));
 }
 // If the email can't go out (not set up, or Resend refuses), hand back the link so the owner can pass it on.
 async function emailOrLink(url, send) {
@@ -426,6 +440,7 @@ const aiProviders = {
   openrouter: { name: "OpenRouter", url: "https://openrouter.ai/api/v1/chat/completions", model: "google/gemma-4-26b-a4b-it:free" },
 };
 function aiConfig(state) {
+  if (!features(state).ai) return null;
   if (state.ai?.key) {
     const provider = aiProviders[state.ai.provider] ? state.ai.provider : "groq";
     return { provider, model: state.ai.model || aiProviders[provider].model, key: unseal(state.ai.key) };
@@ -515,7 +530,8 @@ function safeState(state) {
     state.connection || {};
   // The AI key never leaves the server; the app only learns whether AI is ready and the key's last characters.
   const { key, ...ai } = state.ai || {};
-  return { ...state, connection: state.connection ? connection : null, ai: { ...ai, ready: Boolean(key || process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY) } };
+  const { key: emailKey, ...email } = state.email || {};
+  return { ...state, connection: state.connection ? connection : null, ai: { ...ai, ready: Boolean(key || process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY) }, email: { ...email, saved: Boolean(emailKey), envFallback: Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL) } };
 }
 function activity(state, action, detail) {
   state.activity.unshift({
@@ -547,7 +563,7 @@ const leadStages = ["New", "Follow-up", "Meeting booked", "Won", "Lost"];
 const callOutcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call"];
 // The workspace's automations, as sent by the Automations page: a trigger (with the campaigns it listens to, none
 // meaning any), then steps run in order.
-const automationTriggers = ["lead", "outcome", "voicemail"];
+const automationTriggers = ["lead", "outcome", "voicemail", "transcribed"];
 const conditionOps = ["is", "is not", "contains", "is empty", "is not empty"];
 function cleanAutomations(list) {
   return list.slice(0, 50).map((item) => {
@@ -556,8 +572,9 @@ function cleanAutomations(list) {
       if (step?.type === "if") return { type: "if", field: cleanText(step.field, 120), op: conditionOps.includes(step.op) ? step.op : "is", value: cleanText(step.value, 200) };
       if (step?.type === "say" && trigger === "lead") return { type: "say", text: cleanText(step.text, 1000) };
       if (step?.type === "play" && trigger === "voicemail") return { type: "play", recordingId: /^vm_\w+$/.test(step.recordingId || "") ? step.recordingId : "" };
-      if (step?.type === "stage" && trigger === "outcome") return { type: "stage", stage: leadStages.includes(step.stage) ? step.stage : "Follow-up" };
-      if (step?.type === "followup" && trigger === "outcome") return { type: "followup", days: Math.min(60, Math.max(0, Math.round(Number(step.days) || 0))) };
+      if (step?.type === "ask" && trigger === "transcribed") return { type: "ask", prompt: cleanText(step.prompt, 1000), field: cleanText(step.field, 60) };
+      if (step?.type === "stage" && (trigger === "outcome" || trigger === "transcribed")) return { type: "stage", stage: leadStages.includes(step.stage) ? step.stage : "Follow-up" };
+      if (step?.type === "followup" && (trigger === "outcome" || trigger === "transcribed")) return { type: "followup", days: Math.min(60, Math.max(0, Math.round(Number(step.days) || 0))) };
       return null;
     }).filter(Boolean);
     return {
@@ -566,7 +583,7 @@ function cleanAutomations(list) {
       on: item?.on !== false,
       trigger,
       campaigns: (Array.isArray(item?.campaigns) ? item.campaigns : []).map(campaignName).filter(Boolean).slice(0, 50),
-      ...(trigger === "outcome" ? { outcomes: (Array.isArray(item?.outcomes) ? item.outcomes : []).filter((outcome) => callOutcomes.includes(outcome)) } : {}),
+      ...(trigger === "outcome" || trigger === "transcribed" ? { outcomes: (Array.isArray(item?.outcomes) ? item.outcomes : []).filter((outcome) => callOutcomes.includes(outcome)) } : {}),
       steps,
     };
   });
@@ -756,6 +773,107 @@ function audioType(bytes) {
   if (head.subarray(0, 4).toString("latin1") === "RIFF" && head.subarray(8, 12).toString("latin1") === "WAVE") return "audio/wav";
   if (head.subarray(0, 3).toString("latin1") === "ID3" || (head[0] === 0xff && (head[1] & 0xe0) === 0xe0)) return "audio/mpeg";
   return null;
+}
+// ---- Live transcription ----
+// On when switched on in Settings and the lead's campaigns haven't opted out.
+function transcribeFor(state, lead) {
+  return features(state).transcription && !(lead.campaigns || []).some((name) => state.campaignSettings[name]?.transcribe === false);
+}
+function transcriptToken(ws) {
+  return createHmac("sha256", encryptionKey()).update(`transcript:${ws}`).digest("base64url");
+}
+function transcriptUrlFor(req, ws) {
+  const url = new URL("/api/twilio/voice/transcript", publicOrigin(req));
+  url.searchParams.set("ws", ws);
+  url.searchParams.set("sig", transcriptToken(ws));
+  return url;
+}
+// Lines of calls in progress, by the call's sid: finished sentences plus what each side is saying right now.
+// shortcut: kept in memory until the call ends, so a server restart mid-call loses that call's transcript.
+const liveTranscripts = new Map();
+function liveFor(sid) {
+  if (!liveTranscripts.has(sid)) liveTranscripts.set(sid, { lines: [], partial: {}, stopped: false, at: Date.now() });
+  return liveTranscripts.get(sid);
+}
+// A follow-up some business days out at 10:00, the way the app writes due dates.
+function businessDaysOut(days) {
+  const date = new Date();
+  for (let added = 0; added < days; ) {
+    date.setDate(date.getDate() + 1);
+    if (date.getDay() !== 0 && date.getDay() !== 6) added += 1;
+  }
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T10:00`;
+}
+// A lead's value for an automation's field: detail:<column>, a lead field, or a script variable mapped in the campaign.
+function automationField(field, lead, settings, campaign, depth = 0) {
+  if (field.startsWith("detail:")) return String(lead.details?.[field.slice(7)] || "").trim();
+  if (field === "first_name") return String(lead.name || "").replace(/^(dr|mr|mrs|ms|mx)\.?\s+/i, "").split(/\s+/)[0] || "";
+  if (["name", "company", "role", "phone"].includes(field)) return String(lead[field] || "").trim();
+  const source = settings[campaign]?.variables?.[field];
+  if (source && depth === 0) return automationField(source, lead, settings, campaign, 1);
+  const simple = (text) => String(text).toLowerCase().replace(/[^a-z0-9]/g, "");
+  const column = Object.keys(lead.details || {}).find((key) => simple(key) === simple(field));
+  return column ? String(lead.details[column]).trim() : "";
+}
+function automationMatches(step, value) {
+  const have = value.toLowerCase();
+  const want = String(step.value || "").trim().toLowerCase();
+  if (step.op === "is empty") return !have;
+  if (step.op === "is not empty") return Boolean(have);
+  if (step.op === "contains") return have.includes(want);
+  return step.op === "is not" ? have !== want : have === want;
+}
+// "Call transcribed" automations: run once the transcript is in and the outcome is logged. Ask AI answers go into
+// lead fields that later steps can check. Without "Save transcripts", the text is dropped afterwards.
+async function runTranscribed(sid) {
+  const state = await readState();
+  const call = state.calls.find((item) => item.sid === sid);
+  const lead = call && state.leads.find((item) => item.id === call.leadId);
+  if (!call || !lead || call.automated || !call.transcriptDone || !call.loggedOutcome) return;
+  const text = (call.transcript || []).map((line) => `${line.who === "you" ? "You" : "Them"}: ${line.text}`).join("\n");
+  const details = {};
+  let stage = "";
+  let due = "";
+  for (const item of state.automations || []) {
+    if (!item.on || item.trigger !== "transcribed" || (item.outcomes?.length && !item.outcomes.includes(call.loggedOutcome))) continue;
+    const campaign = item.campaigns?.length ? (lead.campaigns || []).find((name) => item.campaigns.includes(name)) : (lead.campaigns || [])[0] || "";
+    if (campaign === undefined) continue;
+    const view = { ...lead, details: { ...(lead.details || {}), ...details } };
+    for (const step of item.steps) {
+      if (step.type === "if" && !automationMatches(step, automationField(step.field, view, state.campaignSettings, campaign))) break;
+      if (step.type === "ask") {
+        const config = aiConfig(state);
+        if (!config || !text || !step.prompt || !step.field) break;
+        try {
+          const answer = cleanText(await aiChat(config, "You read a sales call transcript and answer one question about it. \"You\" is the caller, \"Them\" is the lead. Answer in plain words, as short as the question allows, and never invent anything the transcript doesn't say.", `Question: ${step.prompt}\n\nTranscript:\n${text}`), 500);
+          details[step.field] = answer;
+          view.details[step.field] = answer;
+        } catch (error) {
+          console.error(`[open-dialer] Ask AI failed: ${error.message}`);
+          break;
+        }
+      }
+      if (step.type === "stage") stage = step.stage;
+      if (step.type === "followup") due = businessDaysOut(step.days);
+    }
+  }
+  await updateState((fresh) => {
+    const target = fresh.calls.find((item) => item.sid === sid);
+    const person = target && fresh.leads.find((item) => item.id === target.leadId);
+    if (!target || !person || target.automated) return;
+    target.automated = true;
+    if (Object.keys(details).length) person.details = { ...(person.details || {}), ...details };
+    if (stage && !person.dnc) enterStage(person, stage);
+    if (due && !person.dnc && !["Won", "Lost"].includes(person.status)) person.due = due;
+    if (!features(fresh).saveTranscripts) delete target.transcript;
+    if (Object.keys(details).length || stage || due) activity(fresh, "Call transcribed automation ran", `${leadLabel(person)}${stage ? ` · ${stage}` : ""}`);
+  });
+}
+
+// Runs after the response, outside the request's state lock, so its own save waits its turn like any other.
+function runTranscribedLater(sid) {
+  const store = requestContext.getStore();
+  setImmediate(() => requestContext.run({ ...store, locked: false }, () => runTranscribed(sid)).catch((error) => console.error(`[open-dialer] ${error.message}`)));
 }
 function statusUrlFor(req, leadId) {
   const url = new URL("/api/twilio/voice/status", publicOrigin(req));
@@ -996,6 +1114,8 @@ async function route(req, res, url) {
         if (!final.includes(call.twilioStatus) || final.includes(status)) call.twilioStatus = status;
         if (sipCode) call.sipCode = sipCode;
         if (report.ParentCallSid && report.CallSid) call.leadLegSid = report.CallSid;
+        // Talk time of the lead's leg, for the cost estimate in Settings.
+        if (report.ParentCallSid && report.CallDuration) call.seconds = Math.max(0, Number(report.CallDuration) || 0);
         if (report.ErrorCode) call.errorCode = String(report.ErrorCode);
         if (final.includes(status) && call.outcome === "In progress") {
           call.outcome = status === "completed" ? "Call ended" : "Didn't connect";
@@ -1010,6 +1130,66 @@ async function route(req, res, url) {
         await new Promise((resolve) => setTimeout(resolve, 1500));
       return json(res, 200, {});
     }
+    // Twilio's live transcription: one POST per finished or in-progress sentence, then one when it stops.
+    if (url.pathname === "/api/twilio/voice/transcript" && req.method === "POST") {
+      const ws = url.searchParams.get("ws") || "";
+      if (!ws || !safeEqual(url.searchParams.get("sig") || "", transcriptToken(ws))) return json(res, 403, { error: "Invalid transcript link." });
+      requestContext.getStore().ws = ws;
+      const report = await getFormBody(req);
+      const sid = String(report.CallSid || "");
+      if (!sid) return json(res, 200, {});
+      const live = liveFor(sid);
+      const event = String(report.TranscriptionEvent || "");
+      if (event === "transcription-content") {
+        let said = "";
+        try { said = String(JSON.parse(report.TranscriptionData || "{}").transcript || "").trim(); } catch {}
+        // The browser's side is the inbound track; the lead is what Twilio plays back to it.
+        const who = report.Track === "inbound_track" ? "you" : "lead";
+        if (report.Final === "true") {
+          delete live.partial[who];
+          if (said) live.lines.push({ who, text: said.slice(0, 2000), at: new Date().toISOString() });
+        } else live.partial[who] = said;
+      }
+      if (event === "transcription-error") console.error(`[open-dialer] Transcription error ${report.TranscriptionErrorCode}: ${report.TranscriptionError}`);
+      if (event === "transcription-stopped" || event === "transcription-error") {
+        live.stopped = true;
+        live.partial = {};
+        const run = await updateState((state) => {
+          const call = state.calls.find((item) => item.sid === sid);
+          if (!call || call.transcriptDone) return false;
+          call.transcript = live.lines.slice(0, 2000);
+          call.transcriptDone = true;
+          if (event === "transcription-error") call.transcriptError = cleanText(report.TranscriptionError, 200);
+          return call.loggedOutcome ? "run" : "saved";
+        });
+        // Kept a minute so a last poll from the call screen still sees it.
+        setTimeout(() => liveTranscripts.delete(sid), 60_000);
+        if (run === "run") runTranscribedLater(sid);
+      }
+      return json(res, 200, {});
+    }
+    if (url.pathname.startsWith("/api/calls/") && url.pathname.endsWith("/transcript") && req.method === "GET") {
+      const id = url.pathname.split("/")[3];
+      const state = await readState();
+      const call = state.calls.find((item) => item.id === id);
+      if (!call || !findLead(state, call.leadId)) return json(res, 404, { error: "Call not found." });
+      const live = call.sid && liveTranscripts.get(call.sid);
+      return json(res, 200, { on: Boolean(call.transcribing), stopped: Boolean(live?.stopped || call.transcriptDone), lines: live ? live.lines : call.transcript || [], partial: live?.partial || {} });
+    }
+    // The caller turns transcription off for the rest of this call, e.g. when the lead asks.
+    if (url.pathname === "/api/calls/transcript/stop" && req.method === "POST") {
+      const { callId } = await getBody(req);
+      const state = await readState();
+      const call = state.calls.find((item) => item.id === callId);
+      if (!call?.sid || !findLead(state, call.leadId)) return json(res, 404, { error: "That call isn't running anymore." });
+      try {
+        await twilioRequest(state.connection, `/Calls/${call.sid}/Transcriptions/notes.json`, { Status: "stopped" });
+      } catch (error) {
+        return json(res, 502, { error: error.message });
+      }
+      liveFor(call.sid).stopped = true;
+      return json(res, 200, { ok: true });
+    }
     if (url.pathname === "/api/twilio/voice/client" && req.method === "POST") {
       const params = await getFormBody(req);
       const hangup = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
@@ -1019,14 +1199,17 @@ async function route(req, res, url) {
       const state = await readState();
       const lead = state.leads.find((item) => item.id === params.leadId);
       if (!lead || lead.dnc) return twiml(res, hangup);
+      const transcribe = transcribeFor(state, lead);
       await updateState((fresh) => {
         if (fresh.calls.some((item) => item.sid === params.CallSid)) return false;
-        fresh.calls.unshift({ id: /^call_[\w]+$/.test(params.callId || "") ? params.callId : `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling from the app.", at: new Date().toISOString(), sid: params.CallSid, ...(/^user_\w+$/.test(params.userId || "") ? { userId: params.userId } : {}) });
+        fresh.calls.unshift({ id: /^call_[\w]+$/.test(params.callId || "") ? params.callId : `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling from the app.", at: new Date().toISOString(), sid: params.CallSid, ...(/^user_\w+$/.test(params.userId || "") ? { userId: params.userId } : {}), ...(transcribe ? { transcribing: true } : {}) });
         activity(fresh, "Call started", `${leadLabel(lead)} · from the app`);
       });
       const statusUrl = statusUrlFor(req, lead.id);
       const digits = lead.extension ? ` sendDigits="wwww${extensionDigits(lead.extension)}"` : "";
-      return twiml(res, `<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId="${escapeXml(state.connection?.selectedNumber || "")}" answerOnBridge="true"><Number${digits} statusCallback="${escapeXml(statusUrl.toString())}" statusCallbackMethod="POST" statusCallbackEvent="initiated ringing answered completed">${escapeXml(lead.phone)}</Number></Dial></Response>`);
+      // Live transcription (Settings → Features & costs): Twilio sends each sentence to /transcript. Nothing is recorded.
+      const start = transcribe ? `<Start><Transcription name="notes" statusCallbackUrl="${escapeXml(transcriptUrlFor(req, ws).toString())}" track="both_tracks" inboundTrackLabel="you" outboundTrackLabel="lead" partialResults="true" /></Start>` : "";
+      return twiml(res, `<?xml version="1.0" encoding="UTF-8"?><Response>${start}<Dial callerId="${escapeXml(state.connection?.selectedNumber || "")}" answerOnBridge="true"><Number${digits} statusCallback="${escapeXml(statusUrl.toString())}" statusCallbackMethod="POST" statusCallbackEvent="initiated ringing answered completed">${escapeXml(lead.phone)}</Number></Dial></Response>`);
     }
     if (url.pathname === "/api/session" && req.method === "GET") {
       const user = currentUser();
@@ -1049,8 +1232,10 @@ async function route(req, res, url) {
       if (!canAttemptLogin(req)) return json(res, 429, { error: "Too many attempts. Try again in 15 minutes." });
       recordFailedLogin(req);
       const email = cleanEmail((await getBody(req)).email);
-      if (!emailReady()) return json(res, 503, { error: "Email isn't set up yet. Ask your company's owner for a new sign-in link." });
-      const found = await updateAccounts((accounts) => {
+      const owner = (await readAccounts()).users.find((item) => item.email === email && item.passwordHash);
+      if (owner) requestContext.getStore().ws = owner.workspace;
+      if (owner && !emailReady(await readState())) return json(res, 503, { error: "Email isn't set up yet. Ask your company's owner for a new sign-in link." });
+      const found = owner && await updateAccounts((accounts) => {
         const user = accounts.users.find((item) => item.email === email && item.passwordHash);
         return user ? { user: { ...user }, token: giveLink(user, "reset") } : false;
       });
@@ -1090,7 +1275,7 @@ async function route(req, res, url) {
     const ownerOnly = [
       ["POST", /^\/api\/twilio\/(validate|connection)$/], ["DELETE", /^\/api\/twilio\/connection$/], ["PATCH", /^\/api\/twilio\/connection$/], ["GET", /^\/api\/twilio\/account-check$/],
       ["PATCH", /^\/api\/settings$/], ["PUT", /^\/api\/settings\/fields$/], ["POST", /^\/api\/leads\/(import|delete|assign)$/], ["DELETE", /^\/api\/leads\/[^/]+$/], ["DELETE", /^\/api\/dnc\/[^/]+$/], ["POST", /^\/api\/dnc$/],
-      ["PUT", /^\/api\/campaigns\/script$/], ["POST", /^\/api\/campaigns\/script-pdf$/], ["DELETE", /^\/api\/campaigns\/script-pdf$/], ["PUT", /^\/api\/automations$/], ["POST", /^\/api\/voicemails$/], ["PATCH", /^\/api\/voicemails\/[^/]+$/], ["DELETE", /^\/api\/voicemails\/[^/]+$/],
+      ["PUT", /^\/api\/campaigns\/script$/], ["POST", /^\/api\/campaigns\/script-pdf$/], ["DELETE", /^\/api\/campaigns\/script-pdf$/], ["PUT", /^\/api\/automations$/], ["PATCH", /^\/api\/settings\/features$/], ["PUT", /^\/api\/email\/settings$/], ["DELETE", /^\/api\/email\/settings$/], ["POST", /^\/api\/email\/test$/], ["POST", /^\/api\/voicemails$/], ["PATCH", /^\/api\/voicemails\/[^/]+$/], ["DELETE", /^\/api\/voicemails\/[^/]+$/],
       ["POST", /^\/api\/team$/], ["PATCH", /^\/api\/team\/[^/]+$/], ["DELETE", /^\/api\/team\/[^/]+$/], ["PATCH", /^\/api\/workspace$/],
       ["PUT", /^\/api\/ai\/settings$/], ["DELETE", /^\/api\/ai\/settings$/], ["POST", /^\/api\/ai\/(preview|forget)$/],
     ];
@@ -1202,14 +1387,15 @@ async function route(req, res, url) {
     if (url.pathname === "/api/state" && req.method === "GET") {
       const accounts = await readAccounts();
       const me = currentUser();
+      const state = await readState();
       // callbackReachable tells the setup guide whether Twilio could fetch the call instructions from this app.
       return json(res, 200, {
-        ...safeState(visibleState(await readState())),
+        ...safeState(visibleState(state)),
         callbackReachable: !/\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(publicOrigin(req)),
         me: publicUser(me),
         workspace: { id: me.workspace, name: accounts.workspaces.find((item) => item.id === me.workspace)?.name || "Workspace" },
         team: accounts.users.filter((item) => item.workspace === me.workspace).map((item) => publicUser(item, isOwner())),
-        emailReady: emailReady(),
+        emailReady: emailReady(state),
         ...(me.admin ? { companies: accounts.workspaces.map((ws) => ({ id: ws.id, name: ws.name, people: accounts.users.filter((item) => item.workspace === ws.id).map((item) => publicUser(item)) })) } : {}),
       });
     }
@@ -1247,7 +1433,7 @@ async function route(req, res, url) {
       return json(res, 201, lead);
     }
     if (url.pathname === "/api/campaigns/script" && req.method === "PUT") {
-      const { campaign, script, variables, value, clean, pinned } = await getBody(req);
+      const { campaign, script, variables, value, clean, pinned, transcribe } = await getBody(req);
       const name = campaignName(campaign);
       if (!name) return json(res, 400, { error: "Choose a campaign." });
       // What one won deal in this campaign is worth; blank clears it.
@@ -1265,6 +1451,7 @@ async function route(req, res, url) {
       if (amount === null) delete state.campaignSettings[name].value;
       else if (amount !== undefined) state.campaignSettings[name].value = amount;
       // Lead details shown first on the call screen for this campaign, in the order they were pinned.
+      if (typeof transcribe === "boolean") state.campaignSettings[name].transcribe = transcribe;
       if (Array.isArray(pinned)) state.campaignSettings[name].pinned = [...new Set(pinned.map((label) => cleanText(label, 60)).filter(Boolean))].slice(0, 6);
       // AI cleanup per variable: an example (raw → how you'd say it) and notes. Turning one off drops its saved versions.
       if (clean && typeof clean === "object" && !Array.isArray(clean)) {
@@ -1637,7 +1824,11 @@ async function route(req, res, url) {
       else if (["Callback", "Maybe later", "Interested"].includes(outcome)) lead.due = "Follow up";
       if (call.note) lead.note = call.note;
       activity(state, "Call outcome recorded", `${leadLabel(lead)} · ${outcome}`);
+      // The newest transcribed call of this lead waits for its outcome before "Call transcribed" automations run.
+      const heard = state.calls.find((item) => item.sid && item.leadId === lead.id && item.transcribing && !item.loggedOutcome);
+      if (heard) heard.loggedOutcome = outcome;
       await writeState(state);
+      if (heard?.transcriptDone) runTranscribedLater(heard.sid);
       return json(res, 201, call);
     }
     if (url.pathname === "/api/twilio/validate" && req.method === "POST") {
@@ -1811,6 +2002,49 @@ async function route(req, res, url) {
         activity(state, "Custom fields updated", list.join(", ") || "None");
       });
       return json(res, 200, { fields: list });
+    }
+    // Settings → Features & costs: switch paid or optional parts on and off.
+    if (url.pathname === "/api/settings/features" && req.method === "PATCH") {
+      const body = await getBody(req);
+      const next = await updateState((state) => {
+        const current = features(state);
+        for (const key of Object.keys(featureDefaults)) if (typeof body[key] === "boolean") current[key] = body[key];
+        state.settings = { ...(state.settings || {}), features: current };
+        activity(state, "Features updated", Object.entries(current).map(([key, on]) => `${key} ${on ? "on" : "off"}`).join(", "));
+        return current;
+      });
+      return json(res, 200, next);
+    }
+    // Settings → Email: the workspace's own Resend key and sender, so mail goes out from its own domain.
+    if (url.pathname === "/api/email/settings" && req.method === "PUT") {
+      const body = await getBody(req);
+      const typed = cleanText(body.key, 200);
+      const from = cleanText(body.from, 200);
+      if (!/^([^<>]+<)?[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>?$/.test(from)) return json(res, 400, { error: "Write the sender like Bayu <bayu@yourdomain.com>, on a domain you verified in Resend." });
+      if (typed && !/^re_\w+/.test(typed)) return json(res, 400, { error: "That doesn't look like a Resend API key. They start with re_." });
+      if (!typed && !(await readState()).email?.key) return json(res, 400, { error: "Paste your Resend API key." });
+      await updateState((state) => {
+        state.email = { key: typed ? seal(typed) : state.email.key, from, hint: typed ? `${typed.slice(0, 5)}…${typed.slice(-4)}` : state.email.hint };
+        activity(state, "Email sender saved", from);
+      });
+      return json(res, 200, { ok: true });
+    }
+    if (url.pathname === "/api/email/settings" && req.method === "DELETE") {
+      await updateState((state) => {
+        delete state.email;
+        activity(state, "Email key removed", "");
+      });
+      return json(res, 200, { ok: true });
+    }
+    if (url.pathname === "/api/email/test" && req.method === "POST") {
+      const config = emailConfig(await readState());
+      if (!config) return json(res, 400, { error: "Save a Resend key and sender first, and keep Email switched on." });
+      try {
+        await sendEmail(config, currentUser().email, "Open Dialer test email", ["This is a test from Open Dialer. If you got it, invites and password resets will reach your team."], { label: "Open Open Dialer", url: appUrl(req) });
+      } catch (error) {
+        return json(res, 502, { error: error.message });
+      }
+      return json(res, 200, { sentTo: currentUser().email });
     }
     if (url.pathname === "/api/settings" && req.method === "PATCH") {
       const { bookingUrl } = await getBody(req);

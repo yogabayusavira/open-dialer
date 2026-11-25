@@ -57,6 +57,7 @@ import {
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
+import { money, prices } from "./prices";
 import { checkCondition, describeCondition, isOtherwise, parseCondition } from "./conditions";
 import "./styles.css";
 import "./design-system.css";
@@ -98,18 +99,23 @@ type CallRecord = {
   note: string;
   at: string;
   userId?: string;
+  // Talk time of the lead's side, from Twilio; transcript lines when live transcription was on.
+  seconds?: number;
+  transcribing?: boolean;
+  transcript?: { who: string; text: string; at: string }[];
 };
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
-type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[] };
+type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[]; transcribe?: boolean };
 // The workspace's automations, n8n style: a trigger (with the campaigns it listens to, none meaning any), then
 // steps run in order. "Only continue if" stops the rest
 // when the lead doesn't match.
-type AutomationTrigger = "lead" | "outcome" | "voicemail";
+type AutomationTrigger = "lead" | "outcome" | "voicemail" | "transcribed";
 type ConditionOp = "is" | "is not" | "contains" | "is empty" | "is not empty";
 type AutomationStep =
   | { type: "if"; field: string; op: ConditionOp; value: string }
   | { type: "say"; text: string }
+  | { type: "ask"; prompt: string; field: string }
   | { type: "play"; recordingId: string }
   | { type: "stage"; stage: string }
   | { type: "followup"; days: number };
@@ -130,7 +136,8 @@ type State = {
   calls: CallRecord[];
   dncNumbers: string[];
   callbackReachable?: boolean;
-  settings?: { bookingUrl?: string; fields?: string[] };
+  settings?: { bookingUrl?: string; fields?: string[]; features?: Partial<Features> };
+  email?: { from?: string; hint?: string; saved?: boolean; envFallback?: boolean };
   ai?: { provider?: string; model?: string; hint?: string; ready: boolean };
   voicemails?: Recording[];
   me: Member;
@@ -154,6 +161,8 @@ type SettingsPage =
   | "privacy"
   | "booking"
   | "ai"
+  | "email"
+  | "costs"
   | "companies";
 
 class ApiError extends Error {
@@ -1229,6 +1238,7 @@ function App() {
             </button>
           </div>
         </header>}
+        {activeCall?.callId && featuresOf(state).transcription && featuresOf(state).captions && <LiveCaptions callId={activeCall.callId} />}
         {activeCall && (
           <InCallBar
             active={activeCall}
@@ -1423,6 +1433,7 @@ function App() {
         )}
         {screen === "settings" && (
           <Settings
+            fullState={state}
             me={state.me}
             workspace={state.workspace}
             team={state.team}
@@ -1542,7 +1553,7 @@ function CallHistory({
   const entries = calls
     .map((call) => ({ ...call, lead: leads.find((lead) => lead.id === call.leadId) }))
     .filter((call) => call.lead && new Date(call.at).getTime() >= cutoff)
-    .filter((call) => view === "callbacks" ? call.outcome === "Callback" : view === "conversations" ? ["Interested", "Meeting booked", "Callback", "Maybe later", "Not interested"].includes(call.outcome) : true)
+    .filter((call) => view === "callbacks" ? call.outcome === "Callback" : view === "conversations" ? ["Interested", "Meeting booked", "Callback", "Maybe later", "Not interested"].includes(call.outcome) || Boolean(call.transcript?.length) : true)
     .filter((call) => outcome === "All outcomes" || call.outcome === outcome)
     .filter((call) => [call.lead?.name, call.lead?.company, call.lead?.phone, call.outcome, call.note].join(" ").toLowerCase().includes(query.toLowerCase()));
   const exportCalls = () => {
@@ -1634,7 +1645,7 @@ function CallHistory({
         </div>
       )}
 
-      {!entries.length ? <div className="calls-empty"><p>{isCallbacks ? "No callbacks are recorded yet." : "No calls match this view."}</p><span><button type="button" onClick={onStartDialing}>Open leads →</button> or <button type="button" onClick={onOpenPhoneNumbers}>review phone settings →</button></span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><button type="button" className="text-link" onClick={() => call.lead && onOpenLead(call.lead.id)}><b>{call.lead && leadLabel(call.lead)}</b></button><small>{call.lead?.company} · {call.lead && formatPhone(call.lead.phone, call.lead.extension)}</small></div><Status tone={call.outcome === "Do not call" || call.outcome === "Didn't connect" ? "alert" : call.outcome === "In progress" || call.outcome === "Call ended" ? "quiet" : "good"}>{call.outcome}</Status><div><small>{dueLabel(call.at).text}</small>{call.note && <p>{call.note}</p>}</div></article>)}</div>}
+      {!entries.length ? <div className="calls-empty"><p>{isCallbacks ? "No callbacks are recorded yet." : "No calls match this view."}</p><span><button type="button" onClick={onStartDialing}>Open leads →</button> or <button type="button" onClick={onOpenPhoneNumbers}>review phone settings →</button></span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><button type="button" className="text-link" onClick={() => call.lead && onOpenLead(call.lead.id)}><b>{call.lead && leadLabel(call.lead)}</b></button><small>{call.lead?.company} · {call.lead && formatPhone(call.lead.phone, call.lead.extension)}</small></div><Status tone={call.outcome === "Do not call" || call.outcome === "Didn't connect" ? "alert" : call.outcome === "In progress" || call.outcome === "Call ended" ? "quiet" : "good"}>{call.outcome}</Status><div><small>{dueLabel(call.at).text}{call.seconds ? ` · ${clockOf(call.seconds)}` : ""}</small>{call.note && <p>{call.note}</p>}{call.transcript?.length ? <details className="call-transcript"><summary>Transcript · {call.transcript.length} line{call.transcript.length === 1 ? "" : "s"}</summary>{call.transcript.map((line, index) => <p key={index} className={`is-${line.who}`}><b>{line.who === "you" ? "You" : "Them"}</b> {line.text}</p>)}</details> : null}</div></article>)}</div>}
     </section>
   );
 }
@@ -3529,6 +3540,12 @@ function ScriptDialog({ campaign, initialTab = "script", settings, columns, lead
               {isNew && <label>Campaign name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="NC school districts" required autoFocus /></label>}
               <label><span>Deal value<small>for each won lead</small></span><input value={value} onChange={(event) => setValue(event.target.value)} inputMode="decimal" placeholder="$0" /></label>
               {!isNew && (
+                <label className="campaign-settings__check">
+                  <input type="checkbox" checked={settings.transcribe !== false} onChange={(event) => void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign, transcribe: event.target.checked }) }), event.target.checked ? "Calls in this campaign will be transcribed when Live transcription is on." : "Calls in this campaign won't be transcribed.", false)} />
+                  <span>Transcribe calls in this campaign<small>When Live transcription is on in Settings → Features & costs ({money(prices.twilioTranscription.amount)} a minute)</small></span>
+                </label>
+              )}
+              {!isNew && (
                 <div className="campaign-settings__leads">
                   <span>Leads<b>{leads.length}</b></span>
                   <button type="button" className="quiet-button" onClick={onImport}><FileUp size={16} aria-hidden="true" /> Import leads</button>
@@ -4033,20 +4050,23 @@ const triggerInfo: Record<AutomationTrigger, { title: string; detail: string; ic
   lead: { title: "Lead comes up", detail: "When a lead opens on the call screen", icon: UserRound },
   outcome: { title: "Call outcome logged", detail: "After you log how a call went", icon: ClipboardList },
   voicemail: { title: "Voicemail dropped", detail: "When you press Drop voicemail at the beep", icon: Voicemail },
+  transcribed: { title: "Call transcribed", detail: "After a transcribed call ends and you log the outcome", icon: FileText },
 };
 const stepInfo: Record<AutomationStep["type"], { title: string; detail: string; icon: typeof PhoneCall }> = {
   if: { title: "Only continue if", detail: "Stop here unless the lead matches", icon: Filter },
   say: { title: "Show a line", detail: "A line to say, at the top of the call screen", icon: MessageSquare },
+  ask: { title: "Ask AI", detail: "Ask about the call and save the answer to a lead field", icon: Sparkles },
   play: { title: "Play a voicemail", detail: "One of your Voicemails, then hang up", icon: Volume2 },
   stage: { title: "Move to stage", detail: "Put the lead in another pipeline stage", icon: Tag },
   followup: { title: "Follow up later", detail: "Set the follow-up some business days out", icon: CalendarClock },
 };
 // Which steps make sense after each trigger.
-const stepsFor: Record<AutomationTrigger, AutomationStep["type"][]> = { lead: ["if", "say"], outcome: ["if", "stage", "followup"], voicemail: ["if", "play"] };
+const stepsFor: Record<AutomationTrigger, AutomationStep["type"][]> = { lead: ["if", "say"], outcome: ["if", "stage", "followup"], voicemail: ["if", "play"], transcribed: ["ask", "if", "stage", "followup"] };
 const conditionOps: ConditionOp[] = ["is", "is not", "contains", "is empty", "is not empty"];
 function newStep(type: AutomationStep["type"]): AutomationStep {
   if (type === "if") return { type, field: "", op: "is", value: "" };
   if (type === "say") return { type, text: "" };
+  if (type === "ask") return { type, prompt: "", field: "Call summary" };
   if (type === "play") return { type, recordingId: "" };
   if (type === "stage") return { type, stage: "Follow-up" };
   return { type, days: 2 };
@@ -4058,17 +4078,18 @@ function fieldLabel(field: string) {
 function stepSummary(step: AutomationStep, vault: Recording[]) {
   if (step.type === "if") return step.field ? `${fieldLabel(step.field)} ${step.op}${step.op.includes("empty") ? "" : ` "${step.value}"`}` : "Pick a field";
   if (step.type === "say") return step.text.trim() || "Write the line";
+  if (step.type === "ask") return step.prompt.trim() ? `${step.field}: ${step.prompt}` : "Write the question";
   if (step.type === "play") return vault.find((item) => item.id === step.recordingId)?.name || (step.recordingId ? "Recording deleted" : "Pick a voicemail");
   if (step.type === "stage") return step.stage;
   return `${step.days} business day${step.days === 1 ? "" : "s"} out, 10:00`;
 }
 function triggerSummary(item: Automation) {
   const where = item.campaigns?.length ? item.campaigns.join(", ") : "Any campaign";
-  if (item.trigger !== "outcome") return where;
+  if (item.trigger !== "outcome" && item.trigger !== "transcribed") return where;
   return `${where} · ${item.outcomes?.length ? item.outcomes.join(", ") : "any outcome"}`;
 }
 // A step isn't done until its main field is filled in.
-const stepReady = (step: AutomationStep) => (step.type === "if" ? Boolean(step.field) : step.type === "say" ? Boolean(step.text.trim()) : step.type === "play" ? Boolean(step.recordingId) : true);
+const stepReady = (step: AutomationStep) => (step.type === "if" ? Boolean(step.field) : step.type === "say" ? Boolean(step.text.trim()) : step.type === "ask" ? Boolean(step.prompt.trim() && step.field.trim()) : step.type === "play" ? Boolean(step.recordingId) : true);
 
 // The Automations page: every automation in the workspace. New ones start by picking a trigger, then open on the
 // canvas, where the trigger node says which campaigns it listens to.
@@ -4089,7 +4110,7 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
     }
   };
   const create = (trigger: AutomationTrigger) => {
-    const item: Automation = { id: `au_${Date.now()}`, name: triggerInfo[trigger].title, on: true, trigger, campaigns: [], ...(trigger === "outcome" ? { outcomes: [] } : {}), steps: [] };
+    const item: Automation = { id: `au_${Date.now()}`, name: triggerInfo[trigger].title, on: true, trigger, campaigns: [], ...(trigger === "outcome" || trigger === "transcribed" ? { outcomes: [] } : {}), steps: [] };
     setPicking(false);
     setCreated(item);
     setOpenId(item.id);
@@ -4180,7 +4201,8 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
   const leads = draft.campaigns?.length ? allLeads.filter((lead) => lead.campaigns?.some((name) => draft.campaigns!.includes(name))) : allLeads;
   const scripts = (draft.campaigns?.length ? draft.campaigns : campaignNames).map((name) => allSettings[name]?.script || "").join("\n");
   const columns = [...new Set(leads.flatMap((lead) => Object.keys(lead.details || {})))].sort();
-  const fields: [string, string][] = [...scriptVariables(scripts).map((name) => [name, `{{${name}}}`] as [string, string]), ...variableFields.filter(([key]) => key !== "phone"), ...columns.map((column) => [`detail:${column}`, column] as [string, string])];
+  const asked = draft.steps.flatMap((item) => (item.type === "ask" && item.field.trim() ? [[`detail:${item.field.trim()}`, `${item.field.trim()} (from Ask AI)`] as [string, string]] : []));
+  const fields: [string, string][] = [...asked, ...scriptVariables(scripts).map((name) => [name, `{{${name}}}`] as [string, string]), ...variableFields.filter(([key]) => key !== "phone"), ...columns.map((column) => [`detail:${column}`, column] as [string, string])];
   const step = typeof panel === "number" ? draft.steps[panel] : undefined;
   return (
     <section className={`flow-page${panel !== null ? " has-panel" : ""}`}>
@@ -4231,7 +4253,8 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
                   <label key={name}><input type="checkbox" checked={Boolean(draft.campaigns?.includes(name))} onChange={(event) => change({ ...draft, campaigns: event.target.checked ? [...(draft.campaigns || []), name] : (draft.campaigns || []).filter((item) => item !== name) })} /> {name}</label>
                 ))}
               </fieldset>
-              {draft.trigger === "outcome" && (
+              {draft.trigger === "transcribed" && <p className="campaign-settings__hint">Needs Live transcription switched on in Settings → Features & costs. Runs once the call's transcript is in and you've logged the outcome.</p>}
+              {(draft.trigger === "outcome" || draft.trigger === "transcribed") && (
                 <fieldset className="flow-outcomes">
                   <legend>Which outcomes? None ticked means any.</legend>
                   {callOutcomes.map((outcome) => (
@@ -4281,6 +4304,12 @@ function StepSettings({ step, fields, leads, settings, vault, onOpenVault, onCha
             <label>Value<input value={step.value} list="flow-values" onChange={(event) => onChange({ ...step, value: event.target.value })} placeholder={values[0] || "no website"} /><datalist id="flow-values">{values.map((value) => <option key={value} value={value} />)}</datalist></label>
           )}
           {step.field && <small className="flow-step-settings__count">{matching} of {leads.length} lead{leads.length === 1 ? "" : "s"} match.</small>}
+        </>
+      )}
+      {step.type === "ask" && (
+        <>
+          <label>Question<textarea rows={3} value={step.prompt} onChange={(event) => onChange({ ...step, prompt: event.target.value })} placeholder="Did they agree to a meeting? Answer yes or no." /><small>The AI reads the whole transcript ("You" and "Them") and answers this.</small></label>
+          <label>Save the answer to<input value={step.field} onChange={(event) => onChange({ ...step, field: event.target.value })} list="flow-ask-fields" placeholder="Call summary" /><datalist id="flow-ask-fields">{fields.filter(([value]) => value.startsWith("detail:")).map(([value]) => <option key={value} value={value.slice(7)} />)}</datalist><small>A lead field. Add Only continue if after this step to act on the answer. Uses your AI key (Settings → AI).</small></label>
         </>
       )}
       {step.type === "say" && <label>Line<textarea rows={4} value={step.text} onChange={(event) => onChange({ ...step, text: event.target.value })} placeholder="Hey {{first_name}}, I see you don't have a website yet." /><small>Use {"{{variables}}"} like in the script.</small></label>}
@@ -4918,9 +4947,11 @@ function Settings({
   campaignSettings,
   leads,
   fields,
+  fullState,
   onRefresh,
   onNotice,
 }: {
+  fullState: State;
   fields?: string[];
   campaignSettings: Record<string, CampaignSettings>;
   leads: Lead[];
@@ -5025,8 +5056,9 @@ function Settings({
   // Each tab's sidebar is a few titled groups of pages.
   const sections: Record<SettingsArea, { title: string; items: { id: SettingsPage; label: string; icon: typeof Phone }[] }[]> = {
     general: [
+      { title: "Costs", items: [{ id: "costs", label: "Features & costs", icon: ChartColumn }] },
       { title: "Calling", items: [{ id: "numbers", label: "Phone numbers", icon: Phone }, { id: "booking", label: "Booking link", icon: CalendarPlus }] },
-      { title: "Integrations", items: [{ id: "ai", label: "AI", icon: Sparkles }] },
+      { title: "Integrations", items: [{ id: "ai", label: "AI", icon: Sparkles }, { id: "email", label: "Email", icon: Mail }] },
       { title: "Workspace", items: [{ id: "team", label: "Team", icon: Users }, { id: "fields", label: "Custom fields", icon: SlidersHorizontal }, ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : [])] },
     ],
     account: [
@@ -5223,7 +5255,7 @@ function Settings({
       </article>
           </section>
         ) : (
-          <SettingsPanel page={page} me={me} workspace={workspace} team={team} emailReady={emailReady} companies={companies} onSignOut={onSignOut} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} ai={ai} campaignSettings={campaignSettings} leads={leads} savedFields={fields} onRefresh={onRefresh} />
+          <SettingsPanel page={page} fullState={fullState} onOpen={(next) => setPage(next)} me={me} workspace={workspace} team={team} emailReady={emailReady} companies={companies} onSignOut={onSignOut} connection={connection} onNotice={onNotice} bookingUrl={bookingUrl} ai={ai} campaignSettings={campaignSettings} leads={leads} savedFields={fields} onRefresh={onRefresh} />
         )}
         </div>
       </div>
@@ -5263,6 +5295,197 @@ function ScriptVariablesList({ settings, leads }: { settings: Record<string, Cam
 
 // The company's own AI key, used to clean script variables. Saving checks the key with one tiny request.
 const aiModels: Record<string, string> = { groq: "openai/gpt-oss-20b", openrouter: "google/gemma-4-26b-a4b-it:free" };
+// ---- Settings → Features & costs ----
+type Features = { transcription: boolean; captions: boolean; saveTranscripts: boolean; ai: boolean; email: boolean };
+const featureDefaults: Features = { transcription: false, captions: true, saveTranscripts: true, ai: true, email: true };
+const featuresOf = (state: State) => ({ ...featureDefaults, ...(state.settings?.features || {}) });
+// Twilio bills each call leg by the started minute.
+const billedMinutes = (seconds = 0) => (seconds > 0 ? Math.ceil(seconds / 60) : 0);
+
+function PriceTag({ text, free }: { text: string; free?: boolean }) {
+  return <span className={`price-tag${free ? " is-free" : ""}`}>{text}</span>;
+}
+function FeatureSwitch({ label, checked, disabled, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (next: boolean) => void }) {
+  return (
+    <label className="automation-switch">
+      <input type="checkbox" role="switch" aria-label={label} checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
+      <span>{checked ? "On" : "Off"}</span>
+    </label>
+  );
+}
+
+function CostsSettings({ state, onOpen, onRefresh, onNotice }: { state: State; onOpen: (page: SettingsPage) => void; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
+  const on = featuresOf(state);
+  const [hours, setHours] = useState(3);
+  const [days, setDays] = useState(22);
+  const set = async (change: Partial<Features>) => {
+    try {
+      await api("/api/settings/features", { method: "PATCH", body: JSON.stringify(change) });
+      await onRefresh();
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Couldn't save that switch.");
+    }
+  };
+  const browser = usesAppPhone(state.connection);
+  const perMinute = prices.twilioCall.amount + (browser ? prices.twilioBrowser.amount : 0);
+  // This month so far, from the app's own call log.
+  const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
+  const thisMonth = state.calls.filter((call) => call.seconds && new Date(call.at).getTime() >= monthStart);
+  const talkMinutes = thisMonth.reduce((sum, call) => sum + billedMinutes(call.seconds), 0);
+  const heardMinutes = thisMonth.filter((call) => call.transcribing).reduce((sum, call) => sum + billedMinutes(call.seconds), 0);
+  const soFar = (state.connection ? prices.twilioNumber.amount : 0) + talkMinutes * perMinute + heardMinutes * prices.twilioTranscription.amount;
+  // What a month would cost with the switches as they are now.
+  const planMinutes = hours * 60 * days;
+  const plan = { calling: planMinutes * perMinute, transcription: on.transcription ? planMinutes * prices.twilioTranscription.amount : 0, number: prices.twilioNumber.amount };
+  const oldest = Object.values(prices).map((item) => item.checked).sort()[0];
+  const stale = Date.now() - new Date(oldest).getTime() > 90 * 86_400_000;
+  const rows: { name: string; what: string; price: ReactNode; control: ReactNode; extra?: ReactNode }[] = [
+    {
+      name: "Calling",
+      what: "Twilio phone number and call minutes. Your own Twilio account bills you directly.",
+      price: <><PriceTag text={`${money(prices.twilioNumber.amount)} a month for the number`} /><PriceTag text={`${money(perMinute)} a minute${browser ? " (call + in-app audio)" : ""}`} /></>,
+      control: <button type="button" className="text-link" onClick={() => onOpen("numbers")}>Phone numbers</button>,
+    },
+    {
+      name: "Live transcription",
+      what: "Twilio writes down both sides while you talk. No audio is recorded. Needed for Call transcribed automations. Works on calls made in this app.",
+      price: <PriceTag text={`${money(prices.twilioTranscription.amount)} a minute, only on transcribed calls`} />,
+      control: <FeatureSwitch label="Live transcription" checked={on.transcription} onChange={(next) => void set({ transcription: next })} />,
+      extra: on.transcription && (
+        <div className="feature-row__sub">
+          <label><input type="checkbox" checked={on.captions} onChange={(event) => void set({ captions: event.target.checked })} /> Show live captions on the call screen</label>
+          <label><input type="checkbox" checked={on.saveTranscripts} onChange={(event) => void set({ saveTranscripts: event.target.checked })} /> Save transcripts in call history <small>(off: used for automations, then deleted)</small></label>
+          <small>A campaign can opt out in its Settings, General. You can also stop it during a call.</small>
+        </div>
+      ),
+    },
+    {
+      name: "AI (Groq or OpenRouter)",
+      what: "Cleans script variables while you call and answers Ask AI steps in automations. Uses your own key.",
+      price: <PriceTag text="Free to start" free />,
+      control: <>{state.ai?.ready ? <button type="button" className="text-link" onClick={() => onOpen("ai")}>Key saved</button> : <button type="button" className="text-link" onClick={() => onOpen("ai")}>Add a key</button>}<FeatureSwitch label="AI" checked={on.ai} onChange={(next) => void set({ ai: next })} /></>,
+    },
+    {
+      name: "Email (Resend)",
+      what: "Sends team invites and password resets from your own domain. Off: you copy the invite link yourself.",
+      price: <PriceTag text="Free to start" free />,
+      control: <>{state.email?.saved || state.email?.envFallback ? <button type="button" className="text-link" onClick={() => onOpen("email")}>Sender set</button> : <button type="button" className="text-link" onClick={() => onOpen("email")}>Add a key</button>}<FeatureSwitch label="Email" checked={on.email} onChange={(next) => void set({ email: next })} /></>,
+    },
+    { name: "Voicemail drop", what: "Plays one of your recordings to the lead's voicemail and hangs up. Only the call minutes you're already on.", price: <PriceTag text="Free" free />, control: null },
+    { name: "Booking link", what: "Opens your own Calendly or Cal.com page during a call.", price: <PriceTag text="Free" free />, control: <button type="button" className="text-link" onClick={() => onOpen("booking")}>Booking link</button> },
+    { name: "Automations", what: "Run inside this app. Steps that use AI or transcription cost what those do.", price: <PriceTag text="Free" free />, control: null },
+  ];
+  return (
+    <section className="settings-panel costs">
+      <span className="panel-kicker">Workspace</span>
+      <h2>Features & costs</h2>
+      <p>What each part of Open Dialer costs, and a switch for everything that isn't free. Prices are the providers' list prices; you pay them directly, not through Open Dialer.</p>
+      <div className="costs-summary">
+        <article>
+          <small>This month so far</small>
+          <b>about {money(soFar)}</b>
+          <span>{talkMinutes} call minute{talkMinutes === 1 ? "" : "s"}{heardMinutes ? `, ${heardMinutes} transcribed` : ""}{state.connection ? ", plus the number" : ""}. An estimate from this app's call log; your Twilio console has the real bill.</span>
+        </article>
+        <article>
+          <small>A month like this</small>
+          <b>about {money(plan.calling + plan.transcription + plan.number)}</b>
+          <span className="costs-plan">
+            <label><input type="number" min={0} max={12} step={0.5} value={hours} onChange={(event) => setHours(Math.max(0, Number(event.target.value) || 0))} /> hours of talk a day</label>
+            <label><input type="number" min={0} max={31} value={days} onChange={(event) => setDays(Math.max(0, Number(event.target.value) || 0))} /> days</label>
+          </span>
+          <span>Calling {money(plan.calling)}{on.transcription ? ` · transcription ${money(plan.transcription)}` : ""} · number {money(plan.number)}</span>
+        </article>
+      </div>
+      <div className="feature-rows">
+        {rows.map((row) => (
+          <article className="feature-row" key={row.name}>
+            <div className="feature-row__text"><b>{row.name}</b><span>{row.what}</span><span className="feature-row__prices">{row.price}</span>{row.extra}</div>
+            <div className="feature-row__control">{row.control}</div>
+          </article>
+        ))}
+      </div>
+      <p className={`costs-checked${stale ? " is-stale" : ""}`}>{stale ? <CircleAlert size={14} aria-hidden="true" /> : null} Prices last checked {new Date(oldest).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}{stale ? ". That's over 3 months ago: re-check them with PRICES.md in the project folder." : "."}</p>
+    </section>
+  );
+}
+
+// ---- Settings → Email ----
+function EmailSettings({ email, onRefresh, onNotice }: { email: State["email"]; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
+  const [key, setKey] = useState("");
+  const [from, setFrom] = useState(email?.from || "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (task: () => Promise<unknown>, done: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await task();
+      await onRefresh();
+      onNotice(done);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "That didn't work.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="settings-panel">
+      <span className="panel-kicker">Integrations</span>
+      <h2>Email</h2>
+      <p>Invites and password resets go out through your own Resend account, from your own domain. <PriceTag text="Free to start" free /> {prices.resend.free}.</p>
+      <p className="settings-help">Add and verify your domain in Resend, then create an API key. <a className="settings-link" href="https://resend.com/domains" target="_blank" rel="noreferrer">Resend domains <ExternalLink size={12} aria-hidden="true" /></a> <a className="settings-link" href="https://resend.com/api-keys" target="_blank" rel="noreferrer">Resend API keys <ExternalLink size={12} aria-hidden="true" /></a></p>
+      <form className="settings-form" onSubmit={(event) => { event.preventDefault(); void run(() => api("/api/email/settings", { method: "PUT", body: JSON.stringify({ key, from }) }).then(() => setKey("")), "Email sender saved."); }}>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <label>Resend API key<input type="password" value={key} onChange={(event) => setKey(event.target.value)} placeholder={email?.hint ? `Saved: ${email.hint}. Paste a new one to replace it` : "re_…"} autoComplete="off" spellCheck={false} /></label>
+        <label>Send from<input value={from} onChange={(event) => setFrom(event.target.value)} placeholder="Bayu <bayu@yourdomain.com>" autoComplete="off" spellCheck={false} required /><small>An address on the domain you verified in Resend.</small></label>
+        <div className="settings-form-actions">
+          <button className="primary-button" type="submit" disabled={busy}>Save</button>
+          {(email?.saved || email?.envFallback) && <button type="button" className="quiet-button" disabled={busy} onClick={() => void run(async () => { const result = await api<{ sentTo: string }>("/api/email/test", { method: "POST" }); onNotice(`Test email sent to ${result.sentTo}.`); }, "Test email sent.")}>Send me a test email</button>}
+          {email?.saved && <button type="button" className="quiet-button" disabled={busy} onClick={() => void run(() => api("/api/email/settings", { method: "DELETE" }), "Email key removed.")}>Remove key</button>}
+        </div>
+        {!email?.saved && email?.envFallback && <small>Using the sender from the server's .env file. A key saved here replaces it for this company.</small>}
+      </form>
+    </section>
+  );
+}
+
+// Live captions while a transcribed call runs: both sides, newest at the bottom, and a way to stop it.
+function LiveCaptions({ callId }: { callId: string }) {
+  const [data, setData] = useState<{ on: boolean; stopped: boolean; lines: { who: string; text: string }[]; partial: Record<string, string> } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const end = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const next = await api<NonNullable<typeof data>>(`/api/calls/${callId}/transcript`);
+        if (alive) setData(next);
+      } catch { /* the call may not be saved yet */ }
+    };
+    void tick();
+    const timer = window.setInterval(tick, 1500);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [callId]);
+  useEffect(() => end.current?.scrollIntoView({ block: "end" }), [data?.lines.length, data?.partial.you, data?.partial.lead]);
+  if (!data?.on) return null;
+  const partial = Object.entries(data.partial).filter(([, text]) => text);
+  return (
+    <aside className="live-captions" aria-label="Live transcript" aria-live="polite">
+      <header>
+        <b>Live transcript</b>
+        {data.stopped ? <small>Stopped</small> : <button type="button" className="text-link" onClick={() => void api("/api/calls/transcript/stop", { method: "POST", body: JSON.stringify({ callId }) }).catch((cause) => setError(cause instanceof Error ? cause.message : "Couldn't stop it."))}>Stop transcribing</button>}
+      </header>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <div className="live-captions__lines">
+        {!data.lines.length && !partial.length && <p className="live-captions__empty">Listening…</p>}
+        {data.lines.slice(-30).map((line, index) => <p key={index} className={`is-${line.who}`}><b>{line.who === "you" ? "You" : "Them"}</b> {line.text}</p>)}
+        {partial.map(([who, text]) => <p key={who} className={`is-${who} is-partial`}><b>{who === "you" ? "You" : "Them"}</b> {text}</p>)}
+        <div ref={end} />
+      </div>
+    </aside>
+  );
+}
+
 function AiSettings({ ai, onRefresh, onNotice }: { ai: State["ai"]; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
   const [provider, setProvider] = useState(ai?.provider || "groq");
   const [model, setModel] = useState(ai?.model || aiModels[ai?.provider || "groq"]);
@@ -5402,6 +5625,8 @@ function AccountCheck() {
 
 function SettingsPanel({
   page,
+  fullState,
+  onOpen,
   me,
   workspace,
   team,
@@ -5417,6 +5642,8 @@ function SettingsPanel({
   savedFields,
   onRefresh,
 }: {
+  fullState: State;
+  onOpen: (page: SettingsPage) => void;
   savedFields?: string[];
   ai: State["ai"];
   campaignSettings: Record<string, CampaignSettings>;
@@ -5483,6 +5710,8 @@ function SettingsPanel({
     );
   }
   if (page === "ai") return <AiSettings ai={ai} onRefresh={onRefresh} onNotice={onNotice} />;
+  if (page === "costs") return <CostsSettings state={fullState} onOpen={onOpen} onRefresh={onRefresh} onNotice={onNotice} />;
+  if (page === "email") return <EmailSettings email={fullState.email} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "team") return <TeamSettings me={me} workspace={workspace} team={team} emailReady={emailReady} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "companies") return <CompaniesSettings companies={companies} emailReady={emailReady} onRefresh={onRefresh} onNotice={onNotice} />;
   if (page === "fields") {
