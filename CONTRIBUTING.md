@@ -8,6 +8,13 @@ Thanks for helping. Bug reports, ideas and pull requests are all welcome.
 2. Keep changes small and focused. Run `npx tsc --noEmit -p .` and `npm run build` before you send them.
 3. Add yourself to [CONTRIBUTORS.md](CONTRIBUTORS.md) in your first pull request.
 
+## Releasing (maintainer)
+
+1. Set the new version in `package.json` and `installer/OpenDialer.iss` (`AppVersion`), and in the README's release
+   badge (`&v=…`, so the badge refreshes right away instead of after its cache expires).
+2. Commit, push `main`, then push a tag like `v0.1.3`. GitHub builds `OpenDialerSetup.exe` and attaches it to the
+   release.
+
 ## Contributor agreement
 
 Open Dialer is offered under the AGPL-3.0 (see [NOTICE.md](NOTICE.md)) and, separately, under commercial licenses

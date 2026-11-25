@@ -4,7 +4,7 @@
 
 **An outbound calling CRM you run yourself.**
 
-[![Release](https://shieldcn.dev/github/release/yogabayusavira/open-dialer.svg?variant=branded&mode=dark)](https://github.com/yogabayusavira/open-dialer/releases/latest)
+[![Release](https://shieldcn.dev/github/release/yogabayusavira/open-dialer.svg?variant=branded&mode=dark&v=0.1.2)](https://github.com/yogabayusavira/open-dialer/releases/latest)
 [![Installer build](https://shieldcn.dev/github/ci/yogabayusavira/open-dialer.svg?workflow=installer.yml&mode=dark)](https://github.com/yogabayusavira/open-dialer/actions/workflows/installer.yml)
 [![License](https://shieldcn.dev/github/license/yogabayusavira/open-dialer.svg?mode=dark)](NOTICE.md)
 <br>
