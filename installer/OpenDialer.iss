@@ -7,7 +7,7 @@
 ; address and a fresh encryption key.
 
 #ifndef AppVersion
-  #define AppVersion "0.1.1"
+  #define AppVersion "0.1.2"
 #endif
 #define Repo "https://github.com/yogabayusavira/open-dialer"
 
