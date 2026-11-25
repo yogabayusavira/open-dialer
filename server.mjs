@@ -147,12 +147,39 @@ async function databaseClient() {
   return database;
 }
 
+// Automations belong to the workspace; each trigger names its campaigns. Older ones lived in a campaign's
+// settings, and the old voicemail drop (one variable, a recording per value) becomes one automation per value.
+function takeAutomations(settings, stored) {
+  const list = Array.isArray(stored) ? [...stored] : [];
+  for (const [campaign, own] of Object.entries(settings)) {
+    if (Array.isArray(own?.automations)) list.push(...own.automations.map((item) => ({ ...item, campaigns: [campaign] })));
+    delete own?.automations;
+    const use = own?.voicemail?.use;
+    if (use && typeof use === "object") {
+      const keys = Object.keys(use).sort((left, right) => (left === "*" ? 1 : right === "*" ? -1 : left.localeCompare(right)));
+      list.push(...keys.map((key, index) => ({
+        // Same id on every read until the converted settings are saved.
+        id: `au_${String(use[key]).replace(/\W/g, "")}_${index}`,
+        name: `${campaign}: ${key === "*" ? "voicemail for everyone else" : `voicemail if ${key}`}`,
+        on: true,
+        trigger: "voicemail",
+        campaigns: [campaign],
+        steps: [...(key === "*" || !own.voicemail.variable ? [] : [{ type: "if", field: own.voicemail.variable, op: "is", value: key }]), { type: "play", recordingId: use[key] }],
+      })));
+    }
+    delete own?.voicemail;
+  }
+  return list;
+}
+
 function normalizeState(stored) {
   if (!stored || typeof stored !== "object" || Array.isArray(stored))
     return structuredClone(defaultState);
+  const settings = stored.campaignSettings && typeof stored.campaignSettings === "object" && !Array.isArray(stored.campaignSettings) ? stored.campaignSettings : {};
   return {
     ...structuredClone(defaultState),
     ...stored,
+    automations: takeAutomations(settings, stored.automations),
     leads: (Array.isArray(stored.leads) ? stored.leads : structuredClone(defaultState.leads))
       .map((lead) => migrateLead(lead, Array.isArray(stored.opportunities) ? stored.opportunities : []))
       .map((lead) => {
@@ -170,7 +197,7 @@ function normalizeState(stored) {
     // Tasks you write yourself. Callbacks and meetings stay derived from leads.
     tasks: Array.isArray(stored.tasks) ? stored.tasks : [],
     // Per campaign: a pasted call script and, if uploaded, which PDF (the file itself is stored on its own).
-    campaignSettings: stored.campaignSettings && typeof stored.campaignSettings === "object" && !Array.isArray(stored.campaignSettings) ? stored.campaignSettings : {},
+    campaignSettings: settings,
     dncNumbers: Array.isArray(stored.dncNumbers) ? [...new Set(stored.dncNumbers.map(phoneKey))] : [],
     connection: stored.connection || null,
     settings: stored.settings && typeof stored.settings === "object" ? stored.settings : {},
@@ -517,6 +544,33 @@ function leadLabel(lead) {
 }
 // The pipeline: a lead's status is its stage. Lost is terminal; Do not call is a separate flag on top.
 const leadStages = ["New", "Follow-up", "Meeting booked", "Won", "Lost"];
+const callOutcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call"];
+// The workspace's automations, as sent by the Automations page: a trigger (with the campaigns it listens to, none
+// meaning any), then steps run in order.
+const automationTriggers = ["lead", "outcome", "voicemail"];
+const conditionOps = ["is", "is not", "contains", "is empty", "is not empty"];
+function cleanAutomations(list) {
+  return list.slice(0, 50).map((item) => {
+    const trigger = automationTriggers.includes(item?.trigger) ? item.trigger : "lead";
+    const steps = (Array.isArray(item?.steps) ? item.steps : []).slice(0, 20).map((step) => {
+      if (step?.type === "if") return { type: "if", field: cleanText(step.field, 120), op: conditionOps.includes(step.op) ? step.op : "is", value: cleanText(step.value, 200) };
+      if (step?.type === "say" && trigger === "lead") return { type: "say", text: cleanText(step.text, 1000) };
+      if (step?.type === "play" && trigger === "voicemail") return { type: "play", recordingId: /^vm_\w+$/.test(step.recordingId || "") ? step.recordingId : "" };
+      if (step?.type === "stage" && trigger === "outcome") return { type: "stage", stage: leadStages.includes(step.stage) ? step.stage : "Follow-up" };
+      if (step?.type === "followup" && trigger === "outcome") return { type: "followup", days: Math.min(60, Math.max(0, Math.round(Number(step.days) || 0))) };
+      return null;
+    }).filter(Boolean);
+    return {
+      id: /^au_\w+$/.test(item?.id || "") ? item.id : `au_${Date.now()}_${randomBytes(3).toString("hex")}`,
+      name: cleanText(item?.name, 80) || "Untitled automation",
+      on: item?.on !== false,
+      trigger,
+      campaigns: (Array.isArray(item?.campaigns) ? item.campaigns : []).map(campaignName).filter(Boolean).slice(0, 50),
+      ...(trigger === "outcome" ? { outcomes: (Array.isArray(item?.outcomes) ? item.outcomes : []).filter((outcome) => callOutcomes.includes(outcome)) } : {}),
+      steps,
+    };
+  });
+}
 // Earlier statuses and stages, mapped once when a workspace is read.
 const legacyStages = { Ready: "New", Queued: "New", "Try again": "New", Attempted: "New", Interested: "Follow-up", Closed: "Lost", Paused: "Lost" };
 function migrateLead(lead, opportunities) {
@@ -693,11 +747,7 @@ const operatorIdentity = "operator";
 function statusToken(ws, leadId) {
   return createHmac("sha256", encryptionKey()).update(`call-status:${ws}:${leadId}`).digest("base64url");
 }
-// Voicemail recordings: one per value of the variable the campaign picks ("*" = everyone else). Twilio fetches
-// them without signing in, so the address carries a signature.
-function voicemailKey(value) {
-  return cleanText(String(value || ""), 120).toLowerCase() || "*";
-}
+// Twilio fetches voicemail recordings without signing in, so the address carries a signature.
 function voicemailSignature(ws, id) {
   return createHmac("sha256", encryptionKey()).update(`voicemail:${ws}:${id}`).digest("base64url");
 }
@@ -1040,7 +1090,7 @@ async function route(req, res, url) {
     const ownerOnly = [
       ["POST", /^\/api\/twilio\/(validate|connection)$/], ["DELETE", /^\/api\/twilio\/connection$/], ["PATCH", /^\/api\/twilio\/connection$/], ["GET", /^\/api\/twilio\/account-check$/],
       ["PATCH", /^\/api\/settings$/], ["PUT", /^\/api\/settings\/fields$/], ["POST", /^\/api\/leads\/(import|delete|assign)$/], ["DELETE", /^\/api\/leads\/[^/]+$/], ["DELETE", /^\/api\/dnc\/[^/]+$/], ["POST", /^\/api\/dnc$/],
-      ["PUT", /^\/api\/campaigns\/script$/], ["POST", /^\/api\/campaigns\/script-pdf$/], ["DELETE", /^\/api\/campaigns\/script-pdf$/], ["PUT", /^\/api\/campaigns\/voicemail$/], ["POST", /^\/api\/voicemails$/], ["PATCH", /^\/api\/voicemails\/[^/]+$/], ["DELETE", /^\/api\/voicemails\/[^/]+$/],
+      ["PUT", /^\/api\/campaigns\/script$/], ["POST", /^\/api\/campaigns\/script-pdf$/], ["DELETE", /^\/api\/campaigns\/script-pdf$/], ["PUT", /^\/api\/automations$/], ["POST", /^\/api\/voicemails$/], ["PATCH", /^\/api\/voicemails\/[^/]+$/], ["DELETE", /^\/api\/voicemails\/[^/]+$/],
       ["POST", /^\/api\/team$/], ["PATCH", /^\/api\/team\/[^/]+$/], ["DELETE", /^\/api\/team\/[^/]+$/], ["PATCH", /^\/api\/workspace$/],
       ["PUT", /^\/api\/ai\/settings$/], ["DELETE", /^\/api\/ai\/settings$/], ["POST", /^\/api\/ai\/(preview|forget)$/],
     ];
@@ -1228,6 +1278,16 @@ async function route(req, res, url) {
       await writeState(state);
       return json(res, 200, state.campaignSettings[name]);
     }
+    if (url.pathname === "/api/automations" && req.method === "PUT") {
+      const { automations } = await getBody(req);
+      if (!Array.isArray(automations)) return json(res, 400, { error: "Send the automations list." });
+      const saved = await updateState((state) => {
+        state.automations = cleanAutomations(automations);
+        activity(state, "Automations saved", `${state.automations.length}`);
+        return state.automations;
+      });
+      return json(res, 200, saved);
+    }
     // The voicemail vault: add (record or upload), rename, delete, and listen.
     if (url.pathname === "/api/voicemails" && req.method === "POST") {
       const body = await getBody(req);
@@ -1268,48 +1328,22 @@ async function route(req, res, url) {
         await updateState((state) => {
           const item = state.voicemails.find((entry) => entry.id === id);
           state.voicemails = state.voicemails.filter((entry) => entry.id !== id);
-          // Campaigns that used it stop using it.
-          for (const settings of Object.values(state.campaignSettings)) {
-            for (const [key, used] of Object.entries(settings.voicemail?.use || {})) if (used === id) delete settings.voicemail.use[key];
-          }
           activity(state, "Voicemail recording deleted", item?.name || "");
         });
         return json(res, 200, { ok: true });
       }
     }
-    // Which vault recording a campaign plays for each value of its chosen variable ("*" = everyone else).
-    if (url.pathname === "/api/campaigns/voicemail" && req.method === "PUT") {
-      const body = await getBody(req);
-      const name = campaignName(body.campaign);
-      if (!name) return json(res, 400, { error: "Choose a campaign." });
-      const result = await updateState((state) => {
-        const current = state.campaignSettings[name] || {};
-        const voicemail = { variable: current.voicemail?.variable || "", use: { ...(current.voicemail?.use || {}) } };
-        if (typeof body.variable === "string") voicemail.variable = cleanText(body.variable, 60);
-        if (body.value !== undefined) {
-          const key = voicemailKey(body.value);
-          if (body.recordingId && !state.voicemails.some((entry) => entry.id === body.recordingId)) return "missing";
-          if (body.recordingId) voicemail.use[key] = body.recordingId;
-          else delete voicemail.use[key];
-        }
-        state.campaignSettings[name] = { ...current, voicemail };
-        activity(state, "Voicemail drop updated", name);
-        return state.campaignSettings[name];
-      });
-      return result === "missing" ? json(res, 404, { error: "That recording is gone." }) : json(res, 200, result);
-    }
     // During a call: play the campaign's recording to the lead (their voicemail) and hang up their side.
     if (url.pathname === "/api/calls/drop-voicemail" && req.method === "POST") {
-      const { callId, campaign, value } = await getBody(req);
+      const { callId, campaign, recordingId } = await getBody(req);
       const state = await readState();
       const call = state.calls.find((item) => item.id === callId);
       if (!call || !findLead(state, call.leadId)) return json(res, 404, { error: "That call isn't running anymore." });
       if (!call.leadLegSid) return json(res, 409, { error: "The lead's side hasn't picked up yet. Wait for the beep, then drop it." });
       const name = campaignName(campaign);
-      const use = state.campaignSettings[name]?.voicemail?.use || {};
-      const id = use[voicemailKey(value)] || use["*"];
-      const recording = id && state.voicemails.find((entry) => entry.id === id);
-      if (!recording) return json(res, 400, { error: "This campaign has no voicemail for this lead. Pick one in Automations or the campaign's Settings, Voicemail." });
+      const played = (state.automations || []).some((item) => item.on && item.trigger === "voicemail" && (!item.campaigns?.length || item.campaigns.includes(name)) && item.steps.some((step) => step.type === "play" && step.recordingId === recordingId));
+      const recording = played && state.voicemails.find((entry) => entry.id === recordingId);
+      if (!recording) return json(res, 400, { error: "This campaign has no voicemail for this lead. Add a Voicemail dropped automation in Automations." });
       const audio = new URL("/api/twilio/voice/voicemail", publicOrigin(req));
       audio.searchParams.set("ws", currentWorkspace());
       audio.searchParams.set("id", recording.id);
@@ -1581,15 +1615,16 @@ async function route(req, res, url) {
       return json(res, 204, {});
     }
     if (url.pathname === "/api/calls/record" && req.method === "POST") {
-      const { leadId, outcome, note, followUpAt } = await getBody(req);
+      const { leadId, outcome, note, followUpAt, stage } = await getBody(req);
       const state = await readState();
       const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
-      const outcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call"];
-      if (!outcomes.includes(outcome)) return json(res, 400, { error: "Choose a valid call outcome." });
+      if (!callOutcomes.includes(outcome)) return json(res, 400, { error: "Choose a valid call outcome." });
       const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString(), userId: currentUser().id };
       state.calls.unshift(call);
       enterStage(lead, stageAfterOutcome(lead.status, outcome));
+      // From a "Call outcome logged" automation.
+      if (leadStages.includes(stage) && outcome !== "Do not call") enterStage(lead, stage);
       if (lead.status === "Follow-up" && followUpReasons[outcome]) lead.followUpReason = followUpReasons[outcome];
       delete lead.taskDone;
       const followUp = typeof followUpAt === "string" && followUpAt ? followUpAt : "";
