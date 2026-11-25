@@ -48,12 +48,11 @@ Settings and can be switched off. Run it on your own computer or on a server.
 | **PostgreSQL 17** | The database for your leads, calls and settings | https://www.postgresql.org/download/ |
 | **cloudflared** (not needed on a server) | A tunnel so Twilio can reach your computer | https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ |
 | **A Twilio account** with a voice-capable number | Placing calls | https://www.twilio.com/try-twilio |
-| Recommended: a **Resend** account and **your own domain** | Emails team invites and password resets, sent from your domain (you verify the domain in Resend) | https://resend.com |
+| A **Resend** account and **your own domain** | Emails team invites and password resets, sent from your domain (you verify the domain in Resend) | https://resend.com |
 | Optional: a **Groq** key | AI features | https://console.groq.com/keys |
 
-You don't need Resend to get started: the first owner account is created on the first visit, without email. Without
-it, though, you copy each invite link and send it yourself, and nobody can reset a forgotten password by email. Add the
-key and sender in Settings → Integrations → Email.
+Resend is how Open Dialer sends team invites and password resets. Verify your domain in Resend, create an API key, then
+add the key and a sender on that domain in Settings → Integrations → Email right after you create your owner account.
 
 The Windows setup wizard installs Node.js, PostgreSQL and cloudflared for you. What each part costs is listed in
 [PRICES.md](PRICES.md) and in the app under Settings, Features & costs. The app itself is free.
@@ -69,7 +68,8 @@ The Windows setup wizard installs Node.js, PostgreSQL and cloudflared for you. W
    `.env` with the database address and a freshly generated encryption key. You never edit `.env` by hand.
 4. Leave **Start Open Dialer now** ticked and click Finish. Later, start it from the Start menu or desktop shortcut.
 5. In the browser, **create your owner account** (the first visit asks for it), then go to **Settings → Phone
-   numbers** and connect Twilio with your Account SID and Auth Token.
+   numbers** and connect Twilio with your Account SID and Auth Token, and **Settings → Integrations → Email** to add
+   your Resend key and sender.
 
 Already have PostgreSQL? Setup asks for its admin password once to create Open Dialer's own database and user. Keep
 the Open Dialer window open while you call. Uninstalling keeps your `data` folder and `.env`. More detail and

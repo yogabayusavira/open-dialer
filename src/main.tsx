@@ -4893,7 +4893,7 @@ function setupSteps(state: State): SetupStep[] {
     { done: Boolean(state.ai?.ready), title: "Connect AI", body: "Turns on Open Dialer's AI features, like cleaning script variables and Ask AI in automations. Pick Groq (fast and free), paste a key (the link opens Groq's keys page) and press Check and save.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-ai" },
     { done: Boolean(state.settings?.bookingUrl), title: "Add your booking link", body: "Your Calendly or Cal.com link, so Book a call opens it during a call. The links there take you to your event types to copy it.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-booking" },
     { done: state.team.length > 1, title: "Invite your callers", body: "Team → Send invite. Then select leads on the Leads page and use Assign to; callers only see what you assign them. Skip this if you call alone.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-team" },
-    { done: Boolean(state.emailReady), title: "Turn on email", body: "So invites and password resets arrive by email: add RESEND_API_KEY and RESEND_FROM_EMAIL (a sender on a domain verified in Resend) to .env, then restart. Until then, you get each sign-in link to send yourself.", target: null, action: "", optional: true },
+    { done: Boolean(state.emailReady), title: "Connect email (Resend)", body: "Needed so invites and password resets go out by email. Verify your domain in Resend, create an API key, then save the key and a sender on that domain in Settings, Email.", target: "settings", action: "Open Settings", optional: false, screen: "settings", spot: "settings-email" },
     firstCall,
   ];
 }
@@ -5432,9 +5432,9 @@ function CostsSettings({ state, onOpen, onRefresh, onNotice }: { state: State; o
     },
     {
       name: "Email (Resend)",
-      what: "Sends team invites and password resets from your own domain. Off: you copy the invite link yourself.",
+      what: "Required. Sends team invites and password resets from your own domain.",
       price: <PriceTag text="Free to start" free />,
-      control: <>{state.email?.saved || state.email?.envFallback ? <button type="button" className="text-link" onClick={() => onOpen("email")}>Sender set</button> : <button type="button" className="text-link" onClick={() => onOpen("email")}>Add a key</button>}<FeatureSwitch label="Email" checked={on.email} onChange={(next) => void set({ email: next })} /></>,
+      control: <>{state.email?.saved || state.email?.envFallback ? <button type="button" className="text-link" onClick={() => onOpen("email")}>Sender set</button> : <button type="button" className="text-link" onClick={() => onOpen("email")}>Add a key</button>}</>,
     },
     {
       name: "Text messages (SMS)",
