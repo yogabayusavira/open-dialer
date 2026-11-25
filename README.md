@@ -28,52 +28,53 @@ feature that costs money shows its price in Settings and can be switched off.
 |---|---|---|
 | **Windows 10/11** (or macOS/Linux, see below) | Running the app | |
 | **Node.js 22 or newer** | Runs the app | https://nodejs.org |
-| **Docker Desktop** | The database (Postgres), kept in this folder's `data` | https://www.docker.com/products/docker-desktop/ |
 | **cloudflared** | A free tunnel so Twilio can reach your computer | https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ |
 | **A Twilio account** with a voice-capable number | Placing calls | https://www.twilio.com/try-twilio |
+| Optional: **Docker Desktop** | Only if you want PostgreSQL instead of the built-in file storage | https://www.docker.com/products/docker-desktop/ |
 | Optional: a **Groq** key | AI features (free plan) | https://console.groq.com/keys |
 | Optional: a **Resend** account | Invite and password emails from your domain | https://resend.com |
 
-What each part costs is listed in [PRICES.md](PRICES.md) and in the app under Settings, Features & costs. The app
-itself is free.
+The Windows setup wizard installs Node.js, cloudflared and (if you pick it) Docker for you. What each part costs is
+listed in [PRICES.md](PRICES.md) and in the app under Settings, Features & costs. The app itself is free.
 
 ## Install on Windows
 
-1. Download this repository: **Code → Download ZIP** and unzip it, or `git clone https://github.com/yogabayusavira/open-dialer.git`.
-2. Double-click **`Install Open Dialer.bat`**. It:
-   - installs Node.js, Docker Desktop and cloudflared with `winget` if they're missing (accept each installer's
-     prompts),
-   - runs `npm install`,
-   - writes a `.env` with a fresh database password and encryption key,
-   - creates the local database in Docker.
-
-   Docker Desktop's first start can ask you to sign in or restart Windows. If so, do that and double-click the
-   installer again; it picks up where it left off.
-3. Double-click **`Start Open Dialer.bat`**. It starts the database, builds the app, opens the Cloudflare tunnel and
-   opens http://localhost:3000.
-4. In the browser, **create your owner account** (the first visit asks for it), then go to **Settings → Phone
+1. Download **`OpenDialerSetup.exe`** from the [latest release](https://github.com/yogabayusavira/open-dialer/releases/latest).
+2. Run it. Windows may say "Windows protected your PC" because the installer isn't code-signed yet: click
+   **More info → Run anyway**.
+3. The wizard shows what it will install (each with a link to read more), asks where to keep your data
+   (**Simple**, a file in the Open Dialer folder, or **PostgreSQL in Docker**) and where to install. It then
+   installs what's missing, runs `npm install` and writes `.env` with a freshly generated encryption key (and the
+   database address for PostgreSQL). You never edit `.env` by hand.
+4. Leave **Start Open Dialer now** ticked and click Finish. Later, start it from the Start menu or desktop shortcut.
+5. In the browser, **create your owner account** (the first visit asks for it), then go to **Settings → Phone
    numbers** and connect Twilio with your Account SID and Auth Token.
 
-From then on, only step 3. Keep its window open while you call. More detail and troubleshooting:
-[RUNNING-LOCALLY.md](RUNNING-LOCALLY.md).
+Keep the Open Dialer window open while you call. Uninstalling keeps your `data` folder and `.env`. More detail and
+troubleshooting: [RUNNING-LOCALLY.md](RUNNING-LOCALLY.md).
 
-Or from a terminal in the folder:
+## Install from a terminal (Windows, macOS, Linux)
 
-```powershell
-npm install
-npm run setup
-npm run local
-```
-
-## Install on macOS or Linux
-
-Install Node.js 22+, Docker and cloudflared (macOS: `brew install node cloudflared` and Docker Desktop), then:
+Install Node.js 22+ and cloudflared (macOS: `brew install node cloudflared`), then in the downloaded folder:
 
 ```bash
 npm install
-npm run setup   # writes .env and creates the database in Docker
-npm run local   # starts everything; open http://localhost:3000
+npm run setup             # writes .env with a new encryption key; data is kept in the data folder
+npm run local             # starts everything; open http://localhost:3000
 ```
+
+For PostgreSQL in Docker instead, install Docker and run `npm run setup -- --docker`.
+
+## Install it with an AI agent
+
+Using Claude Code, Codex or another coding agent? Paste this:
+
+> Install Open Dialer on this computer from https://github.com/yogabayusavira/open-dialer. Clone it into a folder I
+> choose (ask me where; avoid the C: drive if it's low on space). Install anything missing: Node.js 22 or newer and
+> cloudflared, and Docker only if I say I want PostgreSQL. Run `npm install`, then `npm run setup` (or
+> `npm run setup -- --docker` for PostgreSQL), which writes `.env` with new secrets. Never print or share what's in
+> `.env`. Then run `npm run local`, open http://localhost:3000, and tell me to create my owner account and connect
+> Twilio in Settings → Phone numbers. If a step fails, show me the error and explain it before trying something else.
 
 ## Host it on a server instead
 
@@ -93,7 +94,7 @@ transcription.
   back to the browser. Keep `.env` private and never commit it.
 - Accounts are invite-only after the first owner, with scrypt-hashed passwords and rate-limited sign-in. Each company
   has its own workspace; callers only see leads assigned to them.
-- Back up the `data` folder: it holds the local database.
+- Back up the `data` folder: it holds your data (or the PostgreSQL files).
 
 ## License
 

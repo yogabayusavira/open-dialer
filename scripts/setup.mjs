@@ -1,6 +1,8 @@
-// One-time setup after `npm install`: writes .env with fresh secrets and creates the local Postgres database in
-// Docker, with its files in this folder's data/postgres. Safe to run again: it keeps what's already there.
-// Run: node scripts/setup.mjs   (Install Open Dialer.bat runs it for you on Windows)
+// One-time setup after `npm install`: writes .env with a fresh encryption key. Safe to run again: it keeps what's
+// already there. Two kinds of database:
+//   node scripts/setup.mjs            simple: the app keeps its data in this folder's data/ (no database program)
+//   node scripts/setup.mjs --docker   Postgres in Docker, with its files in data/postgres
+// The Windows setup wizard (installer/OpenDialer.iss) runs this for you.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -17,19 +19,20 @@ const docker = (...args) => spawnSync("docker", args, { encoding: "utf8" });
 const hadEnv = existsSync(envPath);
 let env = hadEnv ? readFileSync(envPath, "utf8") : "";
 let password = env.match(/^DATABASE_URL=postgres(?:ql)?:\/\/opendialer:([^@]+)@127\.0\.0\.1:5433\//m)?.[1];
+const useDocker = process.argv.includes("--docker");
 if (!env.trim()) {
-  password = randomBytes(18).toString("hex");
+  if (useDocker) password = randomBytes(18).toString("hex");
   env = [
     "# Made by scripts/setup.mjs. Keep this file private: it unlocks your saved Twilio and AI keys.",
-    `DATABASE_URL=postgres://opendialer:${password}@127.0.0.1:5433/opendialer`,
+    ...(useDocker ? [`DATABASE_URL=postgres://opendialer:${password}@127.0.0.1:5433/opendialer`] : ["# No DATABASE_URL: data is kept in this folder's data/ directory. Back it up."]),
     `OPEN_DIALER_ENCRYPTION_KEY=${randomBytes(32).toString("hex")}`,
     "",
   ].join("\n");
   writeFileSync(envPath, env);
-  log("Wrote .env with a new database password and encryption key.");
+  log(useDocker ? "Wrote .env with a new database password and encryption key." : "Wrote .env with a new encryption key. Your data will be kept in the data folder.");
 } else log(".env already exists; keeping it.");
 if (!password) {
-  log("Your .env uses a database other than the local Docker one, so there's nothing more to set up.");
+  log(/^DATABASE_URL=/m.test(env) ? "Your .env uses a database other than the local Docker one, so there's nothing more to set up." : "No database to set up: the app keeps its data in the data folder.");
   log('Next: double-click "Start Open Dialer.bat" (or run: npm run local).');
   process.exit(0);
 }
