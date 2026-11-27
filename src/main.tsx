@@ -130,7 +130,8 @@ type AutomationStep =
   | { type: "stage"; stage: string }
   | { type: "followup"; days: number };
 type Automation = { id: string; name: string; on: boolean; trigger: AutomationTrigger; campaigns?: string[]; outcomes?: string[]; steps: AutomationStep[] };
-type Recording = { id: string; name: string; size: number; seconds: number; createdAt: string };
+// campaigns and says are labels for staying organized (which campaigns it is for, what it says); they restrict nothing.
+type Recording = { id: string; name: string; size: number; seconds: number; createdAt: string; campaigns?: string[]; says?: string };
 type CleanRule = { from: string; to: string; notes: string };
 // A won lead is worth its own value if set, else its campaign's deal value.
 function dealValue(lead: Lead, settings: Record<string, CampaignSettings>) {
@@ -185,20 +186,22 @@ class ApiError extends Error {
   }
 }
 
-// Campaigns govern the dialer, scripts, automations and analytics, so those sit under it (sub: indented).
+// The sidebar, in groups. Calling: things set up and run inside one campaign. Leads & deals: workspace records
+// (a lead can be in several campaigns), narrowed by the campaign dropdown. Automation: works across campaigns.
+// Logs and Settings sit at the bottom with the account.
 const nav = [
-  { id: "home", key: "home", label: "Dashboard", icon: LayoutDashboard },
-  { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Tag },
-  { id: "dashboard", key: "queue", label: "Dialer", icon: Activity, sub: true },
-  { id: "scripts", key: "scripts", label: "Scripts", icon: ScrollText, sub: true },
-  { id: "automations", key: "automations", label: "Automations", icon: Workflow, sub: true },
-  { id: "voicemails", key: "voicemails", label: "Voicemails", icon: Voicemail, sub: true },
-  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartColumn, sub: true },
-  { id: "leads", key: "leads", label: "Leads", icon: Users },
-  { id: "calls", key: "calls", label: "Calls", icon: Phone },
-  { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock },
-  { id: "pipeline", key: "pipeline", label: "Pipeline", icon: SlidersHorizontal },
-  { id: "logs", key: "activity", label: "Logs", icon: ClipboardList },
+  { id: "home", key: "home", label: "Dashboard", icon: LayoutDashboard, group: "" },
+  { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock, group: "" },
+  { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Tag, group: "Calling" },
+  { id: "dashboard", key: "queue", label: "Dialer", icon: Activity, group: "Calling" },
+  { id: "scripts", key: "scripts", label: "Scripts", icon: ScrollText, group: "Calling" },
+  { id: "leads", key: "leads", label: "Leads", icon: Users, group: "Leads & deals" },
+  { id: "pipeline", key: "pipeline", label: "Pipeline", icon: SlidersHorizontal, group: "Leads & deals" },
+  { id: "calls", key: "calls", label: "Calls", icon: Phone, group: "Leads & deals" },
+  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartColumn, group: "Leads & deals" },
+  { id: "automations", key: "automations", label: "Automations", icon: Workflow, group: "Automation" },
+  { id: "voicemails", key: "voicemails", label: "Voicemails", icon: Voicemail, group: "Automation" },
+  { id: "logs", key: "activity", label: "Logs", icon: ClipboardList, group: "bottom" },
 ] as const;
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -586,13 +589,15 @@ function campaignsOf(leads: Lead[]) {
   return [...new Set(leads.flatMap((lead) => lead.campaigns || []))].sort((left, right) => left.localeCompare(right));
 }
 
-function CampaignPicker({ campaigns, value, onChange }: { campaigns: string[]; value: string; onChange: (name: string) => void }) {
+// The app-wide campaign. "All campaigns" is listed first, only where a page can show several at once, and is never the default.
+const allCampaignsValue = "__all__";
+function CampaignPicker({ campaigns, value, onChange, allowAll = true }: { campaigns: string[]; value: string; onChange: (name: string) => void; allowAll?: boolean }) {
   if (!campaigns.length) return null;
   return (
     <label className="campaign-picker">
       <Tag size={16} aria-hidden="true" />
       <select value={value} onChange={(event) => onChange(event.target.value)} aria-label="Campaign">
-        <option value="">All campaigns</option>
+        {allowAll && <option value={allCampaignsValue}>All campaigns</option>}
         {campaigns.map((name) => <option key={name}>{name}</option>)}
       </select>
     </label>
@@ -941,7 +946,7 @@ function App() {
   // Set while a voicemail drop is under way, so the hang-up that follows logs it instead of asking.
   const droppedVoicemail = useRef<string | null>(null);
   const nextInQueue = (fresh: State, exclude: string[]) => {
-    const inCampaign = campaign && fresh.leads.some((lead) => lead.campaigns?.includes(campaign)) ? fresh.leads.filter((lead) => lead.campaigns?.includes(campaign)) : fresh.leads;
+    const inCampaign = singleCampaign ? fresh.leads.filter((lead) => lead.campaigns?.includes(singleCampaign)) : fresh.leads;
     let keepPlace = false;
     try { keepPlace = localStorage.getItem("open-dialer-queue-order") === "inplace"; } catch { /* private mode */ }
     const list = callQueue(inCampaign, fresh.calls, keepPlace);
@@ -1196,18 +1201,23 @@ function App() {
         </section>
       </main>
     );
-  const campaigns = campaignsOf(state.leads);
-  const activeCampaign = campaigns.includes(campaign) ? campaign : "";
-  // The campaign picker narrows the dashboard, leads list and board together.
-  const scoped = activeCampaign
-    ? (() => {
-        const leads = state.leads.filter((lead) => lead.campaigns?.includes(activeCampaign));
-        const ids = new Set(leads.map((lead) => lead.id));
-        return { ...state, leads, calls: state.calls.filter((call) => ids.has(call.leadId)) };
-      })()
-    : state;
-  const scopedSelected = scoped.leads.find((lead) => lead.id === selected?.id) || scoped.leads[0];
-  const picker = <CampaignPicker campaigns={campaigns} value={activeCampaign} onChange={setCampaign} />;
+  const campaigns = allCampaigns(state.leads, state.campaignSettings || {});
+  // One campaign for the whole app, picked anywhere. The first campaign is the default; "All campaigns" only when chosen.
+  const singleCampaign = campaigns.includes(campaign) ? campaign : campaigns[0] || "";
+  const activeCampaign = campaign === allCampaignsValue ? "" : singleCampaign;
+  const scopeTo = (name: string) => {
+    if (!name) return state;
+    const leads = state.leads.filter((lead) => lead.campaigns?.includes(name));
+    const ids = new Set(leads.map((lead) => lead.id));
+    return { ...state, leads, calls: state.calls.filter((call) => ids.has(call.leadId)), tasks: (state.tasks || []).filter((task) => !task.leadId || ids.has(task.leadId)) };
+  };
+  // Pages that can show every campaign follow activeCampaign; the Dialer and Scripts always work on one.
+  const scoped = scopeTo(activeCampaign);
+  const dialerScoped = scopeTo(singleCampaign);
+  const scopedFollowUps = activeCampaign ? followUps.filter((lead) => lead.campaigns?.includes(activeCampaign)) : followUps;
+  const scopedSelected = dialerScoped.leads.find((lead) => lead.id === selected?.id) || dialerScoped.leads[0];
+  const picker = <CampaignPicker campaigns={campaigns} value={campaign === allCampaignsValue ? allCampaignsValue : singleCampaign} onChange={setCampaign} />;
+  const singlePicker = <CampaignPicker campaigns={campaigns} value={singleCampaign} onChange={setCampaign} allowAll={false} />;
   const startCampaign = (name: string) => {
     setCampaign(name);
     const first = callQueue(state.leads.filter((lead) => lead.campaigns?.includes(name)), state.calls)[0];
@@ -1220,31 +1230,35 @@ function App() {
         <Brand />
         <div className="workspace-label">Workspace</div>
         <nav aria-label="Workspace navigation">
-          {nav.map(({ id, key, label, icon: Icon, ...item }) => (
-            <button
-              key={id}
-              data-tour={`nav-${key}`}
-              className={`nav-item${"sub" in item ? " nav-item--sub" : ""}${screen === key ? " nav-item--active" : ""}`}
-              onClick={() => { setLeadsView("all"); setCallsView("conversations"); setScreen(key); }}
-            >
-              <Icon size={18} />
-              <span>{label}</span>
-              {id === "tasks" && followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length > 0 && <b>{followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length}</b>}
-            </button>
+          {nav.filter((item) => item.group !== "bottom").map(({ id, key, label, icon: Icon, group }, index, list) => (
+            <Fragment key={id}>
+              {group && group !== list[index - 1]?.group && <div className="nav-group">{group}</div>}
+              <button
+                data-tour={`nav-${key}`}
+                className={`nav-item${screen === key ? " nav-item--active" : ""}`}
+                aria-current={screen === key ? "page" : undefined}
+                onClick={() => { setLeadsView("all"); setCallsView("conversations"); setScreen(key); }}
+              >
+                <Icon size={18} />
+                <span>{label}</span>
+                {id === "tasks" && scopedFollowUps.length + (scoped.tasks || []).filter((task) => !task.doneAt).length > 0 && <b>{scopedFollowUps.length + (scoped.tasks || []).filter((task) => !task.doneAt).length}</b>}
+              </button>
+              {/* Unibox: SMS and email replies in one place. Not built yet, so it can't be opened. */}
+              {id === "tasks" && (
+                <button className="nav-item nav-item--soon" type="button" disabled aria-disabled="true" title="Coming soon">
+                  <Inbox size={18} />
+                  <span>Unibox</span>
+                  <small className="nav-soon">Soon</small>
+                </button>
+              )}
+            </Fragment>
           ))}
-          {/* Unibox: SMS and email replies in one place. Not built yet, so it can't be opened. */}
-          <button className="nav-item nav-item--soon" type="button" disabled aria-disabled="true" title="Coming soon">
-            <Inbox size={18} />
-            <span>Unibox</span>
-            <small className="nav-soon">Soon</small>
-          </button>
-          {/* Placeholder for tools that come later; for now it opens the logs. */}
-          <button className="nav-item" type="button" onClick={() => setScreen("activity")}>
-            <MoreHorizontal size={18} />
-            <span>More</span>
-          </button>
         </nav>
         <div className="sidebar-footer">
+          <button className={`nav-item sidebar-utility${screen === "activity" ? " nav-item--active" : ""}`} type="button" data-tour="nav-activity" onClick={() => setScreen("activity")}>
+            <ClipboardList size={18} />
+            <span>Logs</span>
+          </button>
           <button className="nav-item sidebar-utility" type="button" onClick={() => setLightMode((current) => !current)}>
             <ShieldCheck size={18} />
             <span>{lightMode ? "Dark mode" : "Light mode"}</span>
@@ -1280,7 +1294,7 @@ function App() {
             )}
           </div>
           <div className="top-actions">
-            {(screen === "home" || screen === "leads" || screen === "pipeline" || screen === "analytics" || screen === "voicemails") && picker}
+            {(screen === "home" || screen === "leads" || screen === "calls" || screen === "followups" || screen === "pipeline" || screen === "analytics") && picker}
             <button
               className="quick-tour-button"
               onClick={() => setGuideOpen(true)}
@@ -1290,7 +1304,7 @@ function App() {
             {/* The page's own main action: leads on Leads and Pipeline, tasks on Tasks, scripts on Scripts; none elsewhere. */}
             {(screen === "leads" || screen === "pipeline") && <button className="primary-button" onClick={() => setShowLeadForm(true)}><Plus size={18} /> Add lead</button>}
             {screen === "followups" && <button className="primary-button" onClick={() => setTaskDialog({})}><Plus size={18} /> Add task</button>}
-            {screen === "scripts" && allCampaigns(state.leads, state.campaignSettings || {}).includes(campaign) && <button className="primary-button" onClick={() => editCampaign(campaign, "script", "new")}><Plus size={18} /> New script</button>}
+            {screen === "scripts" && singleCampaign && <button className="primary-button" onClick={() => editCampaign(singleCampaign, "script", "new")}><Plus size={18} /> New script</button>}
           </div>
         </header>}
         {activeCall?.callId && featuresOf(state).transcription && featuresOf(state).captions && <LiveCaptions callId={activeCall.callId} />}
@@ -1355,9 +1369,9 @@ function App() {
         )}
         {screen === "queue" && scopedSelected && (
           <Queue
-            state={scoped}
+            state={dialerScoped}
             selected={scopedSelected}
-            picker={picker}
+            picker={singlePicker}
             onSelect={setSelectedId}
             onPrepare={prepareCall}
             calling={Boolean(activeCall)}
@@ -1394,7 +1408,7 @@ function App() {
         {screen === "calls" && (
           <CallHistory
             key={callsView}
-            calls={state.calls}
+            calls={scoped.calls}
             leads={state.leads}
             initialView={callsView}
             onOpenLead={(id) => { setSelectedId(id); setScreen("queue"); }}
@@ -1431,10 +1445,10 @@ function App() {
         )}
         {screen === "followups" && (
           <FollowUps
-            leads={followUps}
+            leads={scopedFollowUps}
             allLeads={state.leads}
             calls={state.calls}
-            tasks={state.tasks || []}
+            tasks={scoped.tasks || []}
             onOpenTask={(task) => setTaskDialog({ task })}
             onQuickAdd={(fields) => saveTask(fields)}
             onChangeTask={changeTask}
@@ -1466,15 +1480,15 @@ function App() {
           <Home
             state={scoped}
             all={state}
-            followUps={followUps}
+            followUps={scopedFollowUps}
             onOpenLead={(id) => { setSelectedId(id); setScreen("queue"); }}
             onStart={startCampaign}
             onGo={setScreen}
           />
         )}
-        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={campaign} onPick={setCampaign} onEdit={editCampaign} onChanged={async (message) => { await refresh(); setNotice(message); }} />}
+        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={singleCampaign} onPick={setCampaign} onEdit={editCampaign} onChanged={async (message) => { await refresh(); setNotice(message); }} />}
         {screen === "automations" && <AutomationsPage automations={state.automations || []} leads={state.leads} settings={state.campaignSettings || {}} vault={state.voicemails || []} onRefresh={refresh} onOpenVault={() => setScreen("voicemails")} />}
-        {screen === "voicemails" && <VoicemailsPage vault={state.voicemails || []} automations={state.automations || []} settings={state.campaignSettings || {}} campaign={activeCampaign} onRefresh={refresh} onNotice={setNotice} />}
+        {screen === "voicemails" && <VoicemailsPage vault={state.voicemails || []} automations={state.automations || []} settings={state.campaignSettings || {}} campaigns={campaigns} defaultCampaign={singleCampaign} onRefresh={refresh} onNotice={setNotice} />}
         {screen === "campaigns" && (
           <Campaigns
             leads={state.leads}
@@ -1559,7 +1573,7 @@ function App() {
           }}
         />
       )}
-      {importOpen && <ImportLeads campaigns={[...new Set([...campaigns, ...Object.keys(state.campaignSettings || {})])]} settings={state.campaignSettings || {}} fields={state.settings?.fields} defaultCampaign={importOpen === "campaign" && campaign ? campaign : activeCampaign} requireCampaign={importOpen === "campaign"} onClose={() => setImportOpen(false)} onSaved={async (message, name) => { setImportOpen(false); await refresh(); notifyWith(message, "Start calling", () => { setCampaign(name); setScreen("queue"); }); }} />}
+      {importOpen && <ImportLeads campaigns={[...new Set([...campaigns, ...Object.keys(state.campaignSettings || {})])]} settings={state.campaignSettings || {}} fields={state.settings?.fields} defaultCampaign={importOpen === "campaign" ? singleCampaign : activeCampaign} requireCampaign={importOpen === "campaign"} onClose={() => setImportOpen(false)} onSaved={async (message, name) => { setImportOpen(false); await refresh(); notifyWith(message, "Start calling", () => { setCampaign(name); setScreen("queue"); }); }} />}
       {dncOpen && <DncList onClose={() => setDncOpen(false)} onSaved={async (message) => { setDncOpen(false); await refresh(); setNotice(message); }} />}
       {outcomeLead && <CallOutcome lead={outcomeLead} automations={state.automations} settings={state.campaignSettings || {}} bookingUrl={state.settings?.bookingUrl || ""} onBook={() => openBooking(state.settings!.bookingUrl!, outcomeLead.name).catch((error) => showError(error instanceof Error ? error.message : "Couldn't open the booking page."))} onClose={() => setOutcomeLead(null)} onSaved={async (outcome) => {
         setOutcomeLead(null);
@@ -3707,8 +3721,18 @@ function ScriptDialog({ campaign, initialTab = "script", scriptId, settings, col
   );
 }
 
-function RecorderDialog({ script, onClose, onSaved }: { script: string; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+// The first voicemail line in a campaign's script (a Note or a line mentioning voicemail), shown as a prompt to read.
+function voicemailLine(settings: CampaignSettings | undefined) {
+  return (settings?.script || "").split("\n").map((line) => line.trim()).find((line) => /voicemail/i.test(line) && line.length > 20)?.replace(/^(>|note:|example:)\s*/i, "") || "";
+}
+
+function RecorderDialog({ campaigns, settings, defaultCampaign, onClose, onSaved }: { campaigns: string[]; settings: Record<string, CampaignSettings>; defaultCampaign: string; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
   const [name, setName] = useState("");
+  // Pick the campaign first: it tags the recording, and its script's voicemail line is what to read (saved as "what it says").
+  const [campaign, setCampaign] = useState(campaigns.includes(defaultCampaign) ? defaultCampaign : campaigns[0] || "");
+  const script = voicemailLine(settings[campaign]);
+  // Starts empty: the script's "voicemail" line is sometimes a note about the call, not the words, so copying it is a choice.
+  const [says, setSays] = useState("");
   const [state, setState] = useState<"idle" | "recording" | "ready" | "saving">("idle");
   const [error, setError] = useState<string | null>(null);
   const [take, setTake] = useState<{ blob: Blob; seconds: number; url: string; fileName: string } | null>(null);
@@ -3751,7 +3775,7 @@ function RecorderDialog({ script, onClose, onSaved }: { script: string; onClose:
     if (take.blob.size > 3_500_000) return setError("That recording is over 3.5 MB. Keep voicemails short.");
     setState("saving");
     try {
-      await api("/api/voicemails", { method: "POST", body: JSON.stringify({ name: name.trim() || "Voicemail", seconds: take.seconds, data: await blobToBase64(take.blob) }) });
+      await api("/api/voicemails", { method: "POST", body: JSON.stringify({ name: name.trim() || "Voicemail", seconds: take.seconds, data: await blobToBase64(take.blob), campaigns: campaign ? [campaign] : [], says }) });
       await onSaved(`${name.trim() || "Voicemail"} saved.`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Couldn't save the recording.");
@@ -3764,8 +3788,11 @@ function RecorderDialog({ script, onClose, onSaved }: { script: string; onClose:
         <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
         <h2 id="recorder-title">New voicemail</h2>
         {error && <p className="form-error" role="alert">{error}</p>}
+        {campaigns.length > 0 && <label>For campaign<select value={campaign} onChange={(event) => setCampaign(event.target.value)}>{campaigns.map((item) => <option key={item}>{item}</option>)}<option value="">Any campaign</option></select></label>}
         <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="No website, friendly" maxLength={80} autoFocus /></label>
         {script && <div className="recorder__script"><small>What to say</small><p>{script}</p></div>}
+        <label><span>What it says<small>So you can pick it later without listening</small></span><textarea rows={2} value={says} onChange={(event) => setSays(event.target.value)} placeholder="Hey, this is Bayu with Growth for Locals…" maxLength={500} /></label>
+        {script && says !== script && <button type="button" className="text-link recorder__use-line" onClick={() => setSays(script)}>Use the line above</button>}
         <div className="recorder__stage">
           {state === "recording"
             ? <button type="button" className="recorder__button is-recording" onClick={() => recorder.current?.stop()} aria-label="Stop recording"><span /></button>
@@ -3786,26 +3813,38 @@ function RecorderDialog({ script, onClose, onSaved }: { script: string; onClose:
 }
 
 // The voicemail vault: every recording once, reusable in any campaign.
-function VoicemailsPage({ vault, automations, settings, campaign, onRefresh, onNotice }: { vault: Recording[]; automations: Automation[]; settings: Record<string, CampaignSettings>; campaign: string; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
+// Voicemails for the whole workspace. Each one is tagged with the campaigns it's for and says what's in it, so you can
+// find and pick one without listening again. Tags only organize; automations decide where a recording is dropped.
+function VoicemailsPage({ vault, automations, settings, campaigns, defaultCampaign, onRefresh, onNotice }: { vault: Recording[]; automations: Automation[]; settings: Record<string, CampaignSettings>; campaigns: string[]; defaultCampaign: string; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
   const [recording, setRecording] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [filter, setFilter] = useState("");
+  const [editing, setEditing] = useState<{ id: string; campaigns: string[]; says: string } | null>(null);
   const usedIn = (id: string) => automations.filter((item) => item.steps.some((step) => step.type === "play" && step.recordingId === id)).map((item) => item.name);
-  // While recording, the picked campaign's first voicemail line (a Note or line mentioning voicemail) is shown as a prompt.
-  const prompt = (settings[campaign]?.script || "").split("\n").map((line) => line.trim()).find((line) => /voicemail/i.test(line) && line.length > 20)?.replace(/^(>|note:|example:)\s*/i, "") || "";
   const act = async (work: () => Promise<unknown>, message: string) => {
     try { await work(); await onRefresh(); onNotice(message); } catch (cause) { onNotice(cause instanceof Error ? cause.message : "Something went wrong."); }
   };
+  const tagged = (item: Recording) => !filter || (filter === "-" ? !item.campaigns?.length : item.campaigns?.includes(filter));
+  const shown = vault.filter(tagged);
+  const tags = campaigns.filter((name) => vault.some((item) => item.campaigns?.includes(name)));
   return (
     <section className="campaigns-page">
       <div className="campaigns-head">
-        <p>Your recorded voicemails. Record once, then pick them in any campaign's automations.</p>
+        <p>Your recorded voicemails. Record once, tag the campaigns it's for, then pick it in any automation.</p>
         <div className="campaigns-head__actions"><button type="button" className="primary-button" onClick={() => setRecording(true)}><Mic size={16} aria-hidden="true" /> New voicemail</button></div>
       </div>
+      {vault.length > 0 && (tags.length > 0 || vault.some((item) => !item.campaigns?.length)) && (
+        <div className="call-list__views vault-filter" role="group" aria-label="Show voicemails for">
+          <button type="button" className={!filter ? "is-active" : ""} aria-pressed={!filter} onClick={() => setFilter("")}>All <small>{vault.length}</small></button>
+          {tags.map((name) => <button key={name} type="button" className={filter === name ? "is-active" : ""} aria-pressed={filter === name} onClick={() => setFilter(name)}>{name} <small>{vault.filter((item) => item.campaigns?.includes(name)).length}</small></button>)}
+          {vault.some((item) => !item.campaigns?.length) && <button type="button" className={filter === "-" ? "is-active" : ""} aria-pressed={filter === "-"} onClick={() => setFilter("-")}>No campaign <small>{vault.filter((item) => !item.campaigns?.length).length}</small></button>}
+        </div>
+      )}
       {!vault.length && <div className="empty-state">No voicemails yet. Press New voicemail to record one in your own voice, or upload an MP3.</div>}
       <div className="vault-list">
-        {vault.map((item) => {
-          const campaigns = usedIn(item.id);
+        {shown.map((item) => {
+          const used = usedIn(item.id);
           return (
             <article className="vault-item" key={item.id}>
               <div className="vault-item__head">
@@ -3814,16 +3853,29 @@ function VoicemailsPage({ vault, automations, settings, campaign, onRefresh, onN
                   : <button type="button" className="vault-item__name" title="Rename" onClick={() => { setRenaming(item.id); setDraft(item.name); }}>{item.name}</button>}
                 <small>{clockOf(item.seconds)}{item.seconds > 30 ? " · long" : ""}</small>
               </div>
+              {editing?.id === item.id ? (
+                <form className="vault-item__edit" onSubmit={(event) => { event.preventDefault(); const next = editing; setEditing(null); void act(() => api(`/api/voicemails/${item.id}`, { method: "PATCH", body: JSON.stringify({ campaigns: next.campaigns, says: next.says }) }), `${item.name} updated.`); }}>
+                  <fieldset><legend>For campaigns</legend>{campaigns.map((name) => <label key={name}><input type="checkbox" checked={editing.campaigns.includes(name)} onChange={(event) => setEditing({ ...editing, campaigns: event.target.checked ? [...editing.campaigns, name] : editing.campaigns.filter((tag) => tag !== name) })} />{name}</label>)}</fieldset>
+                  <label>What it says<textarea rows={2} value={editing.says} onChange={(event) => setEditing({ ...editing, says: event.target.value })} maxLength={500} /></label>
+                  <div><button type="button" className="quiet-button" onClick={() => setEditing(null)}>Cancel</button><button type="submit" className="primary-button">Save</button></div>
+                </form>
+              ) : (
+                <>
+                  {item.says ? <p className="vault-item__says">"{item.says}"</p> : <p className="vault-item__says is-empty">No text yet. Add what it says so you can pick it without listening.</p>}
+                  <div className="vault-item__tags">{item.campaigns?.length ? item.campaigns.map((name) => <span key={name}>{name}</span>) : <span className="is-any">Any campaign</span>}</div>
+                </>
+              )}
               <audio controls preload="none" src={`/api/voicemails/${item.id}/audio`} />
               <div className="vault-item__foot">
-                <small>{campaigns.length ? `Used in ${campaigns.join(", ")}` : "Not used in an automation yet"}</small>
-                <button type="button" className="text-link" onClick={() => { if (window.confirm(`Delete ${item.name}?${campaigns.length ? " Automations using it will stop dropping it." : ""}`)) void act(() => api(`/api/voicemails/${item.id}`, { method: "DELETE" }), `${item.name} deleted.`); }}>Delete</button>
+                <small>{used.length ? `Used in ${used.join(", ")}` : "Not used in an automation yet"}</small>
+                {editing?.id !== item.id && <button type="button" className="text-link" onClick={() => setEditing({ id: item.id, campaigns: item.campaigns || [], says: item.says || "" })}>Edit details</button>}
+                <button type="button" className="text-link" onClick={() => { if (window.confirm(`Delete ${item.name}?${used.length ? " Automations using it will stop dropping it." : ""}`)) void act(() => api(`/api/voicemails/${item.id}`, { method: "DELETE" }), `${item.name} deleted.`); }}>Delete</button>
               </div>
             </article>
           );
         })}
       </div>
-      {recording && <RecorderDialog script={prompt} onClose={() => setRecording(false)} onSaved={async (message) => { setRecording(false); await onRefresh(); onNotice(message); }} />}
+      {recording && <RecorderDialog campaigns={campaigns} settings={settings} defaultCampaign={defaultCampaign} onClose={() => setRecording(false)} onSaved={async (message) => { setRecording(false); await onRefresh(); onNotice(message); }} />}
     </section>
   );
 }
@@ -4066,7 +4118,7 @@ function Pipeline({
 
 // Campaigns with leads, plus new ones that so far only have a script.
 function allCampaigns(leads: Lead[], settings: Record<string, CampaignSettings>) {
-  return [...new Set([...campaignsOf(leads), ...Object.keys(settings).filter((name) => settings[name]?.script || settings[name]?.pdf)])].sort((left, right) => left.localeCompare(right));
+  return [...new Set([...campaignsOf(leads), ...Object.keys(settings)])].sort((left, right) => left.localeCompare(right));
 }
 
 function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScript }: { leads: Lead[]; onStart: (name: string) => void; onView: (name: string) => void; onStage: (name: string) => void; onImport: (name?: string) => void; settings: Record<string, CampaignSettings>; onScript: (name: string) => void }) {
@@ -4117,6 +4169,24 @@ function scriptRules(text = "") {
   return text.replace(/\r\n/g, "\n").split("\n").filter((line) => !/^(\s{2,}|\t)\S/.test(line)).map((line) => parseCondition(line)).filter((rule): rule is NonNullable<typeof rule> => Boolean(rule)).map((rule) => `If ${describeCondition(rule)}`);
 }
 // One card per campaign: what its script has, with links into that campaign's Settings popup.
+// The campaign picker for setting up one campaign (Scripts): a panel on the left. Record pages use the top dropdown.
+// "All campaigns" is the first row, only where the page can show every campaign at once.
+function CampaignRail({ campaigns, value, onPick, detail, allowAll = false }: { campaigns: string[]; value: string; onPick: (name: string) => void; detail: (name: string) => string; allowAll?: boolean }) {
+  const row = (name: string, label: string, sub: string) => (
+    <button key={name} type="button" className={name === value ? "is-active" : ""} aria-current={name === value || undefined} onClick={() => onPick(name)}>
+      <b>{label}</b>
+      <small>{sub}</small>
+    </button>
+  );
+  return (
+    <nav className="campaign-rail" aria-label="Campaigns">
+      <p>Campaigns</p>
+      {allowAll && row(allCampaignsValue, "All campaigns", detail(allCampaignsValue))}
+      {campaigns.map((name) => row(name, name, detail(name)))}
+    </nav>
+  );
+}
+
 // Scripts, per campaign: every script it has, and a radio to pick the one the call screen shows.
 // A campaign has to be picked first (left), so it's always clear whose scripts you're looking at and adding to.
 function ScriptsPage({ leads, settings, campaign, onPick, onEdit, onChanged }: { leads: Lead[]; settings: Record<string, CampaignSettings>; campaign: string; onPick: (name: string) => void; onEdit: (name: string, tab: CampaignTab, scriptId?: string) => void; onChanged: (message: string) => Promise<void> }) {
@@ -4138,19 +4208,8 @@ function ScriptsPage({ leads, settings, campaign, onPick, onEdit, onChanged }: {
     <section className="scripts-page">
       <p className="scripts-page__lede">Pick a campaign, then choose which of its scripts the call screen shows.</p>
       {!all.length && <div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div>}
-      {all.length > 0 && <div className="scripts-layout">
-      <nav className="scripts-campaigns" aria-label="Campaigns">
-        <p>Campaigns</p>
-        {all.map((name) => {
-          const count = campaignScripts(settings[name] || {}).length;
-          return (
-            <button key={name} type="button" className={name === campaign ? "is-active" : ""} aria-current={name === campaign || undefined} onClick={() => onPick(name)}>
-              <b>{name}</b>
-              <small>{count} script{count === 1 ? "" : "s"}</small>
-            </button>
-          );
-        })}
-      </nav>
+      {all.length > 0 && <div className="campaign-layout">
+      <CampaignRail campaigns={all} value={campaign} onPick={onPick} detail={(name) => { const count = campaignScripts(settings[name] || {}).length; return `${count} script${count === 1 ? "" : "s"}`; }} />
       <div>
       {!names.length && <div className="scripts-pick"><FileText size={20} aria-hidden="true" /><b>Pick a campaign</b><span>Each campaign has its own scripts. Choose one on the left to see them, add one or change which one you call with.</span></div>}
       {names.map((name) => {
@@ -4243,7 +4302,7 @@ function stepSummary(step: AutomationStep, vault: Recording[]) {
   return `${step.days} business day${step.days === 1 ? "" : "s"} out, 10:00`;
 }
 function triggerSummary(item: Automation) {
-  const where = item.campaigns?.length ? item.campaigns.join(", ") : "Any campaign";
+  const where = item.campaigns?.length ? `Runs for ${item.campaigns.join(", ")}` : "Runs for every campaign";
   if (item.trigger !== "outcome" && item.trigger !== "transcribed") return where;
   return `${where} · ${item.outcomes?.length ? item.outcomes.join(", ") : "any outcome"}`;
 }
@@ -4437,7 +4496,7 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
             </div>
           )}
           {step && typeof panel === "number" && (
-            <StepSettings step={step} fields={fields} leads={leads} settings={allSettings} vault={vault} onOpenVault={onOpenVault}
+            <StepSettings step={step} fields={fields} leads={leads} settings={allSettings} vault={vault} campaigns={draft.campaigns || []} onOpenVault={onOpenVault}
               onChange={(next) => setStep(panel, next)}
               onRemove={() => { change({ ...draft, steps: draft.steps.filter((_, at) => at !== panel) }); setPanel(null); }} />
           )}
@@ -4448,7 +4507,7 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
 }
 
 // One step's settings in the side panel.
-function StepSettings({ step, fields, leads, settings, vault, onOpenVault, onChange, onRemove }: { step: AutomationStep; fields: [string, string][]; leads: Lead[]; settings: Record<string, CampaignSettings>; vault: Recording[]; onOpenVault: () => void; onChange: (step: AutomationStep) => void; onRemove: () => void }) {
+function StepSettings({ step, fields, leads, settings, vault, campaigns = [], onOpenVault, onChange, onRemove }: { step: AutomationStep; fields: [string, string][]; leads: Lead[]; settings: Record<string, CampaignSettings>; vault: Recording[]; campaigns?: string[]; onOpenVault: () => void; onChange: (step: AutomationStep) => void; onRemove: () => void }) {
   const variablesOf = (lead: Lead) => settings[scriptCampaignOf(lead, settings) || ""]?.variables;
   const values = step.type === "if" && step.field ? [...new Set(leads.map((lead) => fieldValue(step.field, lead, variablesOf(lead))).filter(Boolean))].slice(0, 50) : [];
   const matching = step.type === "if" && step.field ? leads.filter((lead) => matches(step, lead, variablesOf(lead))).length : 0;
@@ -4491,8 +4550,23 @@ function StepSettings({ step, fields, leads, settings, vault, onOpenVault, onCha
       {step.type === "say" && <label>Line<textarea rows={4} value={step.text} onChange={(event) => onChange({ ...step, text: event.target.value })} placeholder="Hey {{first_name}}, I see you don't have a website yet." /><small>Use {"{{variables}}"} like in the script.</small></label>}
       {step.type === "play" && (vault.length ? (
         <>
-          <label>Voicemail<select value={step.recordingId} onChange={(event) => onChange({ ...step, recordingId: event.target.value })}><option value="" disabled>Pick a voicemail…</option>{vault.map((item) => <option key={item.id} value={item.id}>{item.name}{item.seconds ? ` (${clockOf(item.seconds)})` : ""}</option>)}</select></label>
-          {step.recordingId && vault.some((item) => item.id === step.recordingId) && <audio controls preload="none" src={`/api/voicemails/${step.recordingId}/audio`} />}
+          {(() => {
+            // Voicemails tagged for this automation's campaigns first, each with what it says, so you pick by reading.
+            const fits = (item: Recording) => !campaigns.length || !item.campaigns?.length || item.campaigns.some((name) => campaigns.includes(name));
+            const option = (item: Recording) => <option key={item.id} value={item.id}>{item.name}{item.seconds ? ` (${clockOf(item.seconds)})` : ""}{item.says ? ` · ${item.says.slice(0, 60)}` : ""}</option>;
+            const picked = vault.find((item) => item.id === step.recordingId);
+            const others = vault.filter((item) => !fits(item));
+            return (
+              <>
+                <label>Voicemail<select value={step.recordingId} onChange={(event) => onChange({ ...step, recordingId: event.target.value })}>
+                  <option value="" disabled>Pick a voicemail…</option>
+                  {others.length ? <><optgroup label={campaigns.length ? "For these campaigns" : "Voicemails"}>{vault.filter(fits).map(option)}</optgroup><optgroup label="Other voicemails">{others.map(option)}</optgroup></> : vault.map(option)}
+                </select></label>
+                {picked?.says && <p className="campaign-settings__hint">"{picked.says}"</p>}
+                {picked && <audio controls preload="none" src={`/api/voicemails/${picked.id}/audio`} />}
+              </>
+            );
+          })()}
           <small>After it plays, the call ends and the lead is logged as Voicemail.</small>
         </>
       ) : <p className="campaign-settings__hint">No voicemails yet. <button type="button" className="text-link" onClick={onOpenVault}>Record one in Voicemails</button></p>)}

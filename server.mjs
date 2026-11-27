@@ -630,6 +630,14 @@ function stageAfterOutcome(current, outcome) {
 function campaignName(value) {
   return cleanText(value, 80);
 }
+// A recording's organizing labels: the campaigns it's for (tags only, nothing is restricted by them) and what it says,
+// so it can be picked without listening. Only fields sent are returned, so a PATCH changes just those.
+function voicemailLabels(body) {
+  const labels = {};
+  if (Array.isArray(body.campaigns)) labels.campaigns = [...new Set(body.campaigns.map((name) => cleanText(name, 80)).filter(Boolean))].slice(0, 20);
+  if (typeof body.says === "string") labels.says = cleanText(body.says, 500);
+  return labels;
+}
 function cleanText(value, max = 500) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
@@ -1637,7 +1645,7 @@ async function route(req, res, url) {
       const bytes = typeof body.data === "string" ? Buffer.from(body.data, "base64") : Buffer.alloc(0);
       const type = audioType(bytes);
       if (!type) return json(res, 400, { error: "Use an MP3 or WAV file, or record one here." });
-      const item = { id: `vm_${Date.now()}_${randomBytes(3).toString("hex")}`, name: cleanText(body.name, 80) || "Voicemail", size: bytes.length, seconds: Math.max(0, Math.round(Number(body.seconds) || 0)), createdAt: new Date().toISOString() };
+      const item = { id: `vm_${Date.now()}_${randomBytes(3).toString("hex")}`, name: cleanText(body.name, 80) || "Voicemail", size: bytes.length, seconds: Math.max(0, Math.round(Number(body.seconds) || 0)), createdAt: new Date().toISOString(), ...voicemailLabels(body) };
       await writeBlob(scopedBlob(`voicemail-file:${item.id}`), { type, data: bytes.toString("base64") });
       await updateState((state) => {
         state.voicemails.unshift(item);
@@ -1655,13 +1663,14 @@ async function route(req, res, url) {
         return res.end(Buffer.from(file.data, "base64"));
       }
       if (!vaultMatch[2] && req.method === "PATCH") {
-        const { name } = await getBody(req);
-        const label = cleanText(name, 80);
-        if (!label) return json(res, 400, { error: "Give it a name." });
+        const body = await getBody(req);
+        const label = body.name === undefined ? undefined : cleanText(body.name, 80);
+        if (label === "") return json(res, 400, { error: "Give it a name." });
         const found = await updateState((state) => {
           const item = state.voicemails.find((entry) => entry.id === id);
           if (!item) return false;
-          item.name = label;
+          if (label) item.name = label;
+          Object.assign(item, voicemailLabels(body));
           return true;
         });
         return found ? json(res, 200, { ok: true }) : json(res, 404, { error: "That recording is gone." });
