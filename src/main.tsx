@@ -62,6 +62,13 @@ import {
   ArrowRight,
   Sun,
   Moon,
+  House,
+  ListChecks,
+  Megaphone,
+  Contact,
+  Kanban,
+  ChartLine,
+  Headset,
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
@@ -225,16 +232,16 @@ class ApiError extends Error {
 // the picker as the group's header. Advanced: automations and voicemails, which work across campaigns. The menu scrolls on
 // its own so your profile, pinned at the bottom, is never pushed off; Settings, Logs and the theme live in Settings.
 const nav = [
-  { id: "home", key: "home", label: "Dashboard", icon: LayoutDashboard, group: "" },
-  { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock, group: "" },
+  { id: "home", key: "home", label: "Dashboard", icon: House, group: "" },
+  { id: "tasks", key: "followups", label: "Tasks", icon: ListChecks, group: "" },
   // Campaigns sits right above the picker: you create campaigns here, and they're what the picker lists.
-  { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Tag, group: "" },
-  { id: "dashboard", key: "queue", label: "Dialer", icon: Activity, group: "campaign" },
+  { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Megaphone, group: "" },
+  { id: "dashboard", key: "queue", label: "Dialer", icon: Headset, group: "campaign" },
   { id: "scripts", key: "scripts", label: "Scripts", icon: ScrollText, group: "campaign" },
-  { id: "leads", key: "leads", label: "Leads", icon: Users, group: "campaign" },
-  { id: "pipeline", key: "pipeline", label: "Pipeline", icon: SlidersHorizontal, group: "campaign" },
-  { id: "calls", key: "calls", label: "Calls", icon: Phone, group: "campaign" },
-  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartColumn, group: "campaign" },
+  { id: "leads", key: "leads", label: "Leads", icon: Contact, group: "campaign" },
+  { id: "pipeline", key: "pipeline", label: "Pipeline", icon: Kanban, group: "campaign" },
+  { id: "calls", key: "calls", label: "Calls", icon: PhoneCall, group: "campaign" },
+  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartLine, group: "campaign" },
   { id: "automations", key: "automations", label: "Automations", icon: Workflow, group: "Advanced" },
   { id: "voicemails", key: "voicemails", label: "Voicemails", icon: Voicemail, group: "Advanced" },
 ] as const;
@@ -639,7 +646,7 @@ function CampaignPicker({ campaigns, value, onChange, allowAll = true }: { campa
   if (!campaigns.length) return null;
   return (
     <label className="campaign-picker">
-      <Tag size={16} aria-hidden="true" />
+      <Megaphone size={16} aria-hidden="true" />
       <select value={value} onChange={(event) => onChange(event.target.value)} aria-label="Campaign">
         {allowAll && <option value={allCampaignsValue}>All campaigns</option>}
         {campaigns.map((name) => <option key={name}>{name}</option>)}
