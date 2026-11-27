@@ -57,6 +57,7 @@ import {
   ScrollText,
   Workflow,
   Voicemail,
+  ArrowRight,
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
@@ -110,7 +111,9 @@ type CallRecord = {
 };
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
-type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[]; transcribe?: boolean };
+type CampaignScript = { id: string; name: string; script: string };
+// `script` is always the text of the script in use (picked on the Scripts page); `scripts` holds all of them.
+type CampaignSettings = { script?: string; scripts?: CampaignScript[]; activeScript?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[]; transcribe?: boolean };
 // The workspace's automations, n8n style: a trigger (with the campaigns it listens to, none meaning any), then
 // steps run in order. "Only continue if" stops the rest
 // when the lead doesn't match.
@@ -638,10 +641,12 @@ function resting(entry: CallStat | undefined) {
 }
 
 // The calling order: leads never called first (in the order they were added), then retries, least recently called first.
-function callQueue(leads: Lead[], calls: CallRecord[]) {
+// keepPlace: called leads stay where they are (the order they were added), for working straight down a list.
+function callQueue(leads: Lead[], calls: CallRecord[], keepPlace = false) {
   const calledIds = new Set(calls.map((call) => call.leadId));
   const stats = callStats(calls);
   const queue = leads.filter((lead) => inQueue(lead) && !resting(stats.get(lead.id)));
+  if (keepPlace) return queue;
   const lastAt = (lead: Lead) => stats.get(lead.id)?.lastAt || "";
   return [...queue.filter((lead) => !calledBefore(lead, calledIds)), ...queue.filter((lead) => calledBefore(lead, calledIds)).sort((left, right) => lastAt(left).localeCompare(lastAt(right)))];
 }
@@ -937,7 +942,12 @@ function App() {
   const droppedVoicemail = useRef<string | null>(null);
   const nextInQueue = (fresh: State, exclude: string[]) => {
     const inCampaign = campaign && fresh.leads.some((lead) => lead.campaigns?.includes(campaign)) ? fresh.leads.filter((lead) => lead.campaigns?.includes(campaign)) : fresh.leads;
-    return callQueue(inCampaign, fresh.calls).find((lead) => !exclude.includes(lead.id)) || null;
+    let keepPlace = false;
+    try { keepPlace = localStorage.getItem("open-dialer-queue-order") === "inplace"; } catch { /* private mode */ }
+    const list = callQueue(inCampaign, fresh.calls, keepPlace);
+    // In place: go on down the list from the lead just called instead of jumping back to the top.
+    const from = keepPlace ? list.findIndex((lead) => lead.id === exclude[exclude.length - 1]) + 1 : 0;
+    return list.slice(from).find((lead) => !exclude.includes(lead.id)) || null;
   };
   // Select the next lead and, when calls go through the app, start the countdown to it.
   const advanceFrom = (fresh: State | undefined, done: Lead, message: string) => {
@@ -1075,7 +1085,9 @@ function App() {
   const [scriptFor, setScriptFor] = useState<string | null>(null);
   // Which part of the campaign Settings popup opens first (Scripts and Automations link straight to one).
   const [scriptTab, setScriptTab] = useState<CampaignTab>("script");
-  const editCampaign = (name: string, tab: CampaignTab = "script") => { setScriptTab(tab); setScriptFor(name); };
+  // Which of the campaign's scripts the dialog edits: an id, "new" for a new one, or undefined for the one in use.
+  const [scriptEditId, setScriptEditId] = useState<string | undefined>(undefined);
+  const editCampaign = (name: string, tab: CampaignTab = "script", scriptId?: string) => { setScriptTab(tab); setScriptEditId(scriptId); setScriptFor(name); };
   const [pdfFor, setPdfFor] = useState<string | null>(null);
   // The task dialog: "new" to add one, or the task being viewed and edited.
   const [taskDialog, setTaskDialog] = useState<{ task?: Task; leadId?: string } | null>(null);
@@ -1268,19 +1280,17 @@ function App() {
             )}
           </div>
           <div className="top-actions">
-            {(screen === "home" || screen === "leads" || screen === "pipeline" || screen === "analytics" || screen === "scripts" || screen === "voicemails") && picker}
+            {(screen === "home" || screen === "leads" || screen === "pipeline" || screen === "analytics" || screen === "voicemails") && picker}
             <button
               className="quick-tour-button"
               onClick={() => setGuideOpen(true)}
             >
               <BadgeCheck size={17} /> Setup guide
             </button>
-            <button
-              className="primary-button"
-              onClick={() => (screen === "followups" ? setTaskDialog({}) : setShowLeadForm(true))}
-            >
-              <Plus size={18} /> {screen === "followups" ? "Add task" : "Add lead"}
-            </button>
+            {/* The page's own main action: leads on Leads and Pipeline, tasks on Tasks, scripts on Scripts; none elsewhere. */}
+            {(screen === "leads" || screen === "pipeline") && <button className="primary-button" onClick={() => setShowLeadForm(true)}><Plus size={18} /> Add lead</button>}
+            {screen === "followups" && <button className="primary-button" onClick={() => setTaskDialog({})}><Plus size={18} /> Add task</button>}
+            {screen === "scripts" && allCampaigns(state.leads, state.campaignSettings || {}).includes(campaign) && <button className="primary-button" onClick={() => editCampaign(campaign, "script", "new")}><Plus size={18} /> New script</button>}
           </div>
         </header>}
         {activeCall?.callId && featuresOf(state).transcription && featuresOf(state).captions && <LiveCaptions callId={activeCall.callId} />}
@@ -1462,7 +1472,7 @@ function App() {
             onGo={setScreen}
           />
         )}
-        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={activeCampaign} onEdit={editCampaign} />}
+        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={campaign} onPick={setCampaign} onEdit={editCampaign} onChanged={async (message) => { await refresh(); setNotice(message); }} />}
         {screen === "automations" && <AutomationsPage automations={state.automations || []} leads={state.leads} settings={state.campaignSettings || {}} vault={state.voicemails || []} onRefresh={refresh} onOpenVault={() => setScreen("voicemails")} />}
         {screen === "voicemails" && <VoicemailsPage vault={state.voicemails || []} automations={state.automations || []} settings={state.campaignSettings || {}} campaign={activeCampaign} onRefresh={refresh} onNotice={setNotice} />}
         {screen === "campaigns" && (
@@ -1500,6 +1510,7 @@ function App() {
         <ScriptDialog
           campaign={scriptFor}
           initialTab={scriptTab}
+          scriptId={scriptEditId}
           settings={state.campaignSettings?.[scriptFor] || {}}
           columns={[...new Set([...(state.settings?.fields || []), ...state.leads.filter((lead) => !scriptFor || lead.campaigns?.includes(scriptFor)).flatMap((lead) => Object.keys(lead.details || {}))])].sort()}
           leads={state.leads.filter((lead) => lead.campaigns?.includes(scriptFor))}
@@ -1948,6 +1959,29 @@ function FollowUpTag({ lead, calls }: { lead: Lead; calls: CallRecord[] }) {
   );
 }
 
+// A lead's stage as one small circle, after Linear's issue status: empty ring for not called yet, a ring filling a third
+// per follow-up in that follow-up's color, a check for meeting booked and won, an x for lost.
+function StageCircle({ lead, calls, called }: { lead: Lead; calls: CallRecord[]; called: boolean }) {
+  const info = followUpInfo(lead, calls);
+  const [tone, fill, mark, label] =
+    lead.status === "Won" ? ["var(--dot-good)", 1, "check", "Won"]
+    : lead.status === "Meeting booked" ? ["var(--fu-1)", 1, "check", "Meeting booked"]
+    : lead.status === "Lost" ? ["var(--fu-done)", 1, "x", "Lost"]
+    : info ? (info.exhausted ? ["var(--fu-done)", 1, "", `${followUpLimit} follow-ups, no reply`] : [`var(--fu-${info.step})`, info.step / followUpLimit, "", `Follow-up ${info.step} of ${followUpLimit}`])
+    : called ? ["var(--dot-tried)", 0.25, "", "Called, no follow-up set"]
+    : ["var(--color-text-faint, var(--color-text-muted))", 0, "", "Not called yet"];
+  const pie = 2 * Math.PI * 2.5;
+  return (
+    <svg className="stage-circle" width="14" height="14" viewBox="0 0 14 14" role="img" aria-label={label}>
+      <title>{label}</title>
+      {mark ? <circle cx="7" cy="7" r="6.25" fill={tone} /> : <circle cx="7" cy="7" r="5.75" fill="none" stroke={tone} strokeWidth="1.5" />}
+      {!mark && fill > 0 && <circle cx="7" cy="7" r="2.5" fill="none" stroke={tone} strokeWidth="5" strokeDasharray={`${pie * fill} ${pie}`} transform="rotate(-90 7 7)" />}
+      {mark === "check" && <path d="M4.3 7.2 6.2 9 9.7 5.3" fill="none" stroke="var(--color-surface)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />}
+      {mark === "x" && <path d="M5 5l4 4M9 5l-4 4" stroke="var(--color-surface)" strokeWidth="1.6" strokeLinecap="round" />}
+    </svg>
+  );
+}
+
 // What a pipeline card's dot line says for each stage. Follow-up uses FollowUpTag.
 const lostOutcomes = ["Not interested", "Wrong number", "Do not call"];
 function lostReason(lead: Lead, calls: CallRecord[]) {
@@ -2275,10 +2309,15 @@ function Queue({
   onStatus: (lead: Lead, status: string) => void;
   onSettings: () => void;
 }) {
-  const upcoming = callQueue(state.leads, state.calls);
   // What the list shows: everything in calling order, only new leads, or callbacks (follow-ups and set call-back times).
   const [view, setView] = useState<"all" | "new" | "callbacks">(() => { try { return (localStorage.getItem("open-dialer-queue-view") as "all" | "new" | "callbacks") || "all"; } catch { return "all"; } });
-  const [order, setOrder] = useState<"queue" | "newest" | "location">(() => { try { const saved = localStorage.getItem("open-dialer-queue-order"); return saved === "newest" || saved === "location" ? saved : "queue"; } catch { return "queue"; } });
+  const [order, setOrder] = useState<"queue" | "inplace" | "newest" | "location">(() => { try { const saved = localStorage.getItem("open-dialer-queue-order"); return saved === "newest" || saved === "location" || saved === "inplace" ? saved : "queue"; } catch { return "queue"; } });
+  const upcoming = callQueue(state.leads, state.calls, order === "inplace");
+  const calledIds = new Set(state.calls.map((call) => call.leadId));
+  // The lead auto-dial goes to after this one (same rule as nextInQueue).
+  const nextId = order === "inplace" ? upcoming[upcoming.findIndex((lead) => lead.id === selected.id) + 1]?.id : upcoming.find((lead) => lead.id !== selected.id)?.id;
+  // Keep the lead being called in view as the list scrolls on its own.
+  useEffect(() => { document.querySelector(".call-list-item.is-selected")?.scrollIntoView({ block: "nearest" }); }, [selected.id]);
   const remember = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* private mode */ } };
   const isCallback = (lead: Lead) => lead.status === "Follow-up" || /^\d{4}-\d{2}-\d{2}/.test(lead.due);
   const addedAt = (lead: Lead) => Number(lead.id.split("_")[1]) || 0;
@@ -2364,32 +2403,43 @@ function Queue({
                 <button key={key} type="button" className={view === key ? "is-active" : ""} aria-pressed={view === key} onClick={() => { setView(key); remember("open-dialer-queue-view", key); }}>{label} <small>{counts[key]}</small></button>
               ))}
             </div>
-            <select value={order} aria-label="Order" onChange={(event) => { const next = event.target.value as "queue" | "newest" | "location"; setOrder(next); remember("open-dialer-queue-order", next); }}>
-              <option value="queue">{view === "callbacks" ? "Soonest first" : "Calling order"}</option>
+            <select value={order} aria-label="Order" onChange={(event) => { const next = event.target.value as "queue" | "inplace" | "newest" | "location"; setOrder(next); remember("open-dialer-queue-order", next); }}>
+              <option value="queue">{view === "callbacks" ? "Soonest first" : "Calling order (called go last)"}</option>
+              <option value="inplace">List order (called stay in place)</option>
               <option value="newest">Newest added</option>
               <option value="location">Location (state, then city)</option>
             </select>
           </div>
           {!shown.length && <p className="call-list__empty">{view === "callbacks" ? "No callbacks waiting." : view === "new" ? "No new leads left to call." : "Nothing left to call."}</p>}
-          {shown.map((lead) => (
-            <button
-              key={lead.id}
-              className={
-                selected.id === lead.id
-                  ? "call-list-item is-selected"
-                  : "call-list-item"
-              }
-              onClick={() => onSelect(lead.id)}
-            >
-              <i aria-hidden="true" className="lead-avatar lead-avatar--small"><LeadFace id={lead.id} /></i>
-              <span>
-                <b>{leadLabel(lead)}</b>
-                <small>{leadSubtitle(lead)}</small>
-                {lead.due && lead.due !== "Unscheduled" && <span className="lead-time">{lead.due.replace("T", " ")}</span>}
-              </span>
-              <ChevronRight size={17} />
-            </button>
-          ))}
+          {shown.map((lead) => {
+            const label = leadLabel(lead);
+            const subtitle = leadSubtitle(lead);
+            const called = calledBefore(lead, calledIds);
+            const due = lead.due && lead.due !== "Unscheduled" ? dueLabel(lead.due) : null;
+            const zone = leadZone(lead);
+            const isNext = lead.id === nextId && selected.id !== lead.id;
+            // Linear-style row: called leads dim with a small check, the next lead gets a dot, local time on the right.
+            return (
+              <button
+                key={lead.id}
+                className={`call-list-item${selected.id === lead.id ? " is-selected" : ""}${called ? " is-called" : ""}`}
+                aria-current={selected.id === lead.id || undefined}
+                onClick={() => onSelect(lead.id)}
+              >
+                {selected.id === lead.id && <ArrowRight className="call-list-item__arrow" size={14} aria-hidden="true" />}
+                <i aria-hidden="true" className="lead-avatar lead-avatar--small"><LeadFace id={lead.id} /></i>
+                <span>
+                  <b>{isNext && <span className="call-list-item__dot" title="Next" />}{label}</b>
+                  {due ? <small className={due.overdue ? "is-overdue" : undefined}>Callback {due.text}</small> : subtitle !== label && <small>{subtitle}</small>}
+                </span>
+                <span className="call-list-item__side">
+                  {zone && <time>{localTime(zone.zone)}</time>}
+                  <StageCircle lead={lead} calls={state.calls} called={called} />
+                </span>
+                {isNext && <span className="sr-only">Next</span>}
+              </button>
+            );
+          })}
         </aside>
         <article className="call-panel">
           {selected.dnc && (
@@ -3037,6 +3087,12 @@ function fillVariable(name: string, lead: Lead | undefined, variables: Record<st
   return spoken && spoken.from === raw ? spoken.text : raw;
 }
 // The campaign whose script a lead's call screen shows: its first campaign with a script.
+// A campaign's scripts; one saved before campaigns could hold several counts as "Script 1" (the server does the same).
+function campaignScripts(settings: CampaignSettings): CampaignScript[] {
+  if (settings.scripts?.length) return settings.scripts;
+  return settings.script ? [{ id: "s1", name: "Script 1", script: settings.script }] : [];
+}
+
 function scriptCampaignOf(lead: Lead, settings: Record<string, CampaignSettings>) {
   return lead.campaigns?.find((name) => settings[name]?.script || settings[name]?.pdf);
 }
@@ -3513,13 +3569,17 @@ function VariableMap({ names, value, columns, onChange, auto }: { names: string[
 // One campaign's settings, one part at a time from a sidebar: General (name, deal value, leads), Script (text, PDF),
 // Variables (what fills each {{variable}}, and how AI should clean it). Every part stays mounted, so switching keeps edits.
 type CampaignTab = "general" | "script" | "variables";
-function ScriptDialog({ campaign, initialTab = "script", settings, columns, leads, aiReady, vault = [], onOpenVault = () => {}, onImport, onViewPdf, onClose, onChanged }: { campaign: string; initialTab?: CampaignTab; settings: CampaignSettings; columns: string[]; leads: Lead[]; aiReady: boolean; vault?: Recording[]; onOpenVault?: () => void; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
+function ScriptDialog({ campaign, initialTab = "script", scriptId, settings, columns, leads, aiReady, vault = [], onOpenVault = () => {}, onImport, onViewPdf, onClose, onChanged }: { campaign: string; initialTab?: CampaignTab; scriptId?: string; settings: CampaignSettings; columns: string[]; leads: Lead[]; aiReady: boolean; vault?: Recording[]; onOpenVault?: () => void; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   // An empty campaign name means a new campaign: name it, write the script, then import its leads.
   const isNew = !campaign;
   const [name, setName] = useState(campaign);
   const [value, setValue] = useState(settings.value ? String(settings.value) : "");
-  const [text, setText] = useState(settings.script || "");
+  const scripts = campaignScripts(settings);
+  const editing = scriptId === "new" ? undefined : scripts.find((item) => item.id === (scriptId || settings.activeScript)) || scripts[0];
+  const initialText = scriptId === "new" ? "" : editing?.script || "";
+  const [scriptName, setScriptName] = useState(editing?.name || `Script ${scripts.length + 1}`);
+  const [text, setText] = useState(initialText);
   const [variables, setVariables] = useState<Record<string, string>>(settings.variables || {});
   const [clean, setClean] = useState<Record<string, CleanRule>>(settings.clean || {});
   const [tab, setTab] = useState<CampaignTab>(isNew ? "general" : initialTab);
@@ -3545,12 +3605,13 @@ function ScriptDialog({ campaign, initialTab = "script", settings, columns, lead
   };
   const save = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const script = editorRef.current ? serializeScript(editorRef.current) : settings.script || "";
+    const script = editorRef.current ? serializeScript(editorRef.current) : initialText;
     if (!name.trim()) return setError("Name the campaign first.");
-    // Only keep choices for variables still in the script.
-    const kept = Object.fromEntries(Object.entries(variables).filter(([key, source]) => source && scriptVariables(script).includes(key)));
-    const rules = Object.fromEntries(Object.entries(clean).filter(([key, rule]) => scriptVariables(script).includes(key) && (rule.to.trim() || rule.notes.trim())));
-    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name.trim(), script, variables: kept, clean: rules, value: value.replace(/[$,\s]/g, "") }) }), isNew ? `${name.trim()} created.` : `${name.trim()} saved.`, true);
+    // Only keep choices for variables still used, in this script or in the campaign's other scripts.
+    const used = new Set([...scriptVariables(script), ...scripts.filter((item) => item.id !== editing?.id).flatMap((item) => scriptVariables(item.script))]);
+    const kept = Object.fromEntries(Object.entries(variables).filter(([key, source]) => source && used.has(key)));
+    const rules = Object.fromEntries(Object.entries(clean).filter(([key, rule]) => used.has(key) && (rule.to.trim() || rule.notes.trim())));
+    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name.trim(), script, scriptId: editing?.id || "new", scriptName: scriptName.trim(), variables: kept, clean: rules, value: value.replace(/[$,\s]/g, "") }) }), isNew ? `${name.trim()} created.` : `${scriptName.trim() || "Script"} saved.`, true);
   };
   const upload = (file: File | undefined) => {
     if (!file) return;
@@ -3594,8 +3655,9 @@ function ScriptDialog({ campaign, initialTab = "script", settings, columns, lead
               {isNew && <p className="campaign-settings__hint">Next, write the script. Put {"{{variables}}"} where each lead's details go; you'll match them to your CSV's columns when you import the leads.</p>}
             </section>
             <section hidden={tab !== "script"} className="campaign-settings__section">
-              <p className="campaign-settings__hint">Shows on the call screen for every lead in this campaign.</p>
-              <ScriptEditor initial={settings.script || ""} editorRef={editorRef} onTextChange={setText} />
+              <label>Script name<input value={scriptName} onChange={(event) => setScriptName(event.target.value)} placeholder="Opener A" maxLength={60} /></label>
+              <p className="campaign-settings__hint">{scripts.length > 1 || scriptId === "new" ? "Pick which script the call screen shows on the Scripts page." : "Shows on the call screen for every lead in this campaign."}</p>
+              <ScriptEditor initial={initialText} editorRef={editorRef} onTextChange={setText} />
               <div className="script-dialog__pdf">
                 <FileText size={18} aria-hidden="true" />
                 {settings.pdf ? (
@@ -4055,32 +4117,80 @@ function scriptRules(text = "") {
   return text.replace(/\r\n/g, "\n").split("\n").filter((line) => !/^(\s{2,}|\t)\S/.test(line)).map((line) => parseCondition(line)).filter((rule): rule is NonNullable<typeof rule> => Boolean(rule)).map((rule) => `If ${describeCondition(rule)}`);
 }
 // One card per campaign: what its script has, with links into that campaign's Settings popup.
-function ScriptsPage({ leads, settings, campaign, onEdit }: { leads: Lead[]; settings: Record<string, CampaignSettings>; campaign: string; onEdit: (name: string, tab: CampaignTab) => void }) {
-  const names = allCampaigns(leads, settings).filter((name) => !campaign || name === campaign);
+// Scripts, per campaign: every script it has, and a radio to pick the one the call screen shows.
+// A campaign has to be picked first (left), so it's always clear whose scripts you're looking at and adding to.
+function ScriptsPage({ leads, settings, campaign, onPick, onEdit, onChanged }: { leads: Lead[]; settings: Record<string, CampaignSettings>; campaign: string; onPick: (name: string) => void; onEdit: (name: string, tab: CampaignTab, scriptId?: string) => void; onChanged: (message: string) => Promise<void> }) {
+  const all = allCampaigns(leads, settings);
+  const names = all.includes(campaign) ? [campaign] : [];
+  const [busy, setBusy] = useState(false);
+  const change = async (name: string, body: Record<string, string>, message: string) => {
+    setBusy(true);
+    try {
+      await api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name, ...body }) });
+      await onChanged(message);
+    } catch (error) {
+      await onChanged(error instanceof Error ? error.message : "Couldn't change the script.");
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <section className="campaigns-page">
-      <div className="campaigns-head"><p>Each campaign's script, its variables and voicemails. Edit them in the campaign's settings.</p></div>
-      {!names.length && <div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div>}
-      <div className="campaign-list">
-        {names.map((name) => {
-          const own = settings[name] || {};
-          const script = own.script?.trim() ? (own.pdf ? "Text and PDF" : "Text") : own.pdf ? "PDF" : "None";
+    <section className="scripts-page">
+      <p className="scripts-page__lede">Pick a campaign, then choose which of its scripts the call screen shows.</p>
+      {!all.length && <div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div>}
+      {all.length > 0 && <div className="scripts-layout">
+      <nav className="scripts-campaigns" aria-label="Campaigns">
+        <p>Campaigns</p>
+        {all.map((name) => {
+          const count = campaignScripts(settings[name] || {}).length;
           return (
-            <article className="campaign-card" key={name}>
-              <header><h2>{name}</h2><span>{(() => { const count = leads.filter((lead) => lead.campaigns?.includes(name)).length; return `${count} lead${count === 1 ? "" : "s"}`; })()}</span></header>
-              <dl className="campaign-stages campaign-stages--static">
-                <div><dt>Script</dt><dd>{script}</dd></div>
-                <div><dt>Variables</dt><dd>{scriptVariables(own.script || "").length}</dd></div>
-                <div><dt>Only-if rules</dt><dd>{scriptRules(own.script).length}</dd></div>
-              </dl>
-              <div className="campaign-card__actions">
-                <button type="button" className="text-link" onClick={() => onEdit(name, "variables")}>Variables</button>
-                <button type="button" className="primary-button" onClick={() => onEdit(name, "script")}><FileText size={16} aria-hidden="true" /> {script === "None" ? "Write the script" : "Edit script"}</button>
-              </div>
-            </article>
+            <button key={name} type="button" className={name === campaign ? "is-active" : ""} aria-current={name === campaign || undefined} onClick={() => onPick(name)}>
+              <b>{name}</b>
+              <small>{count} script{count === 1 ? "" : "s"}</small>
+            </button>
           );
         })}
+      </nav>
+      <div>
+      {!names.length && <div className="scripts-pick"><FileText size={20} aria-hidden="true" /><b>Pick a campaign</b><span>Each campaign has its own scripts. Choose one on the left to see them, add one or change which one you call with.</span></div>}
+      {names.map((name) => {
+        const own = settings[name] || {};
+        const scripts = campaignScripts(own);
+        const inUse = scripts.some((item) => item.id === own.activeScript) ? own.activeScript : scripts[0]?.id;
+        const count = leads.filter((lead) => lead.campaigns?.includes(name)).length;
+        return (
+          <section className="scripts-campaign" key={name} aria-labelledby={`scripts-${name}`}>
+            <header>
+              <h2 id={`scripts-${name}`}>{name}</h2>
+              <span>{count} lead{count === 1 ? "" : "s"}{own.pdf ? " · PDF attached" : ""}</span>
+              <button type="button" className="quiet-button" onClick={() => onEdit(name, "variables")}>Variables</button>
+            </header>
+            {!scripts.length && <p className="scripts-campaign__empty">No script yet. <button type="button" className="text-link" onClick={() => onEdit(name, "script", "new")}>Write the first one</button></p>}
+            <ul role="radiogroup" aria-label={`Script the call screen shows for ${name}`}>
+              {scripts.map((item) => {
+                const variables = scriptVariables(item.script).length;
+                const rules = scriptRules(item.script).length;
+                return (
+                  <li key={item.id} className={item.id === inUse ? "is-in-use" : undefined}>
+                    <label>
+                      <input type="radio" name={`in-use-${name}`} checked={item.id === inUse} disabled={busy} onChange={() => void change(name, { activate: item.id }, `${item.name} is now the script for ${name}.`)} />
+                      <span>
+                        <b>{item.name}</b>
+                        <small>{[`${variables} variable${variables === 1 ? "" : "s"}`, rules ? `${rules} only-if rule${rules === 1 ? "" : "s"}` : "", item.script.split("\n").find((line) => line.trim())?.replace(/^\s*(#+|>|-|note:)\s*/i, "").slice(0, 80) || "Empty"].filter(Boolean).join(" · ")}</small>
+                      </span>
+                      {item.id === inUse && <em>In use</em>}
+                    </label>
+                    <button type="button" className="text-link" onClick={() => onEdit(name, "script", item.id)}>Edit</button>
+                    <button type="button" className="text-link" disabled={busy} onClick={() => { if (window.confirm(`Delete ${item.name}? This cannot be undone.`)) void change(name, { remove: item.id }, `${item.name} deleted.`); }}>Delete</button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        );
+      })}
       </div>
+      </div>}
     </section>
   );
 }

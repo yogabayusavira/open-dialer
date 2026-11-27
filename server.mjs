@@ -1567,7 +1567,7 @@ async function route(req, res, url) {
       return json(res, 201, lead);
     }
     if (url.pathname === "/api/campaigns/script" && req.method === "PUT") {
-      const { campaign, script, variables, value, clean, pinned, transcribe } = await getBody(req);
+      const { campaign, script, variables, value, clean, pinned, transcribe, scriptId, scriptName, activate, remove } = await getBody(req);
       const name = campaignName(campaign);
       if (!name) return json(res, 400, { error: "Choose a campaign." });
       // What one won deal in this campaign is worth; blank clears it.
@@ -1581,7 +1581,29 @@ async function route(req, res, url) {
       const map = variables && typeof variables === "object" && !Array.isArray(variables)
         ? Object.fromEntries(Object.entries(variables).slice(0, 60).map(([key, value]) => [cleanText(key, 60), cleanText(value, 120)]).filter(([key, value]) => key && value))
         : current.variables || {};
-      state.campaignSettings[name] = { ...current, script: text, variables: map };
+      // A campaign keeps several named scripts; the one picked on the Scripts page is "in use" and is mirrored into
+      // `script`, which the call screen, variables and AI cleanup read. Campaigns saved before this get one "Script 1".
+      const scripts = Array.isArray(current.scripts) && current.scripts.length
+        ? current.scripts.map((item) => ({ ...item }))
+        : current.script ? [{ id: "s1", name: "Script 1", script: current.script }] : [];
+      let inUse = scripts.some((item) => item.id === current.activeScript) ? current.activeScript : scripts[0]?.id;
+      let target = scripts.find((item) => item.id === (scriptId || inUse));
+      if (typeof script === "string") {
+        if (!target) {
+          target = { id: `s${Date.now().toString(36)}`, name: `Script ${scripts.length + 1}`, script: "" };
+          scripts.push(target);
+        }
+        target.script = text;
+      }
+      if (target && typeof scriptName === "string" && cleanText(scriptName, 60)) target.name = cleanText(scriptName, 60);
+      if (typeof remove === "string") {
+        const index = scripts.findIndex((item) => item.id === remove);
+        if (index >= 0) scripts.splice(index, 1);
+      }
+      if (typeof activate === "string" && scripts.some((item) => item.id === activate)) inUse = activate;
+      if (!scripts.some((item) => item.id === inUse)) inUse = scripts[0]?.id;
+      state.campaignSettings[name] = { ...current, scripts, activeScript: inUse, script: scripts.find((item) => item.id === inUse)?.script || "", variables: map };
+      if (!scripts.length) delete state.campaignSettings[name].activeScript;
       if (amount === null) delete state.campaignSettings[name].value;
       else if (amount !== undefined) state.campaignSettings[name].value = amount;
       // Lead details shown first on the call screen for this campaign, in the order they were pinned.
@@ -1595,7 +1617,7 @@ async function route(req, res, url) {
         for (const variable of Object.keys(current.clean || {})) if (!rules[variable]) forgetSpoken(state, name, variable);
         state.campaignSettings[name].clean = rules;
       }
-      activity(state, Array.isArray(pinned) && typeof script !== "string" ? "Pinned details updated" : typeof script !== "string" ? "Script variables saved" : "Campaign settings saved", name);
+      activity(state, typeof activate === "string" ? "Script in use changed" : typeof remove === "string" ? "Script deleted" : Array.isArray(pinned) && typeof script !== "string" ? "Pinned details updated" : typeof script !== "string" ? "Script variables saved" : "Campaign settings saved", name);
       await writeState(state);
       return json(res, 200, state.campaignSettings[name]);
     }
