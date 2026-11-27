@@ -1588,3 +1588,31 @@ html[data-theme="light"] .mic-widget { background: #2a2a28; }
 .roadmap__group li b { display: flex; align-items: center; gap: var(--space-2); color: var(--color-text); font-size: 14px; font-weight: 500; }
 .roadmap__group li em { padding: 0 6px; border: 1px dashed var(--color-border-strong); border-radius: 999px; color: var(--color-text-muted); font-size: var(--font-size-label); font-style: normal; font-weight: 600; }
 .roadmap__group li small { color: var(--color-text-muted); font-size: var(--font-size-meta); line-height: 1.45; }
+
+/* The one campaign picker, at the top of the sidebar. Faded (still usable) on pages that don't filter by campaign. */
+.sidebar-campaign { display: grid; gap: var(--space-1); margin: var(--space-4) 0 var(--space-1); }
+.sidebar-campaign .campaign-picker { display: flex; width: 100%; padding: 0 var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-surface-raised); color: var(--color-text-muted); }
+.sidebar-campaign .campaign-picker select { flex: 1; min-width: 0; max-width: none; min-height: 38px; padding: 0; border: 0; background: transparent; color: var(--color-text); font-size: 13px; font-weight: 600; text-overflow: ellipsis; cursor: pointer; }
+.sidebar-campaign .campaign-picker select:focus-visible { outline: none; }
+.sidebar-campaign .campaign-picker:focus-within { border-color: var(--color-accent-text); }
+.sidebar-campaign--new { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); width: 100%; }
+@media (max-width: 820px) { .sidebar-campaign { flex: none; width: 200px; margin: 0; } }
+
+/* "Pick one campaign" (Dialer and Scripts when All campaigns is picked): a short why, then the campaign list. */
+.pick-campaign { display: grid; justify-items: center; gap: var(--space-2); max-width: 520px; margin: var(--space-6, 32px) auto; color: var(--color-text-muted); text-align: center; }
+.pick-campaign b { color: var(--color-text); font-size: 16px; font-weight: 600; }
+.pick-campaign > span { font-size: var(--font-size-body); }
+.pick-campaign .campaign-rail { width: 100%; margin-top: var(--space-3); text-align: left; }
+.sidebar-campaign, .sidebar-campaign .campaign-picker { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.sidebar-campaign .campaign-picker select { width: 0; }
+
+/* Sidebar: the menu scrolls on its own, so the profile pinned at the bottom is never pushed off, on any screen. */
+.sidebar { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+.sidebar nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.sidebar-footer { flex: none; margin-top: 0; }
+.account-summary.is-active { background: var(--color-surface-raised); }
+@media (max-width: 820px) {
+  .sidebar { height: auto; overflow: visible; }
+  .sidebar nav { overflow-y: visible; }
+
+}

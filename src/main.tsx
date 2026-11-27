@@ -60,6 +60,8 @@ import {
   Workflow,
   Voicemail,
   ArrowRight,
+  Sun,
+  Moon,
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
@@ -206,7 +208,9 @@ type SettingsPage =
   | "costs"
   | "companies"
   | "setup"
-  | "roadmap";
+  | "roadmap"
+  | "appearance"
+  | "logs";
 
 class ApiError extends Error {
   constructor(
@@ -217,22 +221,22 @@ class ApiError extends Error {
   }
 }
 
-// The sidebar, in groups. Calling: things set up and run inside one campaign. Leads & deals: workspace records
-// (a lead can be in several campaigns), narrowed by the campaign dropdown. Automation: works across campaigns.
-// Logs and Settings sit at the bottom with the account.
+// The sidebar, in groups. Top: your day across everything. "campaign": the pages the campaign picker filters, with
+// the picker as the group's header. Advanced: automations and voicemails, which work across campaigns. The menu scrolls on
+// its own so your profile, pinned at the bottom, is never pushed off; Settings, Logs and the theme live in Settings.
 const nav = [
   { id: "home", key: "home", label: "Dashboard", icon: LayoutDashboard, group: "" },
   { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock, group: "" },
-  { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Tag, group: "Calling" },
-  { id: "dashboard", key: "queue", label: "Dialer", icon: Activity, group: "Calling" },
-  { id: "scripts", key: "scripts", label: "Scripts", icon: ScrollText, group: "Calling" },
-  { id: "leads", key: "leads", label: "Leads", icon: Users, group: "Leads & deals" },
-  { id: "pipeline", key: "pipeline", label: "Pipeline", icon: SlidersHorizontal, group: "Leads & deals" },
-  { id: "calls", key: "calls", label: "Calls", icon: Phone, group: "Leads & deals" },
-  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartColumn, group: "Leads & deals" },
-  { id: "automations", key: "automations", label: "Automations", icon: Workflow, group: "Automation" },
-  { id: "voicemails", key: "voicemails", label: "Voicemails", icon: Voicemail, group: "Automation" },
-  { id: "logs", key: "activity", label: "Logs", icon: ClipboardList, group: "bottom" },
+  // Campaigns sits right above the picker: you create campaigns here, and they're what the picker lists.
+  { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Tag, group: "" },
+  { id: "dashboard", key: "queue", label: "Dialer", icon: Activity, group: "campaign" },
+  { id: "scripts", key: "scripts", label: "Scripts", icon: ScrollText, group: "campaign" },
+  { id: "leads", key: "leads", label: "Leads", icon: Users, group: "campaign" },
+  { id: "pipeline", key: "pipeline", label: "Pipeline", icon: SlidersHorizontal, group: "campaign" },
+  { id: "calls", key: "calls", label: "Calls", icon: Phone, group: "campaign" },
+  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartColumn, group: "campaign" },
+  { id: "automations", key: "automations", label: "Automations", icon: Workflow, group: "Advanced" },
+  { id: "voicemails", key: "voicemails", label: "Voicemails", icon: Voicemail, group: "Advanced" },
 ] as const;
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -1256,10 +1260,9 @@ function App() {
   // Pages that can show every campaign follow activeCampaign; the Dialer and Scripts always work on one.
   const scoped = scopeTo(activeCampaign);
   const dialerScoped = scopeTo(singleCampaign);
-  const scopedFollowUps = activeCampaign ? followUps.filter((lead) => lead.campaigns?.includes(activeCampaign)) : followUps;
   const scopedSelected = dialerScoped.leads.find((lead) => lead.id === selected?.id) || dialerScoped.leads[0];
-  const picker = <CampaignPicker campaigns={campaigns} value={campaign === allCampaignsValue ? allCampaignsValue : singleCampaign} onChange={setCampaign} />;
-  const singlePicker = <CampaignPicker campaigns={campaigns} value={singleCampaign} onChange={setCampaign} allowAll={false} />;
+  // Pages that work on one campaign ask for one when "All campaigns" is picked; pages that don't use a campaign say so.
+  const allPicked = campaign === allCampaignsValue && campaigns.length > 0;
   const startCampaign = (name: string) => {
     setCampaign(name);
     const first = callQueue(state.leads.filter((lead) => lead.campaigns?.includes(name)), state.calls)[0];
@@ -1272,9 +1275,11 @@ function App() {
         <Brand />
         <div className="workspace-label">Workspace</div>
         <nav aria-label="Workspace navigation">
-          {nav.filter((item) => item.group !== "bottom").map(({ id, key, label, icon: Icon, group }, index, list) => (
+          {nav.map(({ id, key, label, icon: Icon, group }, index, list) => (
             <Fragment key={id}>
-              {group && group !== list[index - 1]?.group && <div className="nav-group">{group}</div>}
+              {group && group !== list[index - 1]?.group && (group !== "campaign" ? <div className="nav-group">{group}</div> : campaigns.length
+                ? <div className="sidebar-campaign"><CampaignPicker campaigns={campaigns} value={allPicked ? allCampaignsValue : singleCampaign} onChange={setCampaign} /></div>
+                : <button type="button" className="quiet-button sidebar-campaign sidebar-campaign--new" onClick={() => editCampaign("", "general")}><Plus size={16} aria-hidden="true" /> New campaign</button>)}
               <button
                 data-tour={`nav-${key}`}
                 className={`nav-item${screen === key ? " nav-item--active" : ""}`}
@@ -1283,7 +1288,7 @@ function App() {
               >
                 <Icon size={18} />
                 <span>{label}</span>
-                {id === "tasks" && scopedFollowUps.length + (scoped.tasks || []).filter((task) => !task.doneAt).length > 0 && <b>{scopedFollowUps.length + (scoped.tasks || []).filter((task) => !task.doneAt).length}</b>}
+                {id === "tasks" && followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length > 0 && <b>{followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length}</b>}
               </button>
               {/* Unibox: SMS and email replies in one place. Not built yet, so it can't be opened. */}
               {id === "tasks" && (
@@ -1297,19 +1302,7 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <button className={`nav-item sidebar-utility${screen === "activity" ? " nav-item--active" : ""}`} type="button" data-tour="nav-activity" onClick={() => setScreen("activity")}>
-            <ClipboardList size={18} />
-            <span>Logs</span>
-          </button>
-          <button className="nav-item sidebar-utility" type="button" onClick={() => setLightMode((current) => !current)}>
-            <ShieldCheck size={18} />
-            <span>{lightMode ? "Dark mode" : "Light mode"}</span>
-          </button>
-          <button className="nav-item sidebar-utility" type="button" onClick={() => { setSettingsPage(null); setScreen("settings"); }}>
-            <SlidersHorizontal size={18} />
-            <span>Settings</span>
-          </button>
-          <button className="account-summary" type="button" onClick={() => { setSettingsPage(null); setScreen("settings"); }}>
+          <button className={`account-summary${screen === "settings" ? " is-active" : ""}`} type="button" title="Settings" aria-label={`${state.me.name}, ${state.workspace.name}: open Settings`} onClick={() => { setSettingsPage(null); setScreen("settings"); }}>
             {/* Notion-style face, the same DiceBear "notionists" avatar Guramo uses; seeded with the random user id, nothing personal. */}
             <span className="account-summary__avatar"><img src={`https://api.dicebear.com/7.x/notionists/svg?seed=${encodeURIComponent(state.me.id)}`} alt="" /></span>
             <span>
@@ -1327,7 +1320,7 @@ function App() {
           <div>
             <p className="date-line">Workspace</p>
             <h1>
-              {screen === "settings" ? "Settings" : nav.find((item) => item.key === screen)?.label}
+              {screen === "settings" ? "Settings" : screen === "activity" ? "Logs" : nav.find((item) => item.key === screen)?.label}
             </h1>
             {screen === "leads" && (
               <p className="page-subtitle">
@@ -1336,11 +1329,11 @@ function App() {
             )}
           </div>
           <div className="top-actions">
-            {(screen === "home" || screen === "leads" || screen === "calls" || screen === "followups" || screen === "pipeline" || screen === "analytics") && picker}
+            
             {/* The page's own main action: leads on Leads and Pipeline, tasks on Tasks, scripts on Scripts; none elsewhere. */}
             {(screen === "leads" || screen === "pipeline") && <button className="primary-button" onClick={() => setShowLeadForm(true)}><Plus size={18} /> Add lead</button>}
             {screen === "followups" && <button className="primary-button" onClick={() => setTaskDialog({})}><Plus size={18} /> Add task</button>}
-            {screen === "scripts" && singleCampaign && <button className="primary-button" onClick={() => editCampaign(singleCampaign, "script", "new")}><Plus size={18} /> New script</button>}
+            {screen === "scripts" && singleCampaign && !allPicked && <button className="primary-button" onClick={() => editCampaign(singleCampaign, "script", "new")}><Plus size={18} /> New script</button>}
           </div>
         </header>}
         {activeCall?.callId && featuresOf(state).transcription && featuresOf(state).captions && <LiveCaptions callId={activeCall.callId} />}
@@ -1403,11 +1396,11 @@ function App() {
             </button>
           </div>
         )}
-        {screen === "queue" && scopedSelected && (
+        {screen === "queue" && allPicked && <PickCampaign title="The Dialer calls one campaign at a time" body="Pick the campaign to call. The sidebar switches to it too." campaigns={campaigns} detail={(name) => { const count = scopeTo(name).leads.length; return `${count} lead${count === 1 ? "" : "s"}`; }} onPick={setCampaign} />}
+        {screen === "queue" && !allPicked && scopedSelected && (
           <Queue
             state={dialerScoped}
             selected={scopedSelected}
-            picker={singlePicker}
             onSelect={setSelectedId}
             onPrepare={prepareCall}
             calling={Boolean(activeCall)}
@@ -1432,7 +1425,7 @@ function App() {
             }}
           />
         )}
-        {screen === "queue" && !scopedSelected && (
+        {screen === "queue" && !allPicked && !scopedSelected && (
           <section className="dash-empty" aria-label="No leads yet">
             <h1>No leads yet</h1>
             <p>Import a CSV of the people you want to call, or add one lead by hand. They show up here, ready to dial.</p>
@@ -1482,10 +1475,10 @@ function App() {
         )}
         {screen === "followups" && (
           <FollowUps
-            leads={scopedFollowUps}
+            leads={followUps}
             allLeads={state.leads}
             calls={state.calls}
-            tasks={scoped.tasks || []}
+            tasks={state.tasks || []}
             onOpenTask={(task) => setTaskDialog({ task })}
             onQuickAdd={(fields) => saveTask(fields)}
             onChangeTask={changeTask}
@@ -1515,15 +1508,15 @@ function App() {
         {screen === "analytics" && <Analytics calls={scoped.calls} team={state.team} isOwner={state.me.role === "owner"} onOpenCalls={() => setScreen("calls")} />}
         {screen === "home" && (
           <Home
-            state={scoped}
+            state={state}
             all={state}
-            followUps={scopedFollowUps}
+            followUps={followUps}
             onOpenLead={(id) => { setSelectedId(id); setScreen("queue"); }}
             onStart={startCampaign}
             onGo={setScreen}
           />
         )}
-        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={singleCampaign} onPick={setCampaign} onEdit={editCampaign} onChanged={async (message) => { await refresh(); setNotice(message); }} />}
+        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={allPicked ? "" : singleCampaign} onPick={setCampaign} onEdit={editCampaign} onChanged={async (message) => { await refresh(); setNotice(message); }} />}
         {screen === "automations" && <AutomationsPage automations={state.automations || []} leads={state.leads} settings={state.campaignSettings || {}} vault={state.voicemails || []} onRefresh={refresh} onOpenVault={() => setScreen("voicemails")} />}
         {screen === "voicemails" && <VoicemailsPage vault={state.voicemails || []} automations={state.automations || []} settings={state.campaignSettings || {}} campaigns={campaigns} defaultCampaign={singleCampaign} onRefresh={refresh} onNotice={setNotice} />}
         {screen === "campaigns" && (
@@ -1542,6 +1535,9 @@ function App() {
             key={settingsPage?.key}
             initialPage={settingsPage?.page}
             onTour={setTourAt}
+            lightMode={lightMode}
+            onTheme={setLightMode}
+            onOpenLead={(id) => { setSelectedId(id); setScreen("queue"); }}
             fullState={state}
             me={state.me}
             workspace={state.workspace}
@@ -2253,7 +2249,7 @@ function CallStrip({ calls, onOpen }: { calls: CallRecord[]; onOpen: () => void 
 type StatTarget = "calls-today" | "conversations" | "followups" | "to-call";
 
 // setup is counted on the whole workspace (not the picked campaign), so it doesn't come and go with the campaign.
-function DashboardBanner({ state, selected, picker, setup, onStart, onAddLead, onGuide, onGo }: { state: State; selected: Lead; picker: ReactNode; setup: { done: number; total: number }; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void }) {
+function DashboardBanner({ state, selected, setup, onStart, onAddLead, onGuide, onGo }: { state: State; selected: Lead; setup: { done: number; total: number }; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void }) {
   const setupDone = setup.done;
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -2277,7 +2273,6 @@ function DashboardBanner({ state, selected, picker, setup, onStart, onAddLead, o
       <div className="dash-banner__head">
         <h1 className="dash-date">{new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long" }).format(now)}<span> · {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(now)} your time</span></h1>
         <div className="dash-banner__actions">
-          {picker}
           {setupDone < setup.total && <button className="quiet-button" onClick={onGuide}><BadgeCheck size={16} /> Setup {setupDone}/{setup.total}</button>}
           <button className="quiet-button" onClick={onAddLead}><Plus size={16} /> Add lead</button>
           <button className="primary-button" data-tour="start-calling" onClick={onStart} disabled={!toCall}>Start calling <ChevronRight size={16} /></button>
@@ -2330,7 +2325,6 @@ function Queue({
   onOpenPdf,
   onEditScript,
   calling,
-  picker,
   onRefresh,
   onNotice,
 }: {
@@ -2339,7 +2333,6 @@ function Queue({
   onOpenPdf: (campaign: string) => void;
   onEditScript: (campaign: string) => void;
   calling: boolean;
-  picker: ReactNode;
   onAddLead: () => void;
   onGuide: () => void;
   setup: { done: number; total: number };
@@ -2432,7 +2425,6 @@ function Queue({
         setup={setup}
         state={state}
         selected={selected}
-        picker={picker}
         onAddLead={onAddLead}
         onGuide={onGuide}
         onGo={onGo}
@@ -4220,6 +4212,18 @@ function CampaignRail({ campaigns, value, onPick, detail, allowAll = false }: { 
   );
 }
 
+// For pages that need one campaign when "All campaigns" is picked: says why, and lists the campaigns to pick from.
+function PickCampaign({ title, body, campaigns, detail, onPick }: { title: string; body: string; campaigns: string[]; detail: (name: string) => string; onPick: (name: string) => void }) {
+  return (
+    <div className="pick-campaign">
+      <FileText size={20} aria-hidden="true" />
+      <b>{title}</b>
+      <span>{body}</span>
+      <CampaignRail campaigns={campaigns} value="" onPick={onPick} detail={detail} />
+    </div>
+  );
+}
+
 // Scripts, per campaign: every script it has, and a radio to pick the one the call screen shows.
 // A campaign has to be picked first (left), so it's always clear whose scripts you're looking at and adding to.
 function ScriptsPage({ leads, settings, campaign, onPick, onEdit, onChanged }: { leads: Lead[]; settings: Record<string, CampaignSettings>; campaign: string; onPick: (name: string) => void; onEdit: (name: string, tab: CampaignTab, scriptId?: string) => void; onChanged: (message: string) => Promise<void> }) {
@@ -4239,12 +4243,10 @@ function ScriptsPage({ leads, settings, campaign, onPick, onEdit, onChanged }: {
   };
   return (
     <section className="scripts-page">
-      <p className="scripts-page__lede">Pick a campaign, then choose which of its scripts the call screen shows.</p>
+      <p className="scripts-page__lede">The campaign's scripts. The one you pick is the one the call screen shows.</p>
       {!all.length && <div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div>}
-      {all.length > 0 && <div className="campaign-layout">
-      <CampaignRail campaigns={all} value={campaign} onPick={onPick} detail={(name) => { const count = campaignScripts(settings[name] || {}).length; return `${count} script${count === 1 ? "" : "s"}`; }} />
-      <div>
-      {!names.length && <div className="scripts-pick"><FileText size={20} aria-hidden="true" /><b>Pick a campaign</b><span>Each campaign has its own scripts. Choose one on the left to see them, add one or change which one you call with.</span></div>}
+      {all.length > 0 && <div>
+      {!names.length && <PickCampaign title="Scripts belong to one campaign" body="Pick the campaign whose scripts you want to see, add to or switch. The sidebar switches to it too." campaigns={all} detail={(name) => { const count = campaignScripts(settings[name] || {}).length; return `${count} script${count === 1 ? "" : "s"}`; }} onPick={onPick} />}
       {names.map((name) => {
         const own = settings[name] || {};
         const scripts = campaignScripts(own);
@@ -4281,7 +4283,6 @@ function ScriptsPage({ leads, settings, campaign, onPick, onEdit, onChanged }: {
           </section>
         );
       })}
-      </div>
       </div>}
     </section>
   );
@@ -5335,9 +5336,15 @@ function Settings({
   onNotice,
   initialPage,
   onTour,
+  lightMode,
+  onTheme,
+  onOpenLead,
 }: {
   initialPage?: SettingsPage;
   onTour: (step: number) => void;
+  lightMode: boolean;
+  onTheme: (light: boolean) => void;
+  onOpenLead: (id: string) => void;
   fullState: State;
   fields?: string[];
   campaignSettings: Record<string, CampaignSettings>;
@@ -5447,11 +5454,11 @@ function Settings({
       { title: "Costs", items: [{ id: "costs", label: "Features & costs", icon: ChartColumn }] },
       { title: "Calling", items: [{ id: "numbers", label: "Phone numbers", icon: Phone }, { id: "booking", label: "Booking link", icon: CalendarPlus }] },
       { title: "Integrations", items: [{ id: "ai", label: "AI", icon: Sparkles }, { id: "email", label: "Email", icon: Mail }] },
-      { title: "Workspace", items: [{ id: "team", label: "Team", icon: Users }, { id: "fields", label: "Custom fields", icon: SlidersHorizontal }, ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : [])] },
+      { title: "Workspace", items: [{ id: "team", label: "Team", icon: Users }, { id: "fields", label: "Custom fields", icon: SlidersHorizontal }, { id: "logs", label: "Logs", icon: ClipboardList }, ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : [])] },
     ],
     account: [
       ...(owner ? [] : [{ title: "Getting started", items: [{ id: "setup" as const, label: "Setup", icon: BadgeCheck }, { id: "roadmap" as const, label: "Roadmap", icon: Workflow }] }]),
-      { title: "Account", items: [{ id: "profile", label: "Profile", icon: UserRound }, { id: "privacy", label: "Privacy", icon: ShieldCheck }, { id: "about", label: "About", icon: BadgeCheck }] },
+      { title: "Account", items: [{ id: "profile", label: "Profile", icon: UserRound }, { id: "appearance", label: "Appearance", icon: lightMode ? Sun : Moon }, ...(owner ? [] : [{ id: "logs" as const, label: "Logs", icon: ClipboardList }]), { id: "privacy", label: "Privacy", icon: ShieldCheck }, { id: "about", label: "About", icon: BadgeCheck }] },
     ],
   };
   return (
@@ -5475,7 +5482,25 @@ function Settings({
           ))}
         </aside>
         <div className="settings-content">
-        {page === "setup" ? <SetupChecklist state={fullState} onTour={onTour} /> : page === "roadmap" ? <Roadmap /> : page === "numbers" ? (
+        {page === "setup" ? <SetupChecklist state={fullState} onTour={onTour} /> : page === "roadmap" ? <Roadmap /> : page === "appearance" ? (
+          <section className="settings-panel">
+            <span className="panel-kicker">Account</span>
+            <h2>Appearance</h2>
+            <p>How Open Dialer looks on this device.</p>
+            <div className="call-list__views theme-choice" role="radiogroup" aria-label="Theme">
+              {([[false, "Dark", Moon], [true, "Light", Sun]] as const).map(([light, label, Icon]) => (
+                <button key={label} type="button" role="radio" aria-checked={lightMode === light} className={lightMode === light ? "is-active" : ""} onClick={() => onTheme(light)}><Icon size={16} aria-hidden="true" /> {label}</button>
+              ))}
+            </div>
+          </section>
+        ) : page === "logs" ? (
+          <section className="settings-panel settings-panel--wide">
+            <span className="panel-kicker">Workspace</span>
+            <h2>Logs</h2>
+            <p>Everything done in this workspace, newest first.</p>
+            <ActivityLog activity={fullState.activity} leads={fullState.leads} onOpenLead={onOpenLead} />
+          </section>
+        ) : page === "numbers" ? (
           <section className="settings-grid">
       <article className="settings-card connection-card" data-tour="twilio">
         <div>
