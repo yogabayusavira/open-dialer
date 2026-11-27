@@ -1550,3 +1550,28 @@ html[data-theme="light"] .mic-widget { background: #2a2a28; }
 .sidebar .nav-group { margin: var(--space-4) 8px var(--space-1); color: var(--color-text-faint, var(--color-text-muted)); font-size: var(--font-size-label); font-weight: 600; }
 @media (max-width: 820px) { .sidebar .nav-group { display: none; } }
 .sidebar-footer { border-top: 1px solid var(--color-border); padding-top: var(--space-2); }
+
+/* Automation canvas (React Flow), in the app's colors. Nodes reuse .flow-node; dots sit on the card's edges. */
+.flow-board { position: relative; height: min(72vh, 720px); min-height: 420px; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-surface); background: var(--color-surface); }
+.flow-board .react-flow { --xy-background-color: transparent; --xy-background-pattern-dots-color: var(--color-border-strong); --xy-edge-stroke: var(--color-text-faint, var(--color-text-muted)); --xy-edge-stroke-selected: var(--color-accent-text); --xy-edge-stroke-width: 1.6; --xy-connectionline-stroke: var(--color-accent-text); --xy-node-background-color: transparent; --xy-node-border: none; --xy-node-boxshadow-selected: none; --xy-controls-button-background-color: var(--color-surface-raised); --xy-controls-button-background-color-hover: var(--color-surface); --xy-controls-button-color: var(--color-text); --xy-controls-button-border-color: var(--color-border); }
+.flow-board .react-flow__node { padding: 0; border: 0; background: transparent; }
+.flow-board__hint { position: absolute; right: var(--space-3); bottom: var(--space-2); margin: 0; color: var(--color-text-faint, var(--color-text-muted)); font-size: var(--font-size-label); pointer-events: none; }
+.flow-card { position: relative; }
+.flow-card .flow-node { cursor: grab; }
+.flow-card.is-selected .flow-node { border-color: var(--color-accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent-text) 25%, transparent); }
+.flow-handle.react-flow__handle { width: 10px; height: 10px; border: 2px solid var(--color-surface); background: var(--color-text-muted); }
+.flow-handle.react-flow__handle-left { left: -5px; }
+.flow-handle.react-flow__handle-right { right: -5px; }
+.flow-handle--yes.react-flow__handle { background: var(--dot-good); }
+.flow-handle--no.react-flow__handle { background: var(--dot-bad); }
+.flow-port { position: absolute; right: 10px; translate: 0 -50%; color: var(--color-text-muted); font-size: var(--font-size-label); font-weight: 600; pointer-events: none; }
+.flow-card:has(.flow-port) .flow-node__text { padding-right: 24px; }
+.flow-plus { position: absolute; right: -34px; display: grid; place-items: center; width: 20px; height: 20px; translate: 0 -50%; padding: 0; border: 1px solid var(--color-border-strong); border-radius: 50%; background: var(--color-surface-raised); color: var(--color-text-muted); cursor: pointer; opacity: 0; transition: opacity 120ms ease; }
+.flow-card:hover .flow-plus, .flow-card.is-selected .flow-plus, .flow-plus:focus-visible { opacity: 1; }
+.flow-plus:hover { border-color: var(--color-accent-text); color: var(--color-accent-text); }
+.flow-edge--yes path.react-flow__edge-path { stroke: var(--dot-good); }
+.flow-edge--no path.react-flow__edge-path { stroke: var(--dot-bad); }
+@media (hover: none) { .flow-plus { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .flow-plus { transition: none; } }
+/* A bigger invisible grab area around each dot, so connecting works at any zoom. */
+.flow-handle.react-flow__handle::after { content: ""; position: absolute; inset: -8px; border-radius: 50%; }

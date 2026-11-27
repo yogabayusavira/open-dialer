@@ -562,25 +562,72 @@ function leadLabel(lead) {
 const leadStages = ["New", "Follow-up", "Meeting booked", "Won", "Lost"];
 const callOutcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call"];
 // The workspace's automations, as sent by the Automations page: a trigger (with the campaigns it listens to, none
-// meaning any), then steps run in order.
+// meaning any) and a graph of nodes, n8n style. Each connection goes from a node's output ("out", or "yes"/"no" on an
+// If) to another node; an output can feed several nodes, and every connected branch runs.
 const automationTriggers = ["lead", "outcome", "voicemail", "transcribed"];
 const conditionOps = ["is", "is not", "contains", "is empty", "is not empty"];
+const flowPorts = ["out", "yes", "no"];
+function cleanStep(step, trigger) {
+  if (step?.type === "if") return { type: "if", field: cleanText(step.field, 120), op: conditionOps.includes(step.op) ? step.op : "is", value: cleanText(step.value, 200) };
+  if (step?.type === "say" && trigger === "lead") return { type: "say", text: cleanText(step.text, 1000) };
+  if (step?.type === "play" && trigger === "voicemail") return { type: "play", recordingId: /^vm_\w+$/.test(step.recordingId || "") ? step.recordingId : "" };
+  const later = trigger === "outcome" || trigger === "transcribed";
+  if (step?.type === "wait" && later) return { type: "wait", amount: Math.min(365, Math.max(1, Math.round(Number(step.amount) || 1))), unit: ["minutes", "hours", "days"].includes(step.unit) ? step.unit : "days" };
+  if (step?.type === "email" && later) return { type: "email", to: cleanText(step.to, 120), subject: cleanText(step.subject, 200), body: String(step.body || "").replace(/\r\n/g, "\n").slice(0, 5000) };
+  if (step?.type === "sms" && later) return { type: "sms", text: String(step.text || "").replace(/\r\n/g, "\n").slice(0, 640) };
+  if (step?.type === "ask" && trigger === "transcribed") return { type: "ask", prompt: cleanText(step.prompt, 1000), field: cleanText(step.field, 60) };
+  if (step?.type === "stage" && later) return { type: "stage", stage: leadStages.includes(step.stage) ? step.stage : "Follow-up" };
+  if (step?.type === "followup" && later) return { type: "followup", days: Math.min(60, Math.max(0, Math.round(Number(step.days) || 0))) };
+  return null;
+}
+// An automation's graph. Ones saved before the graph editor (a list of steps) become a left-to-right chain, with an
+// If's "yes" carrying on, which is how the old "Only continue if" behaved.
+function flowGraph(item) {
+  if (Array.isArray(item?.nodes) && item.nodes.length) return { nodes: item.nodes, edges: Array.isArray(item.edges) ? item.edges : [] };
+  const steps = Array.isArray(item?.steps) ? item.steps : [];
+  const nodes = [{ id: "trigger", step: null, x: 0, y: 0 }, ...steps.map((step, index) => ({ id: `s${index}`, step, x: (index + 1) * 300, y: 0 }))];
+  const edges = steps.map((_, index) => ({ from: index ? `s${index - 1}` : "trigger", port: index && steps[index - 1]?.type === "if" ? "yes" : "out", to: `s${index}` }));
+  return { nodes, edges };
+}
+// Whether `start` can already reach `target` through the connections; a connection target -> start would be a loop.
+function flowReaches(edges, start, target) {
+  const seen = new Set();
+  const stack = [start];
+  while (stack.length) {
+    const id = stack.pop();
+    if (id === target) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const edge of edges) if (edge.from === id) stack.push(edge.to);
+  }
+  return false;
+}
 function cleanAutomations(list) {
   return list.slice(0, 50).map((item) => {
     const trigger = automationTriggers.includes(item?.trigger) ? item.trigger : "lead";
-    const steps = (Array.isArray(item?.steps) ? item.steps : []).slice(0, 20).map((step) => {
-      if (step?.type === "if") return { type: "if", field: cleanText(step.field, 120), op: conditionOps.includes(step.op) ? step.op : "is", value: cleanText(step.value, 200) };
-      if (step?.type === "say" && trigger === "lead") return { type: "say", text: cleanText(step.text, 1000) };
-      if (step?.type === "play" && trigger === "voicemail") return { type: "play", recordingId: /^vm_\w+$/.test(step.recordingId || "") ? step.recordingId : "" };
-      const later = trigger === "outcome" || trigger === "transcribed";
-      if (step?.type === "wait" && later) return { type: "wait", amount: Math.min(365, Math.max(1, Math.round(Number(step.amount) || 1))), unit: ["minutes", "hours", "days"].includes(step.unit) ? step.unit : "days" };
-      if (step?.type === "email" && later) return { type: "email", to: cleanText(step.to, 120), subject: cleanText(step.subject, 200), body: String(step.body || "").replace(/\r\n/g, "\n").slice(0, 5000) };
-      if (step?.type === "sms" && later) return { type: "sms", text: String(step.text || "").replace(/\r\n/g, "\n").slice(0, 640) };
-      if (step?.type === "ask" && trigger === "transcribed") return { type: "ask", prompt: cleanText(step.prompt, 1000), field: cleanText(step.field, 60) };
-      if (step?.type === "stage" && (trigger === "outcome" || trigger === "transcribed")) return { type: "stage", stage: leadStages.includes(step.stage) ? step.stage : "Follow-up" };
-      if (step?.type === "followup" && (trigger === "outcome" || trigger === "transcribed")) return { type: "followup", days: Math.min(60, Math.max(0, Math.round(Number(step.days) || 0))) };
-      return null;
-    }).filter(Boolean);
+    const graph = flowGraph(item);
+    const nodes = [];
+    for (const node of graph.nodes.slice(0, 60)) {
+      const id = /^[\w-]{1,40}$/.test(node?.id || "") ? node.id : "";
+      if (!id || nodes.some((entry) => entry.id === id)) continue;
+      const isTrigger = id === "trigger";
+      const step = isTrigger ? null : cleanStep(node.step, trigger);
+      if (!isTrigger && !step) continue;
+      nodes.push({ id, step, x: Math.round(Number(node.x) || 0), y: Math.round(Number(node.y) || 0) });
+    }
+    if (!nodes.some((node) => node.id === "trigger")) nodes.unshift({ id: "trigger", step: null, x: 0, y: 0 });
+    const edges = [];
+    for (const edge of graph.edges.slice(0, 200)) {
+      const source = nodes.find((node) => node.id === edge?.from);
+      const target = nodes.find((node) => node.id === edge?.to);
+      const port = flowPorts.includes(edge?.port) ? edge.port : "out";
+      // Only an If has yes/no; nothing connects into the trigger, to itself, twice, or back into a loop.
+      if (!source || !target || target.id === "trigger" || source.id === target.id) continue;
+      if ((source.step?.type === "if") !== (port !== "out")) continue;
+      if (edges.some((entry) => entry.from === source.id && entry.port === port && entry.to === target.id)) continue;
+      if (flowReaches(edges, target.id, source.id)) continue;
+      edges.push({ from: source.id, port, to: target.id });
+    }
     return {
       id: /^au_\w+$/.test(item?.id || "") ? item.id : `au_${Date.now()}_${randomBytes(3).toString("hex")}`,
       name: cleanText(item?.name, 80) || "Untitled automation",
@@ -588,7 +635,8 @@ function cleanAutomations(list) {
       trigger,
       campaigns: (Array.isArray(item?.campaigns) ? item.campaigns : []).map(campaignName).filter(Boolean).slice(0, 50),
       ...(trigger === "outcome" || trigger === "transcribed" ? { outcomes: (Array.isArray(item?.outcomes) ? item.outcomes : []).filter((outcome) => callOutcomes.includes(outcome)) } : {}),
-      steps,
+      nodes,
+      edges,
     };
   });
 }
@@ -859,10 +907,13 @@ async function sendPlainEmail(config, to, subject, text) {
   }
 }
 const waitMs = { minutes: 60_000, hours: 3_600_000, days: 86_400_000 };
-// Runs one automation's steps for a lead, starting at `from`. Ask AI answers become lead fields later steps can
-// check. A Wait saves the rest as a job in state.scheduled, which the minute ticker picks up when it's due.
+// Runs one automation for a lead by following its connections from the trigger (or, after a Wait, from the nodes
+// in `from`). Every connected branch runs; an If sends the lead down Yes or No; a failed Ask AI ends its branch.
+// Ask AI answers become lead fields later nodes can check. A Wait saves the nodes after it as a job in
+// state.scheduled, which the minute ticker picks up when it's due; other branches carry on meanwhile.
 // ctx: { outcome, sid (the transcribed call), keepDue (the caller already picked a follow-up time) }.
-async function runAutomation(item, leadId, ctx, from = 0) {
+// `from` is a list of node ids, or a step index from a job saved before the graph editor.
+async function runAutomation(item, leadId, ctx, from) {
   const state = await readState();
   const lead = state.leads.find((entry) => entry.id === leadId);
   if (!lead) return;
@@ -875,21 +926,33 @@ async function runAutomation(item, leadId, ctx, from = 0) {
   const log = [];
   let stage = "";
   let due = "";
-  let wait = null;
+  const waits = [];
   const blocked = lead.dnc || state.dncNumbers.includes(phoneKey(lead.phone));
-  for (let index = from; index < item.steps.length; index++) {
-    const step = item.steps[index];
-    if (step.type === "if" && !automationMatches(step, automationField(step.field, view, state.campaignSettings, campaign))) break;
+  const { nodes, edges } = flowGraph(item);
+  const after = (id, port = "out") => edges.filter((edge) => edge.from === id && edge.port === port).map((edge) => edge.to);
+  const queue = Array.isArray(from) ? [...from] : typeof from === "number" ? [`s${from}`] : after("trigger");
+  const ran = new Set();
+  while (queue.length) {
+    const id = queue.shift();
+    const node = nodes.find((entry) => entry.id === id);
+    // Each node runs once per run, even when two branches lead into it.
+    if (!node?.step || ran.has(id)) continue;
+    ran.add(id);
+    const step = node.step;
+    if (step.type === "if") {
+      queue.push(...after(id, automationMatches(step, automationField(step.field, view, state.campaignSettings, campaign)) ? "yes" : "no"));
+      continue;
+    }
     if (step.type === "ask") {
       const config = aiConfig(state);
-      if (!config || !text || !step.prompt || !step.field) break;
+      if (!config || !text || !step.prompt || !step.field) continue;
       try {
         const answer = cleanText(await aiChat(config, "You read a sales call transcript and answer one question about it. \"You\" is the caller, \"Them\" is the lead. Answer in plain words, as short as the question allows, and never invent anything the transcript doesn't say.", `Question: ${step.prompt}\n\nTranscript:\n${text}`), 500);
         details[step.field] = answer;
         view.details[step.field] = answer;
       } catch (error) {
         log.push(["Automation step failed", `${item.name} · Ask AI: ${error.message}`]);
-        break;
+        continue;
       }
     }
     if (step.type === "stage") stage = step.stage;
@@ -924,19 +987,24 @@ async function runAutomation(item, leadId, ctx, from = 0) {
       }
     }
     if (step.type === "wait") {
-      wait = { id: `job_${Date.now()}_${randomBytes(3).toString("hex")}`, automationId: item.id, leadId, next: index + 1, ctx: { outcome: ctx.outcome || "", sid: ctx.sid || "" }, runAt: Date.now() + Math.max(1, step.amount) * (waitMs[step.unit] || waitMs.days) };
-      log.push(["Automation waiting", `${item.name} · ${leadLabel(lead)} · until ${new Date(wait.runAt).toLocaleString("en-US")}`]);
-      break;
+      const next = after(id);
+      if (next.length) {
+        const wait = { id: `job_${Date.now()}_${randomBytes(3).toString("hex")}`, automationId: item.id, leadId, next, ctx: { outcome: ctx.outcome || "", sid: ctx.sid || "" }, runAt: Date.now() + Math.max(1, step.amount) * (waitMs[step.unit] || waitMs.days) };
+        waits.push(wait);
+        log.push(["Automation waiting", `${item.name} · ${leadLabel(lead)} · until ${new Date(wait.runAt).toLocaleString("en-US")}`]);
+      }
+      continue;
     }
+    queue.push(...after(id));
   }
-  if (!Object.keys(details).length && !stage && !due && !wait && !log.length) return;
+  if (!Object.keys(details).length && !stage && !due && !waits.length && !log.length) return;
   await updateState((fresh) => {
     const person = fresh.leads.find((entry) => entry.id === leadId);
     if (!person) return false;
     if (Object.keys(details).length) person.details = { ...(person.details || {}), ...details };
     if (stage && !person.dnc) enterStage(person, stage);
     if (due && !person.dnc && !["Won", "Lost"].includes(person.status)) person.due = due;
-    if (wait) fresh.scheduled = [...(fresh.scheduled || []), wait];
+    if (waits.length) fresh.scheduled = [...(fresh.scheduled || []), ...waits];
     for (const [action, detail] of log) activity(fresh, action, detail);
     if (stage || due || Object.keys(details).length) activity(fresh, "Automation ran", `${item.name} · ${leadLabel(person)}${stage ? ` · ${stage}` : ""}`);
   });
@@ -1693,7 +1761,7 @@ async function route(req, res, url) {
       if (!call || !findLead(state, call.leadId)) return json(res, 404, { error: "That call isn't running anymore." });
       if (!call.leadLegSid) return json(res, 409, { error: "The lead's side hasn't picked up yet. Wait for the beep, then drop it." });
       const name = campaignName(campaign);
-      const played = (state.automations || []).some((item) => item.on && item.trigger === "voicemail" && (!item.campaigns?.length || item.campaigns.includes(name)) && item.steps.some((step) => step.type === "play" && step.recordingId === recordingId));
+      const played = (state.automations || []).some((item) => item.on && item.trigger === "voicemail" && (!item.campaigns?.length || item.campaigns.includes(name)) && flowGraph(item).nodes.some(({ step }) => step && step.type === "play" && step.recordingId === recordingId));
       const recording = played && state.voicemails.find((entry) => entry.id === recordingId);
       if (!recording) return json(res, 400, { error: "This campaign has no voicemail for this lead. Add a Voicemail dropped automation in Automations." });
       const audio = new URL("/api/twilio/voice/voicemail", publicOrigin(req));

@@ -1,4 +1,6 @@
-import { FormEvent, Fragment, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, FormEvent, Fragment, ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Background, Controls, Handle, Position, ReactFlow, useEdgesState, useNodesState } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
 import { createRoot } from "react-dom/client";
 import {
   Inbox,
@@ -115,8 +117,7 @@ type CampaignScript = { id: string; name: string; script: string };
 // `script` is always the text of the script in use (picked on the Scripts page); `scripts` holds all of them.
 type CampaignSettings = { script?: string; scripts?: CampaignScript[]; activeScript?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[]; transcribe?: boolean };
 // The workspace's automations, n8n style: a trigger (with the campaigns it listens to, none meaning any), then
-// steps run in order. "Only continue if" stops the rest
-// when the lead doesn't match.
+// nodes connected into branches (see FlowNode / FlowEdge). An "If" sends the lead down Yes or No.
 type AutomationTrigger = "lead" | "outcome" | "voicemail" | "transcribed";
 type ConditionOp = "is" | "is not" | "contains" | "is empty" | "is not empty";
 type AutomationStep =
@@ -129,7 +130,34 @@ type AutomationStep =
   | { type: "play"; recordingId: string }
   | { type: "stage"; stage: string }
   | { type: "followup"; days: number };
-type Automation = { id: string; name: string; on: boolean; trigger: AutomationTrigger; campaigns?: string[]; outcomes?: string[]; steps: AutomationStep[] };
+// n8n-style graph: the trigger is node "trigger" (step null); a connection runs from a node's output ("out", or
+// "yes"/"no" on an If) to another node. One output can feed several nodes. `steps` is the pre-graph list format.
+type FlowNode = { id: string; step: AutomationStep | null; x: number; y: number };
+type FlowEdge = { from: string; port: "out" | "yes" | "no"; to: string };
+type Automation = { id: string; name: string; on: boolean; trigger: AutomationTrigger; campaigns?: string[]; outcomes?: string[]; nodes?: FlowNode[]; edges?: FlowEdge[]; steps?: AutomationStep[] };
+// An automation's graph; an old step list becomes a left-to-right chain (an If's Yes carries on), as on the server.
+function flowGraph(item: Automation): { nodes: FlowNode[]; edges: FlowEdge[] } {
+  if (item.nodes?.length) return { nodes: item.nodes, edges: item.edges || [] };
+  const steps = item.steps || [];
+  return {
+    nodes: [{ id: "trigger", step: null, x: 0, y: 0 }, ...steps.map((step, index) => ({ id: `s${index}`, step, x: (index + 1) * 300, y: 0 }))],
+    edges: steps.map((_, index) => ({ from: index ? `s${index - 1}` : "trigger", port: (index && steps[index - 1]?.type === "if" ? "yes" : "out") as FlowEdge["port"], to: `s${index}` })),
+  };
+}
+const flowSteps = (item: Automation) => flowGraph(item).nodes.flatMap((node) => (node.step ? [node.step] : []));
+// Whether `start` already reaches `target`; a connection target -> start would then make a loop.
+function flowReaches(edges: FlowEdge[], start: string, target: string) {
+  const seen = new Set<string>();
+  const stack = [start];
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (id === target) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const edge of edges) if (edge.from === id) stack.push(edge.to);
+  }
+  return false;
+}
 // campaigns and says are labels for staying organized (which campaigns it is for, what it says); they restrict nothing.
 type Recording = { id: string; name: string; size: number; seconds: number; createdAt: string; campaigns?: string[]; says?: string };
 type CleanRule = { from: string; to: string; notes: string };
@@ -277,8 +305,8 @@ function heardThrough(item: Automation, lead: Lead, settings: Record<string, Cam
   if (!item.campaigns?.length) return scriptCampaignOf(lead, settings) || own[0] || "";
   return own.find((name) => item.campaigns!.includes(name)) ?? null;
 }
-// What a trigger does for a lead: the steps of each switched-on automation listening to it, in order, up to the
-// first "Only continue if" the lead doesn't match.
+// What a trigger does for a lead right away: the steps of each switched-on automation listening to it, following its
+// connections (an If goes down Yes or No for this lead) and stopping at a Wait, as the server does.
 function automationSteps(trigger: AutomationTrigger, lead: Lead, automations: Automation[] = [], settings: Record<string, CampaignSettings>, outcome = "") {
   return automations
     .filter((item) => item.on && item.trigger === trigger && (trigger !== "outcome" || !item.outcomes?.length || item.outcomes.includes(outcome)))
@@ -286,10 +314,19 @@ function automationSteps(trigger: AutomationTrigger, lead: Lead, automations: Au
       const campaign = heardThrough(item, lead, settings);
       if (campaign === null) return [];
       const out: { campaign: string; step: AutomationStep }[] = [];
-      for (const step of item.steps) {
-        if (step.type === "wait") break;
-        if (step.type !== "if") out.push({ campaign, step });
-        else if (!matches(step, lead, settings[campaign]?.variables)) break;
+      const { nodes, edges } = flowGraph(item);
+      const after = (id: string, port: FlowEdge["port"] = "out") => edges.filter((edge) => edge.from === id && edge.port === port).map((edge) => edge.to);
+      const queue = after("trigger");
+      const ran = new Set<string>();
+      while (queue.length) {
+        const id = queue.shift()!;
+        const step = nodes.find((node) => node.id === id)?.step;
+        if (!step || ran.has(id)) continue;
+        ran.add(id);
+        if (step.type === "wait") continue;
+        if (step.type === "if") { queue.push(...after(id, matches(step, lead, settings[campaign]?.variables) ? "yes" : "no")); continue; }
+        out.push({ campaign, step });
+        queue.push(...after(id));
       }
       return out;
     });
@@ -3821,7 +3858,7 @@ function VoicemailsPage({ vault, automations, settings, campaigns, defaultCampai
   const [draft, setDraft] = useState("");
   const [filter, setFilter] = useState("");
   const [editing, setEditing] = useState<{ id: string; campaigns: string[]; says: string } | null>(null);
-  const usedIn = (id: string) => automations.filter((item) => item.steps.some((step) => step.type === "play" && step.recordingId === id)).map((item) => item.name);
+  const usedIn = (id: string) => automations.filter((item) => flowSteps(item).some((step) => step.type === "play" && step.recordingId === id)).map((item) => item.name);
   const act = async (work: () => Promise<unknown>, message: string) => {
     try { await work(); await onRefresh(); onNotice(message); } catch (cause) { onNotice(cause instanceof Error ? cause.message : "Something went wrong."); }
   };
@@ -4262,7 +4299,7 @@ const triggerInfo: Record<AutomationTrigger, { title: string; detail: string; ic
   transcribed: { title: "Call transcribed", detail: "After a transcribed call ends and you log the outcome", icon: FileText },
 };
 const stepInfo: Record<AutomationStep["type"], { title: string; detail: string; icon: typeof PhoneCall }> = {
-  if: { title: "Only continue if", detail: "Stop here unless the lead matches", icon: Filter },
+  if: { title: "If", detail: "Check the lead, then go down Yes or No", icon: Filter },
   say: { title: "Show a line", detail: "A line to say, at the top of the call screen", icon: MessageSquare },
   ask: { title: "Ask AI", detail: "Ask about the call and save the answer to a lead field", icon: Sparkles },
   wait: { title: "Wait", detail: "Pause, then carry on with the next steps", icon: Hourglass },
@@ -4328,7 +4365,7 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
     }
   };
   const create = (trigger: AutomationTrigger) => {
-    const item: Automation = { id: `au_${Date.now()}`, name: triggerInfo[trigger].title, on: true, trigger, campaigns: [], ...(trigger === "outcome" || trigger === "transcribed" ? { outcomes: [] } : {}), steps: [] };
+    const item: Automation = { id: `au_${Date.now()}`, name: triggerInfo[trigger].title, on: true, trigger, campaigns: [], ...(trigger === "outcome" || trigger === "transcribed" ? { outcomes: [] } : {}), nodes: [{ id: "trigger", step: null, x: 0, y: 0 }], edges: [] };
     setPicking(false);
     setCreated(item);
     setOpenId(item.id);
@@ -4359,7 +4396,7 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
               <article className={`automation-row${item.on ? "" : " is-off"}`} key={item.id}>
                 <button type="button" className="automation-row__open" onClick={() => setOpenId(item.id)}>
                   <span className="automation-row__icon" aria-hidden="true"><Icon size={18} /></span>
-                  <span className="automation-row__text"><b>{item.name}</b><small>{triggerInfo[item.trigger].title} · {triggerSummary(item)} · {item.steps.length ? item.steps.map((step) => stepInfo[step.type].title).join(" → ") : "No steps yet"}</small></span>
+                  <span className="automation-row__text"><b>{item.name}</b><small>{triggerInfo[item.trigger].title} · {triggerSummary(item)} · {flowSteps(item).length ? flowSteps(item).map((step) => stepInfo[step.type].title).join(" → ") : "No steps yet"}</small></span>
                 </button>
                 <label className="automation-switch">
                   <input type="checkbox" role="switch" checked={item.on} onChange={() => void save(list.map((entry) => (entry.id === item.id ? { ...entry, on: !entry.on } : entry)))} />
@@ -4401,9 +4438,52 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
 
 // One automation on the canvas: the trigger, its steps joined by wires, and a + to add the next step. Clicking a
 // node opens its settings on the right. Changes save half a second after the last edit.
+// The automation editor, n8n style: nodes on a canvas you pan and zoom. Drag from a node's output dot to another
+// node to connect them (one output can feed several nodes); an If has Yes and No outputs. The + on an output adds a
+// node already connected there. Loops are refused. Clicking a node opens its settings on the right.
+type FlowCardData = { id: string };
+const FlowContext = createContext<{ draft: Automation; vault: Recording[]; selected: string | null; onAdd: (id: string, port: FlowEdge["port"]) => void } | null>(null);
+function FlowCard({ id }: { id: string }) {
+  const flow = useContext(FlowContext)!;
+  const node = flow.draft.nodes?.find((entry) => entry.id === id);
+  if (!node) return null;
+  const step = node.step;
+  const Icon = step ? stepInfo[step.type].icon : triggerInfo[flow.draft.trigger].icon;
+  const kind = !step ? "trigger" : step.type === "if" ? "switch" : "action";
+  const ports: [FlowEdge["port"], string][] = step?.type === "if" ? [["yes", "Yes"], ["no", "No"]] : [["out", ""]];
+  return (
+    <div className={`flow-card${flow.selected === id ? " is-selected" : ""}`}>
+      {step && <Handle type="target" position={Position.Left} className="flow-handle" />}
+      <div className={`flow-node flow-node--${kind}${step && !stepReady(step) ? " is-unfinished" : ""}`}>
+        <span className="flow-node__icon" aria-hidden="true"><Icon size={18} /></span>
+        <span className="flow-node__text"><b>{step ? stepInfo[step.type].title : triggerInfo[flow.draft.trigger].title}</b><small>{step ? stepSummary(step, flow.vault) : triggerSummary(flow.draft)}</small></span>
+      </div>
+      {ports.map(([port, label], index) => {
+        const top = ports.length === 1 ? "50%" : `${30 + index * 40}%`;
+        return (
+          <Fragment key={port}>
+            <Handle type="source" position={Position.Right} id={port} className={`flow-handle flow-handle--${port}`} style={{ top }} />
+            {label && <span className={`flow-port flow-port--${port}`} style={{ top }}>{label}</span>}
+            <button type="button" className="flow-plus nodrag" style={{ top }} onClick={(event) => { event.stopPropagation(); flow.onAdd(id, port); }} aria-label={`Add a node after ${step ? stepInfo[step.type].title : "the trigger"}${label ? ` (${label})` : ""}`}><Plus size={14} /></button>
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
+const flowNodeTypes = { card: ({ id }: { id: string }) => <FlowCard id={id} /> };
+const toFlowNode = (node: FlowNode) => ({ id: node.id, type: "card", position: { x: node.x, y: node.y }, data: { id: node.id } as FlowCardData, deletable: node.id !== "trigger" });
+const toFlowEdge = (edge: FlowEdge) => ({ id: `${edge.from}:${edge.port}:${edge.to}`, source: edge.from, sourceHandle: edge.port, target: edge.to, className: `flow-edge flow-edge--${edge.port}` });
+
 function AutomationEditor({ automation, leads: allLeads, settings: allSettings, vault, error, onBack, onSave, onDelete, onOpenVault }: { automation: Automation; leads: Lead[]; settings: Record<string, CampaignSettings>; vault: Recording[]; error: string | null; onBack: () => void; onSave: (next: Automation) => Promise<void>; onDelete: () => void; onOpenVault: () => void }) {
-  const [draft, setDraft] = useState(automation);
-  const [panel, setPanel] = useState<"trigger" | "add" | number | null>(automation.steps.length ? null : "add");
+  const [draft, setDraft] = useState<Automation>(() => { const { steps: _old, ...rest } = automation; return { ...rest, ...flowGraph(automation) }; });
+  const nodes = draft.nodes || [];
+  const edges = draft.edges || [];
+  // The panel shows the trigger, a node's settings (its id), or the list of nodes to add after `addFrom`.
+  const [panel, setPanel] = useState<string | null>(nodes.length > 1 ? null : "add");
+  const [addFrom, setAddFrom] = useState<{ id: string; port: FlowEdge["port"] } | null>(nodes.length > 1 ? null : { id: "trigger", port: "out" });
+  const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(nodes.map(toFlowNode));
+  const [flowEdges, setFlowEdges, onEdgesChange] = useEdgesState(edges.map(toFlowEdge));
   const dirty = useRef(false);
   useEffect(() => {
     if (!dirty.current) return;
@@ -4411,17 +4491,43 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
     return () => window.clearTimeout(timer);
   }, [draft]);
   const change = (next: Automation) => { dirty.current = true; setDraft(next); };
-  const setStep = (index: number, step: AutomationStep) => change({ ...draft, steps: draft.steps.map((item, at) => (at === index ? step : item)) });
   const back = () => { if (dirty.current) { dirty.current = false; void onSave(draft); } onBack(); };
-  const TriggerIcon = triggerInfo[draft.trigger].icon;
   const campaignNames = allCampaigns(allLeads, allSettings);
   // The leads this trigger hears from: the picked campaigns' leads, or everyone.
   const leads = draft.campaigns?.length ? allLeads.filter((lead) => lead.campaigns?.some((name) => draft.campaigns!.includes(name))) : allLeads;
   const scripts = (draft.campaigns?.length ? draft.campaigns : campaignNames).map((name) => allSettings[name]?.script || "").join("\n");
   const columns = [...new Set(leads.flatMap((lead) => Object.keys(lead.details || {})))].sort();
-  const asked = draft.steps.flatMap((item) => (item.type === "ask" && item.field.trim() ? [[`detail:${item.field.trim()}`, `${item.field.trim()} (from Ask AI)`] as [string, string]] : []));
+  const asked = flowSteps(draft).flatMap((item) => (item.type === "ask" && item.field.trim() ? [[`detail:${item.field.trim()}`, `${item.field.trim()} (from Ask AI)`] as [string, string]] : []));
   const fields: [string, string][] = [...asked, ...scriptVariables(scripts).map((name) => [name, `{{${name}}}`] as [string, string]), ...variableFields.filter(([key]) => key !== "phone"), ...columns.map((column) => [`detail:${column}`, column] as [string, string])];
-  const step = typeof panel === "number" ? draft.steps[panel] : undefined;
+  const openNode = panel && panel !== "trigger" && panel !== "add" ? nodes.find((node) => node.id === panel) : undefined;
+  const step = openNode?.step || undefined;
+  const connect = (edge: FlowEdge) => {
+    if (edge.to === "trigger" || edge.from === edge.to || flowReaches(edges, edge.to, edge.from) || edges.some((item) => item.from === edge.from && item.port === edge.port && item.to === edge.to)) return false;
+    change({ ...draft, edges: [...edges, edge] });
+    setFlowEdges((current) => [...current, toFlowEdge(edge)]);
+    return true;
+  };
+  const addNode = (type: AutomationStep["type"]) => {
+    const source = addFrom ? nodes.find((node) => node.id === addFrom.id) : undefined;
+    const siblings = source ? edges.filter((edge) => edge.from === source.id).length : 0;
+    const node: FlowNode = { id: `n${Date.now().toString(36)}`, step: newStep(type), x: (source?.x ?? 0) + 300, y: (source?.y ?? 0) + siblings * 110 + (addFrom?.port === "no" ? 60 : 0) };
+    const edge: FlowEdge | null = source && addFrom ? { from: source.id, port: addFrom.port, to: node.id } : null;
+    change({ ...draft, nodes: [...nodes, node], edges: edge ? [...edges, edge] : edges });
+    setFlowNodes((current) => [...current, toFlowNode(node)]);
+    if (edge) setFlowEdges((current) => [...current, toFlowEdge(edge)]);
+    setAddFrom(null);
+    setPanel(node.id);
+  };
+  const removeNodes = (ids: string[]) => {
+    const gone = new Set(ids.filter((id) => id !== "trigger"));
+    if (!gone.size) return;
+    change({ ...draft, nodes: nodes.filter((node) => !gone.has(node.id)), edges: edges.filter((edge) => !gone.has(edge.from) && !gone.has(edge.to)) });
+    setFlowNodes((current) => current.filter((node) => !gone.has(node.id)));
+    setFlowEdges((current) => current.filter((edge) => !gone.has(edge.source) && !gone.has(edge.target)));
+    if (panel && gone.has(panel)) setPanel(null);
+  };
+  const setStep = (id: string, next: AutomationStep) => change({ ...draft, nodes: nodes.map((node) => (node.id === id ? { ...node, step: next } : node)) });
+  const addTitle = addFrom ? (() => { const from = nodes.find((node) => node.id === addFrom.id); const name = from?.step ? stepInfo[from.step.type].title : triggerInfo[draft.trigger].title; return addFrom.port === "out" ? `After ${name}` : `If ${addFrom.port === "yes" ? "Yes" : "No"}`; })() : "Add a node";
   return (
     <section className={`flow-page${panel !== null ? " has-panel" : ""}`}>
       <div className="flow-editor-head">
@@ -4434,32 +4540,38 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
         <button type="button" className="text-link" onClick={() => { if (window.confirm(`Delete ${draft.name}?`)) { dirty.current = false; onDelete(); } }}><Trash2 size={16} aria-hidden="true" /> Delete</button>
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <div className="flow-canvas">
-        <div className="flow-chain">
-          <button type="button" className={`flow-node flow-node--trigger${panel === "trigger" ? " is-selected" : ""}`} onClick={() => setPanel("trigger")}>
-            <span className="flow-node__icon" aria-hidden="true"><TriggerIcon size={18} /></span>
-            <span className="flow-node__text"><b>{triggerInfo[draft.trigger].title}</b><small>{triggerSummary(draft)}</small></span>
-          </button>
-          {draft.steps.map((item, index) => {
-            const Icon = stepInfo[item.type].icon;
-            return (
-              <Fragment key={index}>
-                <span className="flow-wire" aria-hidden="true" />
-                <button type="button" className={`flow-node flow-node--${item.type === "if" ? "switch" : "action"}${panel === index ? " is-selected" : ""}${stepReady(item) ? "" : " is-unfinished"}`} onClick={() => setPanel(index)}>
-                  <span className="flow-node__icon" aria-hidden="true"><Icon size={18} /></span>
-                  <span className="flow-node__text"><b>{stepInfo[item.type].title}</b><small>{stepSummary(item, vault)}</small></span>
-                </button>
-              </Fragment>
-            );
-          })}
-          <span className="flow-wire" aria-hidden="true" />
-          <button type="button" className={`flow-add${panel === "add" ? " is-selected" : ""}`} onClick={() => setPanel("add")} aria-label="Add a step"><Plus size={20} /></button>
+      <FlowContext.Provider value={{ draft, vault, selected: panel, onAdd: (id, port) => { setAddFrom({ id, port }); setPanel("add"); } }}>
+        <div className="flow-board">
+          <ReactFlow
+            nodes={flowNodes}
+            edges={flowEdges}
+            nodeTypes={flowNodeTypes}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={(connection) => { if (connection.source && connection.target) connect({ from: connection.source, port: (connection.sourceHandle || "out") as FlowEdge["port"], to: connection.target }); }}
+            isValidConnection={(connection) => Boolean(connection.source && connection.target && connection.target !== "trigger" && connection.source !== connection.target && !flowReaches(edges, connection.target, connection.source))}
+            onNodeClick={(_, node) => { setAddFrom(null); setPanel(node.id === "trigger" ? "trigger" : node.id); }}
+            onPaneClick={() => setPanel(null)}
+            onNodeDragStop={(_, __, moved) => { const at = new Map(moved.map((node) => [node.id, node.position])); change({ ...draft, nodes: nodes.map((node) => (at.has(node.id) ? { ...node, x: Math.round(at.get(node.id)!.x), y: Math.round(at.get(node.id)!.y) } : node)) }); }}
+            onNodesDelete={(deleted) => removeNodes(deleted.map((node) => node.id))}
+            onEdgesDelete={(deleted) => { const gone = new Set(deleted.map((edge) => edge.id)); change({ ...draft, edges: edges.filter((edge) => !gone.has(toFlowEdge(edge).id)) }); }}
+            deleteKeyCode={["Backspace", "Delete"]}
+            fitView
+            fitViewOptions={{ maxZoom: 1, padding: 0.3 }}
+            minZoom={0.3}
+            maxZoom={1.5}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background gap={20} size={1.2} />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+          <p className="flow-board__hint">Drag from a dot to connect. Click a line or node and press Delete to remove it.</p>
         </div>
-      </div>
+      </FlowContext.Provider>
       {panel !== null && (
         <aside className="flow-panel" role="dialog" aria-labelledby="flow-panel-title">
           <header>
-            <h2 id="flow-panel-title">{panel === "trigger" ? triggerInfo[draft.trigger].title : panel === "add" ? "What happens next?" : step ? stepInfo[step.type].title : ""}</h2>
+            <h2 id="flow-panel-title">{panel === "trigger" ? triggerInfo[draft.trigger].title : panel === "add" ? addTitle : step ? stepInfo[step.type].title : ""}</h2>
             <button type="button" className="close-button" onClick={() => setPanel(null)} aria-label="Close"><X size={18} /></button>
           </header>
           {panel === "trigger" && (
@@ -4484,21 +4596,22 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
           )}
           {panel === "add" && (
             <div className="flow-options">
+              {!addFrom && <p className="campaign-settings__hint">It's added on its own. Drag from another node's dot to connect it, or use the + on a node to add one already connected.</p>}
               {stepsFor[draft.trigger].map((type) => {
                 const Icon = stepInfo[type].icon;
                 return (
-                  <button type="button" className="flow-option" key={type} onClick={() => { change({ ...draft, steps: [...draft.steps, newStep(type)] }); setPanel(draft.steps.length); }}>
+                  <button type="button" className="flow-option" key={type} onClick={() => addNode(type)}>
                     <span className={`flow-option__icon flow-option__icon--${type === "if" ? "switch" : "action"}`} aria-hidden="true"><Icon size={18} /></span>
-                    <span><b>{stepInfo[type].title}</b><small>{stepInfo[type].detail}</small></span>
+                    <span><b>{stepInfo[type].title}</b><small>{type === "if" ? "Goes down Yes or No, so each answer can lead somewhere different" : stepInfo[type].detail}</small></span>
                   </button>
                 );
               })}
             </div>
           )}
-          {step && typeof panel === "number" && (
+          {step && openNode && (
             <StepSettings step={step} fields={fields} leads={leads} settings={allSettings} vault={vault} campaigns={draft.campaigns || []} onOpenVault={onOpenVault}
-              onChange={(next) => setStep(panel, next)}
-              onRemove={() => { change({ ...draft, steps: draft.steps.filter((_, at) => at !== panel) }); setPanel(null); }} />
+              onChange={(next) => setStep(openNode.id, next)}
+              onRemove={() => removeNodes([openNode.id])} />
           )}
         </aside>
       )}
@@ -4572,7 +4685,7 @@ function StepSettings({ step, fields, leads, settings, vault, campaigns = [], on
       ) : <p className="campaign-settings__hint">No voicemails yet. <button type="button" className="text-link" onClick={onOpenVault}>Record one in Voicemails</button></p>)}
       {step.type === "stage" && <label>Stage<select value={step.stage} onChange={(event) => onChange({ ...step, stage: event.target.value })}>{leadStages.map((stage) => <option key={stage}>{stage}</option>)}</select></label>}
       {step.type === "followup" && <label>Business days out<input type="number" min={0} max={60} value={step.days} onChange={(event) => onChange({ ...step, days: Math.max(0, Math.min(60, Number(event.target.value) || 0)) })} /><small>At 10:00. A time you pick when logging the call wins.</small></label>}
-      <button type="button" className="text-link flow-step-settings__remove" onClick={onRemove}><Trash2 size={16} aria-hidden="true" /> Remove this step</button>
+      <button type="button" className="text-link flow-step-settings__remove" onClick={onRemove}><Trash2 size={16} aria-hidden="true" /> Remove this node</button>
     </div>
   );
 }
