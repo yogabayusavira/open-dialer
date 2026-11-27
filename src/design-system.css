@@ -1430,8 +1430,10 @@ html[data-theme="light"] .mic-widget { background: #2a2a28; }
 .flow-wait { display: grid; grid-template-columns: 100px 1fr; gap: var(--space-2); }
 .flow-wait small { grid-column: 1 / -1; }
 /* The credit that stays visible (NOTICE.md), and Settings → About. */
-.sidebar-credit { display: block; padding: var(--space-2) var(--space-2) 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.4; text-decoration: none; }
-.sidebar-credit:hover { color: var(--color-text); text-decoration: underline; }
+.sidebar-credit { position: relative; display: block; padding: var(--space-2) var(--space-2) 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.4; text-decoration: none; }
+.sidebar-credit:hover, .sidebar-credit:focus-visible { color: var(--color-text); text-decoration: underline; }
+.sidebar-credit__tooltip { position: absolute; bottom: calc(100% + 4px); left: var(--space-2); width: max-content; max-width: 200px; padding: var(--space-2); border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-surface-raised); color: var(--color-text); font-size: 12px; text-decoration: none; opacity: 0; visibility: hidden; pointer-events: none; z-index: 10; }
+.sidebar-credit:hover .sidebar-credit__tooltip, .sidebar-credit:focus-visible .sidebar-credit__tooltip { opacity: 1; visibility: visible; }
 .about__credit { color: var(--color-accent-text); font-weight: 600; }
 .about__facts { display: grid; gap: var(--space-3); margin: 0; }
 .about__facts div { display: grid; gap: 2px; }

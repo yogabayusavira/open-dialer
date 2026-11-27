@@ -173,7 +173,7 @@ transcription.
 ## License
 
 Open Dialer is © 2026 Yoga Bayu Savira, released under the [GNU AGPL-3.0](LICENSE) with the additional terms in
-[NOTICE.md](NOTICE.md): keep the "Powered by Open Dialer · by Yoga Bayu Savira" credit visible, don't use the Open
+[NOTICE.md](NOTICE.md): keep the "Powered by Open Dialer" credit visible and the full attribution available, don't use the Open
 Dialer name or logo for your own version, and share the source of any changed version you let others use.
 White-label and commercial licenses: [COMMERCIAL.md](COMMERCIAL.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 Contributors: [CONTRIBUTORS.md](CONTRIBUTORS.md).

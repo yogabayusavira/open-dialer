@@ -1318,8 +1318,10 @@ function App() {
             </span>
             <ChevronRight size={15} />
           </button>
-          {/* Required to stay visible: NOTICE.md, additional term 1. */}
-          <a className="sidebar-credit" href={about.sourceUrl} target="_blank" rel="noreferrer">Powered by {about.name} · by {about.author}</a>
+          <a className="sidebar-credit" href={about.sourceUrl} target="_blank" rel="noreferrer" aria-label={`Powered by ${about.name} · by ${about.author} (opens GitHub)`}>
+            Powered by {about.name}
+            <span className="sidebar-credit__tooltip" aria-hidden="true">Powered by {about.name} · by {about.author}</span>
+          </a>
         </div>
       </aside>
       <section className="workbench">

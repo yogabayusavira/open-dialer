@@ -3,7 +3,7 @@
 Open Dialer is free to use, change and host under the GNU AGPL-3.0 with the additional terms in
 [NOTICE.md](NOTICE.md). In short, under that license you must:
 
-- keep the "Powered by Open Dialer · by Yoga Bayu Savira" credit visible,
+- keep the "Powered by Open Dialer" credit visible, with the full attribution available as described in NOTICE.md,
 - not call your own version "Open Dialer" or use its logo,
 - publish the source code of any changed version you let other people use, including over the internet.
 
