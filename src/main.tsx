@@ -65,6 +65,7 @@ import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
 import { money, prices } from "./prices";
 import { about } from "./about";
+import { roadmap } from "./roadmap";
 import { checkCondition, describeCondition, isOtherwise, parseCondition } from "./conditions";
 import "./styles.css";
 import "./design-system.css";
@@ -203,7 +204,9 @@ type SettingsPage =
   | "ai"
   | "email"
   | "costs"
-  | "companies";
+  | "companies"
+  | "setup"
+  | "roadmap";
 
 class ApiError extends Error {
   constructor(
@@ -894,7 +897,9 @@ function App() {
   useEffect(() => { try { localStorage.setItem("open-dialer-campaign", campaign); } catch { /* private mode: keep it for this visit only */ } }, [campaign]);
   const [outcomeLead, setOutcomeLead] = useState<Lead | null>(null);
   const [editLead, setEditLead] = useState<Lead | null>(null);
-  const [guideOpen, setGuideOpen] = useState(false);
+  // Settings opens on this page when set (the Dashboard's Setup button opens Setup); the key remounts it there.
+  const [settingsPage, setSettingsPage] = useState<{ page: SettingsPage; key: number } | null>(null);
+  const openSetup = () => { setSettingsPage({ page: "setup", key: Date.now() }); setScreen("settings"); };
   const [tourAt, setTourAt] = useState<number | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [welcomeToken, setWelcomeToken] = useState(() => (hashParts().page === "welcome" ? hashParts().lead : null));
@@ -1300,11 +1305,11 @@ function App() {
             <ShieldCheck size={18} />
             <span>{lightMode ? "Dark mode" : "Light mode"}</span>
           </button>
-          <button className="nav-item sidebar-utility" type="button" onClick={() => setScreen("settings")}>
+          <button className="nav-item sidebar-utility" type="button" onClick={() => { setSettingsPage(null); setScreen("settings"); }}>
             <SlidersHorizontal size={18} />
             <span>Settings</span>
           </button>
-          <button className="account-summary" type="button" onClick={() => setScreen("settings")}>
+          <button className="account-summary" type="button" onClick={() => { setSettingsPage(null); setScreen("settings"); }}>
             {/* Notion-style face, the same DiceBear "notionists" avatar Guramo uses; seeded with the random user id, nothing personal. */}
             <span className="account-summary__avatar"><img src={`https://api.dicebear.com/7.x/notionists/svg?seed=${encodeURIComponent(state.me.id)}`} alt="" /></span>
             <span>
@@ -1332,12 +1337,6 @@ function App() {
           </div>
           <div className="top-actions">
             {(screen === "home" || screen === "leads" || screen === "calls" || screen === "followups" || screen === "pipeline" || screen === "analytics") && picker}
-            <button
-              className="quick-tour-button"
-              onClick={() => setGuideOpen(true)}
-            >
-              <BadgeCheck size={17} /> Setup guide
-            </button>
             {/* The page's own main action: leads on Leads and Pipeline, tasks on Tasks, scripts on Scripts; none elsewhere. */}
             {(screen === "leads" || screen === "pipeline") && <button className="primary-button" onClick={() => setShowLeadForm(true)}><Plus size={18} /> Add lead</button>}
             {screen === "followups" && <button className="primary-button" onClick={() => setTaskDialog({})}><Plus size={18} /> Add task</button>}
@@ -1420,7 +1419,8 @@ function App() {
             onRefresh={refresh}
             onNotice={setNotice}
             onAddLead={() => setShowLeadForm(true)}
-            onGuide={() => setGuideOpen(true)}
+            onGuide={openSetup}
+            setup={(() => { const required = setupSteps(state).filter((step) => !step.optional); return { done: required.filter((step) => step.done).length, total: required.length }; })()}
             onAddTask={(lead) => setTaskDialog({ leadId: lead.id })}
             onOpenPdf={setPdfFor}
             onEditScript={(name) => editCampaign(name)}
@@ -1539,6 +1539,9 @@ function App() {
         )}
         {screen === "settings" && (
           <Settings
+            key={settingsPage?.key}
+            initialPage={settingsPage?.page}
+            onTour={setTourAt}
             fullState={state}
             me={state.me}
             workspace={state.workspace}
@@ -1617,16 +1620,6 @@ function App() {
         advanceFrom(await refresh(), outcomeLead, `${outcome} saved for ${leadLabel(outcomeLead)}.`);
       }} />}
       {editLead && <LeadForm lead={editLead} campaigns={campaigns} fields={state.settings?.fields} onClose={() => setEditLead(null)} onSaved={async () => { setEditLead(null); await refresh(); setNotice("Lead updated."); }} onDeleted={async () => { const name = leadLabel(editLead); setEditLead(null); if (selectedId === editLead.id) setSelectedId(null); await refresh(); setNotice(`${name} deleted.`); }} />}
-      {guideOpen && (
-        <SetupGuide
-          state={state}
-          onClose={() => setGuideOpen(false)}
-          onTour={(step) => {
-            setGuideOpen(false);
-            setTourAt(step);
-          }}
-        />
-      )}
       {tourAt !== null && <SetupTour steps={setupSteps(state)} start={tourAt} onScreen={setScreen} onClose={() => setTourAt(null)} />}
     </main>
   );
@@ -2259,9 +2252,9 @@ function CallStrip({ calls, onOpen }: { calls: CallRecord[]; onOpen: () => void 
 
 type StatTarget = "calls-today" | "conversations" | "followups" | "to-call";
 
-function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide, onGo }: { state: State; selected: Lead; picker: ReactNode; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void }) {
-  const setup = setupSteps(state).filter((step) => !step.optional);
-  const setupDone = setup.filter((step) => step.done).length;
+// setup is counted on the whole workspace (not the picked campaign), so it doesn't come and go with the campaign.
+function DashboardBanner({ state, selected, picker, setup, onStart, onAddLead, onGuide, onGo }: { state: State; selected: Lead; picker: ReactNode; setup: { done: number; total: number }; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void }) {
+  const setupDone = setup.done;
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 30_000);
@@ -2285,7 +2278,7 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
         <h1 className="dash-date">{new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long" }).format(now)}<span> · {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(now)} your time</span></h1>
         <div className="dash-banner__actions">
           {picker}
-          {setupDone < setup.length && <button className="quiet-button" onClick={onGuide}><BadgeCheck size={16} /> Setup {setupDone}/{setup.length}</button>}
+          {setupDone < setup.total && <button className="quiet-button" onClick={onGuide}><BadgeCheck size={16} /> Setup {setupDone}/{setup.total}</button>}
           <button className="quiet-button" onClick={onAddLead}><Plus size={16} /> Add lead</button>
           <button className="primary-button" data-tour="start-calling" onClick={onStart} disabled={!toCall}>Start calling <ChevronRight size={16} /></button>
         </div>
@@ -2331,6 +2324,7 @@ function Queue({
   onSettings,
   onAddLead,
   onGuide,
+  setup,
   onAddTask,
   onGo,
   onOpenPdf,
@@ -2348,6 +2342,7 @@ function Queue({
   picker: ReactNode;
   onAddLead: () => void;
   onGuide: () => void;
+  setup: { done: number; total: number };
   onAddTask: (lead: Lead) => void;
   onGo: (target: StatTarget) => void;
   state: State;
@@ -2434,6 +2429,7 @@ function Queue({
   return (
     <div className="queue-page">
       <DashboardBanner
+        setup={setup}
         state={state}
         selected={selected}
         picker={picker}
@@ -5184,7 +5180,9 @@ function setupSteps(state: State): SetupStep[] {
     { done: Boolean(state.connection), title: "Connect your Twilio account", body: "Paste your Account SID and Auth Token here and press Validate. Both are on your Twilio Console home page; the link above the fields opens it. They're checked and stored encrypted.", target: "settings", action: "Open Settings", screen: "settings", spot: "twilio" },
     { done: Boolean(state.connection?.selectedNumber), title: "Pick the number leads will see", body: "Once Twilio is connected, your numbers are listed here. Choose the one leads see as caller ID and save it. Need a number? The link here opens your Twilio numbers.", target: "settings", action: "Open Settings", screen: "settings", spot: "number,twilio" },
     { done: Boolean(state.connection), title: "Choose how you take calls", body: "\"In this app\" plays calls through your browser: use a headset and allow the microphone. You can switch to Zoiper or your phone here instead.", target: "settings", action: "Open Settings", screen: "settings", spot: "answer-on,twilio" },
-    { done: Boolean(state.callbackReachable), title: "Start Open Dialer the easy way", body: "On your computer, always start with Start Open Dialer.bat. It opens Docker Desktop and the local database, builds the app, and opens the tunnel Twilio needs to reach you. Keep its window open while you call. A hosted copy needs none of this.", target: null, action: "" },
+    // Optional: whether Twilio can reach the app depends on the address it was opened at (localhost never counts),
+    // so as a required step it flickered and could never tick off for good.
+    { done: Boolean(state.callbackReachable), title: "Start Open Dialer the easy way", body: "On your computer, always start with Start Open Dialer.bat. It opens Docker Desktop and the local database, builds the app, and opens the tunnel Twilio needs to reach you. Keep its window open while you call. A hosted copy needs none of this.", target: null, action: "", optional: true },
     { done: state.leads.length > 0, title: "Add your leads", body: "New campaign: name it and write the script first, then import its CSV. Match the columns; only a phone number is required. Leads → Import CSV works too.", target: "campaigns", action: "Open Campaigns", screen: "campaigns", spot: "new-campaign" },
     { done: scripts, title: "Set up each campaign", body: "Settings on a campaign card, or Campaigns → Scripts in the sidebar for every campaign's script at a glance. General: what a won deal is worth. Script: type {{name}} or ((NAME)) where lead details go, or use the Variable button. Variables: what fills each one, with real examples from your leads, and Clean with AI to make messy values sound natural.", target: "campaigns", action: "Open Campaigns", optional: true, screen: "campaigns", spot: "campaign-settings,new-campaign" },
     { done: Boolean(state.settings?.fields?.length), title: "Add custom fields", body: "Extra details your team fills in on every lead, like Territory. They show on each lead's form, in the CSV import, and as script variables.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-fields" },
@@ -5196,33 +5194,55 @@ function setupSteps(state: State): SetupStep[] {
   ];
 }
 
-// The checklist: what's done, plus the guided tour, from the start or from any step.
-function SetupGuide({ state, onClose, onTour }: { state: State; onClose: () => void; onTour: (step: number) => void }) {
+// Settings → Roadmap: what's coming, from src/roadmap.ts.
+function Roadmap() {
+  return (
+    <section className="settings-panel roadmap">
+      <span className="panel-kicker">Getting started</span>
+      <h2>Roadmap</h2>
+      <p>What's planned for Open Dialer. Items come off this list once they're built.</p>
+      {roadmap.map((group) => (
+        <section key={group.stage} className="roadmap__group" aria-labelledby={`roadmap-${group.stage}`}>
+          <header><h3 id={`roadmap-${group.stage}`}>{group.stage}</h3><small>{group.note}</small></header>
+          <ul>
+            {group.items.map((item) => (
+              <li key={item.title}>
+                <b>{item.title}{item.undecided && <em>Undecided</em>}</b>
+                <small>{item.detail}</small>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </section>
+  );
+}
+
+// The checklist (Settings → Setup): what's done, plus the guided tour, from the start or from any step.
+function SetupChecklist({ state, onTour }: { state: State; onTour: (step: number) => void }) {
   const steps = setupSteps(state);
   const required = steps.filter((step) => !step.optional);
   const done = required.filter((step) => step.done).length;
   return (
-    <div className="modal-backdrop">
-      <section className="lead-form setup-guide" role="dialog" aria-modal="true" aria-labelledby="setup-guide-title">
-        <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
-        <h2 id="setup-guide-title">Setup guide</h2>
-        <p>{done === required.length ? "Everything you need is set up. Take the tour any time for a refresher." : `${done} of ${required.length} done. Each step ticks itself off once it's finished.`}</p>
-        <div className="dash-progress setup-guide__progress"><span><i style={{ width: `${Math.round((done / required.length) * 100)}%` }} /></span></div>
-        <button type="button" className="primary-button setup-guide__tour" onClick={() => onTour(Math.max(0, steps.findIndex((step) => !step.done)))}><Play size={16} aria-hidden="true" /> {done === required.length ? "Take the tour" : "Continue with the tour"}</button>
-        <ol className="setup-steps">
-          {steps.map((step, index) => (
-            <li key={step.title} className={step.done ? "is-done" : undefined}>
-              <span className="setup-steps__mark" aria-hidden="true">{step.done ? <Check size={14} /> : index + 1}</span>
-              <div>
-                <b>{step.title}{step.optional && <em className="setup-steps__optional">Optional</em>}<span className="sr-only">{step.done ? " (done)" : " (to do)"}</span></b>
-                <small>{step.body}</small>
-              </div>
-              <button type="button" className="quiet-button" onClick={() => onTour(index)}>Show me</button>
-            </li>
-          ))}
-        </ol>
-      </section>
-    </div>
+    <section className="settings-panel setup-guide">
+      <span className="panel-kicker">Getting started</span>
+      <h2>Setup</h2>
+      <p>{done === required.length ? "Everything you need is set up. Take the tour any time for a refresher." : `${done} of ${required.length} done. Each step ticks itself off once it's finished.`}</p>
+      <div className="dash-progress setup-guide__progress"><span><i style={{ width: `${Math.round((done / required.length) * 100)}%` }} /></span></div>
+      <button type="button" className="primary-button setup-guide__tour" onClick={() => onTour(Math.max(0, steps.findIndex((step) => !step.done)))}><Play size={16} aria-hidden="true" /> {done === required.length ? "Take the tour" : "Continue with the tour"}</button>
+      <ol className="setup-steps">
+        {steps.map((step, index) => (
+          <li key={step.title} className={step.done ? "is-done" : undefined}>
+            <span className="setup-steps__mark" aria-hidden="true">{step.done ? <Check size={14} /> : index + 1}</span>
+            <div>
+              <b>{step.title}{step.optional && <em className="setup-steps__optional">Optional</em>}<span className="sr-only">{step.done ? " (done)" : " (to do)"}</span></b>
+              <small>{step.body}</small>
+            </div>
+            <button type="button" className="quiet-button" onClick={() => onTour(index)}>Show me</button>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
@@ -5313,7 +5333,11 @@ function Settings({
   fullState,
   onRefresh,
   onNotice,
+  initialPage,
+  onTour,
 }: {
+  initialPage?: SettingsPage;
+  onTour: (step: number) => void;
   fullState: State;
   fields?: string[];
   campaignSettings: Record<string, CampaignSettings>;
@@ -5339,7 +5363,7 @@ function Settings({
   const [bridgeNumber, setBridgeNumber] = useState(usesAppPhone(connection) ? "" : (connection?.bridgeNumber || "").replace(/^sip:/i, ""));
   const owner = me.role === "owner";
   const [area, setArea] = useState<SettingsArea>(owner ? "general" : "account");
-  const [page, setPage] = useState<SettingsPage>(owner ? "numbers" : "profile");
+  const [page, setPage] = useState<SettingsPage>(initialPage || (owner ? "numbers" : "profile"));
   const validate = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
@@ -5419,12 +5443,14 @@ function Settings({
   // Each tab's sidebar is a few titled groups of pages.
   const sections: Record<SettingsArea, { title: string; items: { id: SettingsPage; label: string; icon: typeof Phone }[] }[]> = {
     general: [
+      { title: "Getting started", items: [{ id: "setup", label: "Setup", icon: BadgeCheck }, { id: "roadmap", label: "Roadmap", icon: Workflow }] },
       { title: "Costs", items: [{ id: "costs", label: "Features & costs", icon: ChartColumn }] },
       { title: "Calling", items: [{ id: "numbers", label: "Phone numbers", icon: Phone }, { id: "booking", label: "Booking link", icon: CalendarPlus }] },
       { title: "Integrations", items: [{ id: "ai", label: "AI", icon: Sparkles }, { id: "email", label: "Email", icon: Mail }] },
       { title: "Workspace", items: [{ id: "team", label: "Team", icon: Users }, { id: "fields", label: "Custom fields", icon: SlidersHorizontal }, ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : [])] },
     ],
     account: [
+      ...(owner ? [] : [{ title: "Getting started", items: [{ id: "setup" as const, label: "Setup", icon: BadgeCheck }, { id: "roadmap" as const, label: "Roadmap", icon: Workflow }] }]),
       { title: "Account", items: [{ id: "profile", label: "Profile", icon: UserRound }, { id: "privacy", label: "Privacy", icon: ShieldCheck }, { id: "about", label: "About", icon: BadgeCheck }] },
     ],
   };
@@ -5449,7 +5475,7 @@ function Settings({
           ))}
         </aside>
         <div className="settings-content">
-        {page === "numbers" ? (
+        {page === "setup" ? <SetupChecklist state={fullState} onTour={onTour} /> : page === "roadmap" ? <Roadmap /> : page === "numbers" ? (
           <section className="settings-grid">
       <article className="settings-card connection-card" data-tour="twilio">
         <div>
