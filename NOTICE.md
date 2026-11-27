@@ -33,3 +33,4 @@ license from the copyright holder. See [COMMERCIAL.md](COMMERCIAL.md).
 ## Third-party software
 
 Open Dialer uses open source packages listed in `package.json`. Each keeps its own license.
+Weather icons are Meteocons by Bas Milius, under the MIT license; see [docs/METEOCONS-LICENSE.txt](docs/METEOCONS-LICENSE.txt).

@@ -767,6 +767,29 @@ function publicOrigin(req) {
   const protocol = req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
   return `${protocol}://${req.headers.host}`;
 }
+// Capture the script actually shown on the dialer, before it can be changed mid-call.
+function callScript(lead, settings, selectedCampaign) {
+  const campaign = selectedCampaign ? ((lead.campaigns || []).includes(selectedCampaign) ? selectedCampaign : null) : (lead.campaigns || []).find((name) => settings[name]?.script || settings[name]?.pdf);
+  const own = settings[campaign];
+  if (!campaign || !own?.script) return null;
+  const scripts = own.scripts?.length ? own.scripts : [{ id: "s1", script: own.script }];
+  const active = scripts.find((item) => item.id === own.activeScript) || scripts[0];
+  return active?.id ? { scriptCampaign: campaign, scriptId: active.id } : null;
+}
+function signedScriptContext(leadId, callId, script) {
+  if (!script) return "";
+  const payload = Buffer.from(JSON.stringify({ ws: currentWorkspace(), leadId, callId, ...script })).toString("base64url");
+  return `${payload}.${createHmac("sha256", encryptionKey()).update(payload).digest("base64url")}`;
+}
+function readScriptContext(token, ws, leadId, callId) {
+  const [payload, signature] = String(token || "").split(".");
+  if (!payload || !signature || !safeEqual(signature, createHmac("sha256", encryptionKey()).update(payload).digest("base64url"))) return null;
+  try {
+    const context = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (context.ws !== ws || context.leadId !== leadId || context.callId !== callId || typeof context.scriptCampaign !== "string" || typeof context.scriptId !== "string") return null;
+    return { scriptCampaign: context.scriptCampaign, scriptId: context.scriptId };
+  } catch { return null; }
+}
 function voiceToken(leadId, expiresAt) {
   const payload = `${currentWorkspace()}.${leadId}.${expiresAt}`;
   return `${payload}.${createHmac("sha256", encryptionKey()).update(payload).digest("base64url")}`;
@@ -1392,7 +1415,9 @@ async function route(req, res, url) {
       const transcribe = transcribeFor(state, lead);
       await updateState((fresh) => {
         if (fresh.calls.some((item) => item.sid === params.CallSid)) return false;
-        fresh.calls.unshift({ id: /^call_[\w]+$/.test(params.callId || "") ? params.callId : `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling from the app.", at: new Date().toISOString(), sid: params.CallSid, ...(/^user_\w+$/.test(params.userId || "") ? { userId: params.userId } : {}), ...(transcribe ? { transcribing: true } : {}) });
+        const callId = /^call_[\w]+$/.test(params.callId || "") ? params.callId : `call_${Date.now()}`;
+        const script = readScriptContext(params.scriptContext, ws, lead.id, callId);
+        fresh.calls.unshift({ id: callId, leadId: lead.id, outcome: "In progress", note: "Calling from the app.", at: new Date().toISOString(), sid: params.CallSid, ...(/^user_\w+$/.test(params.userId || "") ? { userId: params.userId } : {}), ...(script || {}), ...(transcribe ? { transcribing: true } : {}) });
         activity(fresh, "Call started", `${leadLabel(lead)} · from the app`);
       });
       const statusUrl = statusUrlFor(req, lead.id);
@@ -2035,12 +2060,13 @@ async function route(req, res, url) {
       return json(res, 204, {});
     }
     if (url.pathname === "/api/calls/record" && req.method === "POST") {
-      const { leadId, outcome, note, followUpAt } = await getBody(req);
+      const { leadId, outcome, note, followUpAt, callId } = await getBody(req);
       const state = await readState();
       const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
       if (!callOutcomes.includes(outcome)) return json(res, 400, { error: "Choose a valid call outcome." });
-      const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString(), userId: currentUser().id };
+      const source = callId && !state.calls.some((item) => item.sourceCallId === callId) && state.calls.find((item) => item.id === callId && item.leadId === lead.id && item.userId === currentUser().id && item.sid);
+      const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString(), userId: currentUser().id, ...(source ? { sourceCallId: source.id } : {}) };
       state.calls.unshift(call);
       enterStage(lead, stageAfterOutcome(lead.status, outcome));
       if (lead.status === "Follow-up" && followUpReasons[outcome]) lead.followUpReason = followUpReasons[outcome];
@@ -2344,7 +2370,7 @@ async function route(req, res, url) {
       return json(res, 200, { token: voiceAccessToken({ accountSid: connection.accountSid, keySid: connection.apiKeySid, keySecret, appSid: connection.twimlAppSid, identity: operatorIdentity }) });
     }
     if (url.pathname === "/api/calls/browser-start" && req.method === "POST") {
-      const { leadId } = await getBody(req);
+      const { leadId, campaign } = await getBody(req);
       const state = await readState();
       const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
@@ -2353,10 +2379,10 @@ async function route(req, res, url) {
       // The call record is created when Twilio actually starts the call (voice/client), so a blocked
       // microphone or failed connection never leaves a call stuck "In progress".
       const callId = `call_${Date.now()}_${randomBytes(3).toString("hex")}`;
-      return json(res, 201, { callId, leadId: lead.id, userId: currentUser().id, token: voiceToken(lead.id, Date.now() + 10 * 60 * 1000) });
+      return json(res, 201, { callId, leadId: lead.id, userId: currentUser().id, token: voiceToken(lead.id, Date.now() + 10 * 60 * 1000), scriptContext: signedScriptContext(lead.id, callId, callScript(lead, state.campaignSettings, campaign)) });
     }
     if (url.pathname === "/api/calls/start" && req.method === "POST") {
-      const { leadId } = await getBody(req);
+      const { leadId, campaign } = await getBody(req);
       const state = await readState();
       const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
@@ -2389,11 +2415,13 @@ async function route(req, res, url) {
         return json(res, 502, { error: `Twilio could not start the call${detail.message ? `: ${detail.message}` : ". Check the outbound number and where you answer calls."}` });
       }
       const remote = await response.json();
+      const callId = `call_${Date.now()}_${randomBytes(3).toString("hex")}`;
+      const script = callScript(lead, state.campaignSettings, campaign);
       await updateState((fresh) => {
-        fresh.calls.unshift({ id: `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling bridge started.", at: new Date().toISOString(), sid: remote.sid, userId: currentUser().id });
+        fresh.calls.unshift({ id: callId, leadId: lead.id, outcome: "In progress", note: "Calling bridge started.", at: new Date().toISOString(), sid: remote.sid, userId: currentUser().id, ...(script || {}) });
         activity(fresh, "Call bridge started", `${leadLabel(lead)} · answer your bridge call to connect`);
       });
-      return json(res, 201, { sid: remote.sid });
+      return json(res, 201, { sid: remote.sid, callId });
     }
     const requested =
       url.pathname === "/" ? "index.html" : url.pathname.replace(/^\//, "");

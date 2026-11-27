@@ -116,6 +116,9 @@ type CallRecord = {
   note: string;
   at: string;
   userId?: string;
+  scriptCampaign?: string;
+  scriptId?: string;
+  sourceCallId?: string;
   // Talk time of the lead's side, from Twilio; transcript lines when live transcription was on.
   seconds?: number;
   transcribing?: boolean;
@@ -907,6 +910,7 @@ function App() {
   const [campaign, setCampaign] = useState(() => { try { return localStorage.getItem("open-dialer-campaign") || ""; } catch { return ""; } });
   useEffect(() => { try { localStorage.setItem("open-dialer-campaign", campaign); } catch { /* private mode: keep it for this visit only */ } }, [campaign]);
   const [outcomeLead, setOutcomeLead] = useState<Lead | null>(null);
+  const lastStartedCall = useRef<{ leadId: string; callId: string; startedAt: number } | null>(null);
   const [editLead, setEditLead] = useState<Lead | null>(null);
   // Settings opens on this page when set (the Dashboard's Setup button opens Setup); the key remounts it there.
   const [settingsPage, setSettingsPage] = useState<{ page: SettingsPage; key: number } | null>(null);
@@ -1022,13 +1026,15 @@ function App() {
   };
   const startAppCall = async (lead: Lead) => {
     if (activeCall) return;
+    lastStartedCall.current = null;
     setAutoNext(null);
     hungUpByMe.current = false;
     setActiveCall({ lead, call: null, status: "connecting", muted: false, startedAt: null });
     try {
-      const start = await api<{ callId: string; leadId: string; token: string; userId: string }>("/api/calls/browser-start", { method: "POST", body: JSON.stringify({ leadId: lead.id }) });
+      const start = await api<{ callId: string; leadId: string; token: string; userId: string; scriptContext: string }>("/api/calls/browser-start", { method: "POST", body: JSON.stringify({ leadId: lead.id, campaign: singleCampaign }) });
       const phone = await getPhone(state?.connection?.accountSid || "");
-      const call = await phone.connect({ params: { leadId: start.leadId, callId: start.callId, token: start.token, userId: start.userId } });
+      const call = await phone.connect({ params: { leadId: start.leadId, callId: start.callId, token: start.token, userId: start.userId, scriptContext: start.scriptContext || "" } });
+      lastStartedCall.current = { leadId: lead.id, callId: start.callId, startedAt: Date.now() };
       setActiveCall((current) => current && { ...current, call, callId: start.callId });
       const end = (message?: string, isError = false) => {
         setActiveCall(null);
@@ -1045,7 +1051,7 @@ function App() {
           droppedVoicemail.current = null;
           setActiveCall(null);
           const auto = outcomeActions(lead, state?.automations, state?.campaignSettings || {}, "Voicemail");
-          void api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: "Voicemail", note: `Voicemail dropped: ${recording}`, followUpAt: auto.followUpAt || voicemailFollowUp() }) })
+          void api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, callId: start.callId, outcome: "Voicemail", note: `Voicemail dropped: ${recording}`, followUpAt: auto.followUpAt || voicemailFollowUp() }) })
             .then(() => refresh())
             .then((fresh) => advanceFrom(fresh, lead, `Voicemail dropped for ${leadLabel(lead)}. Follow-up set for 2 business days out.`))
             .catch((error) => showError(error instanceof Error ? error.message : "Couldn't log the voicemail."));
@@ -1088,11 +1094,13 @@ function App() {
   }, [autoNext, activeCall]);
   const prepareCall = async (lead: Lead) => {
     if (usesAppPhone(state?.connection)) return startAppCall(lead);
+    lastStartedCall.current = null;
     try {
-      await api("/api/calls/start", {
+      const started = await api<{ callId: string }>("/api/calls/start", {
         method: "POST",
-        body: JSON.stringify({ leadId: lead.id }),
+        body: JSON.stringify({ leadId: lead.id, campaign: singleCampaign }),
       });
+      lastStartedCall.current = { leadId: lead.id, callId: started.callId, startedAt: Date.now() };
       await refresh();
       setNotice(`Ringing ${state?.connection?.bridgeNumber?.startsWith("sip:") ? "Zoiper" : "your phone"} now. Answer it to connect with ${leadLabel(lead)}.`);
     } catch (error) {
@@ -1325,7 +1333,7 @@ function App() {
         </div>
       </aside>
       <section className="workbench">
-        {screen !== "queue" && <header className="topbar">
+        {screen !== "queue" && <header className="topbar page-enter" key={`header-${screen}`}>
           <div>
             <p className="date-line">Workspace</p>
             <h1>
@@ -1405,10 +1413,12 @@ function App() {
             </button>
           </div>
         )}
+        <div className="page-enter" key={`content-${screen}`}>
         {screen === "queue" && allPicked && <PickCampaign title="The Dialer calls one campaign at a time" body="Pick the campaign to call. The sidebar switches to it too." campaigns={campaigns} detail={(name) => { const count = scopeTo(name).leads.length; return `${count} lead${count === 1 ? "" : "s"}`; }} onPick={setCampaign} />}
         {screen === "queue" && !allPicked && scopedSelected && (
           <Queue
             state={dialerScoped}
+            campaign={singleCampaign}
             selected={scopedSelected}
             onSelect={setSelectedId}
             onPrepare={prepareCall}
@@ -1525,7 +1535,7 @@ function App() {
             onGo={setScreen}
           />
         )}
-        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={allPicked ? "" : singleCampaign} onPick={setCampaign} onEdit={editCampaign} onChanged={async (message) => { await refresh(); setNotice(message); }} />}
+        {screen === "scripts" && <ScriptsPage leads={state.leads} calls={state.calls} settings={state.campaignSettings || {}} campaign={allPicked ? "" : singleCampaign} onPick={setCampaign} onEdit={editCampaign} onChanged={async (message) => { await refresh(); setNotice(message); }} />}
         {screen === "automations" && <AutomationsPage automations={state.automations || []} leads={state.leads} settings={state.campaignSettings || {}} vault={state.voicemails || []} onRefresh={refresh} onOpenVault={() => setScreen("voicemails")} />}
         {screen === "voicemails" && <VoicemailsPage vault={state.voicemails || []} automations={state.automations || []} settings={state.campaignSettings || {}} campaigns={campaigns} defaultCampaign={singleCampaign} onRefresh={refresh} onNotice={setNotice} />}
         {screen === "campaigns" && (
@@ -1564,6 +1574,7 @@ function App() {
             onNotice={setNotice}
           />
         )}
+        </div>
       </section>
       {scriptFor !== null && (
         <ScriptDialog
@@ -1620,7 +1631,8 @@ function App() {
       )}
       {importOpen && <ImportLeads campaigns={[...new Set([...campaigns, ...Object.keys(state.campaignSettings || {})])]} settings={state.campaignSettings || {}} fields={state.settings?.fields} defaultCampaign={importOpen === "campaign" ? singleCampaign : activeCampaign} requireCampaign={importOpen === "campaign"} onClose={() => setImportOpen(false)} onSaved={async (message, name) => { setImportOpen(false); await refresh(); notifyWith(message, "Start calling", () => { setCampaign(name); setScreen("queue"); }); }} />}
       {dncOpen && <DncList onClose={() => setDncOpen(false)} onSaved={async (message) => { setDncOpen(false); await refresh(); setNotice(message); }} />}
-      {outcomeLead && <CallOutcome lead={outcomeLead} automations={state.automations} settings={state.campaignSettings || {}} bookingUrl={state.settings?.bookingUrl || ""} onBook={() => openBooking(state.settings!.bookingUrl!, outcomeLead.name).catch((error) => showError(error instanceof Error ? error.message : "Couldn't open the booking page."))} onClose={() => setOutcomeLead(null)} onSaved={async (outcome) => {
+      {outcomeLead && <CallOutcome lead={outcomeLead} callId={lastStartedCall.current?.leadId === outcomeLead.id && Date.now() - lastStartedCall.current.startedAt < 6 * 60 * 60 * 1000 ? lastStartedCall.current.callId : undefined} automations={state.automations} settings={state.campaignSettings || {}} bookingUrl={state.settings?.bookingUrl || ""} onBook={() => openBooking(state.settings!.bookingUrl!, outcomeLead.name).catch((error) => showError(error instanceof Error ? error.message : "Couldn't open the booking page."))} onClose={() => setOutcomeLead(null)} onSaved={async (outcome) => {
+        lastStartedCall.current = null;
         setOutcomeLead(null);
         advanceFrom(await refresh(), outcomeLead, `${outcome} saved for ${leadLabel(outcomeLead)}.`);
       }} />}
@@ -2318,6 +2330,7 @@ function DashboardBanner({ state, selected, setup, onStart, onAddLead, onGuide, 
 
 function Queue({
   state,
+  campaign,
   selected,
   onSelect,
   onPrepare,
@@ -2348,6 +2361,7 @@ function Queue({
   onAddTask: (lead: Lead) => void;
   onGo: (target: StatTarget) => void;
   state: State;
+  campaign: string;
   selected: Lead;
   onSelect: (id: string) => void;
   onPrepare: (lead: Lead) => void;
@@ -2365,7 +2379,15 @@ function Queue({
   // The lead auto-dial goes to after this one (same rule as nextInQueue).
   const nextId = order === "inplace" ? upcoming[upcoming.findIndex((lead) => lead.id === selected.id) + 1]?.id : upcoming.find((lead) => lead.id !== selected.id)?.id;
   // Keep the lead being called in view as the list scrolls on its own.
-  useEffect(() => { document.querySelector(".call-list-item.is-selected")?.scrollIntoView({ block: "nearest" }); }, [selected.id]);
+  // Scrolls only the lead list (scrollIntoView would scroll the whole page too and push the banner away).
+  useEffect(() => {
+    const item = document.querySelector<HTMLElement>(".call-list-item.is-selected");
+    const list = item?.closest<HTMLElement>(".call-list");
+    if (!item || !list) return;
+    const top = item.getBoundingClientRect().top - list.getBoundingClientRect().top;
+    const filters = list.querySelector<HTMLElement>(".call-list__filters")?.offsetHeight || 0;
+    if (top < filters || top + item.offsetHeight > list.clientHeight) list.scrollTop += top - filters - (list.clientHeight - filters) / 3;
+  }, [selected.id]);
   const remember = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* private mode */ } };
   const isCallback = (lead: Lead) => lead.status === "Follow-up" || /^\d{4}-\d{2}-\d{2}/.test(lead.due);
   const addedAt = (lead: Lead) => Number(lead.id.split("_")[1]) || 0;
@@ -2374,8 +2396,7 @@ function Queue({
   const place = (lead: Lead) => [leadState(lead)?.[1] || "\uffff", Object.entries(lead.details || {}).find(([key]) => /^(city|town)$/i.test(key.trim()))?.[1]?.trim() || "\uffff"].join("|").toLowerCase();
   const shown = order === "newest" ? [...filtered].sort((left, right) => addedAt(right) - addedAt(left)) : order === "location" ? [...filtered].sort((left, right) => place(left).localeCompare(place(right))) : view === "callbacks" ? [...filtered].sort((left, right) => (left.due || "").localeCompare(right.due || "")) : filtered;
   const counts = { all: upcoming.length, new: upcoming.filter((lead) => lead.status === "New" && !isCallback(lead)).length, callbacks: upcoming.filter(isCallback).length };
-  // The script of the lead's first campaign that has one.
-  const scriptCampaign = scriptCampaignOf(selected, state.campaignSettings || {});
+  const scriptCampaign = selected.campaigns?.includes(campaign) && (state.campaignSettings?.[campaign]?.script || state.campaignSettings?.[campaign]?.pdf) ? campaign : undefined;
   const script = scriptCampaign ? state.campaignSettings![scriptCampaign] : undefined;
   // Pinned details (picked per campaign by the owner) sit at the top; the rest are grouped as before.
   const pinCampaign = scriptCampaign || selected.campaigns?.[0];
@@ -2405,7 +2426,7 @@ function Queue({
   const sourcesSection = section("@sources", "Sources & history", groups.sources);
   // While calling, clean the script values of this lead and the next 4 in the background (5 at a time, saved once).
   const nextFive = [selected, ...upcoming.filter((lead) => lead.id !== selected.id).slice(0, 4)];
-  const pending = state.ai?.ready ? cleanupItems(nextFive, state.campaignSettings || {}) : [];
+  const pending = state.ai?.ready ? cleanupItems(nextFive, state.campaignSettings || {}, false, campaign) : [];
   const pendingKey = pending.map((item) => `${item.leadId}:${item.variable}:${item.text}`).join("|");
   const asked = useRef(new Set<string>());
   const [cleaning, setCleaning] = useState(false);
@@ -2619,7 +2640,7 @@ function Queue({
                 <div className="call-script-full__tools">
                   {script.pdf && <button type="button" className="quiet-button" onClick={() => onOpenPdf(scriptCampaign)}><FileText size={16} aria-hidden="true" /> Open {script.pdf.name}</button>}
                   <button type="button" className="quiet-button" onClick={() => onEditScript(scriptCampaign)}>Edit script</button>
-                  {cleanable && <button type="button" className="quiet-button" disabled={cleaning} onClick={() => void clean(cleanupItems([selected], state.campaignSettings || {}, true), true)}><Sparkles size={16} aria-hidden="true" /> {cleaning ? "Cleaning…" : "Regenerate"}</button>}
+                  {cleanable && <button type="button" className="quiet-button" disabled={cleaning} onClick={() => void clean(cleanupItems([selected], state.campaignSettings || {}, true, campaign), true)}><Sparkles size={16} aria-hidden="true" /> {cleaning ? "Cleaning…" : "Regenerate"}</button>}
                 </div>
                 {script.script && <ScriptView text={script.script} lead={selected} variables={script.variables} />}
                 {script.pdf && !script.script && <PdfPages campaign={scriptCampaign} />}
@@ -3145,9 +3166,9 @@ function scriptCampaignOf(lead: Lead, settings: Record<string, CampaignSettings>
   return lead.campaigns?.find((name) => settings[name]?.script || settings[name]?.pdf);
 }
 // What still needs AI cleanup for these leads: variables with an example or notes whose value has no cleaned version yet.
-function cleanupItems(leads: Lead[], settings: Record<string, CampaignSettings>, force = false) {
+function cleanupItems(leads: Lead[], settings: Record<string, CampaignSettings>, force = false, selectedCampaign?: string) {
   return leads.flatMap((lead) => {
-    const campaign = scriptCampaignOf(lead, settings);
+    const campaign = selectedCampaign ? (lead.campaigns?.includes(selectedCampaign) && settings[selectedCampaign]?.script ? selectedCampaign : undefined) : scriptCampaignOf(lead, settings);
     const config = campaign ? settings[campaign] : undefined;
     return Object.keys(config?.clean || {}).flatMap((variable) => {
       const text = rawVariable(variable, lead, config!.variables);
@@ -4233,12 +4254,30 @@ function PickCampaign({ title, body, campaigns, detail, onPick }: { title: strin
   );
 }
 
+function ScriptPreview({ item, campaign, onClose, onEdit }: { item: CampaignScript; campaign: string; onClose: () => void; onEdit: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => { dialogRef.current?.showModal(); }, []);
+  return <dialog ref={dialogRef} className="script-preview" aria-labelledby="script-preview-title" onClose={onClose}>
+    <div className="script-preview__toolbar"><button type="button" className="script-preview__back" onClick={onClose}><ArrowRight size={16} aria-hidden="true" /> All scripts</button><button type="button" className="quiet-button" onClick={onEdit}>Edit script</button></div>
+    <article className="script-preview__page">
+      <header className="script-preview__header">
+        <div className="script-preview__symbol" aria-hidden="true"><ScrollText size={24} /></div>
+        <div><p className="script-preview__campaign">{campaign}</p><h2 id="script-preview-title">{item.name}</h2></div>
+      </header>
+      <div className="script-preview__divider"><span>THE SCRIPT</span><span aria-hidden="true" /></div>
+      <div className="script-preview__body">{item.script.trim() ? <ScriptView text={item.script} /> : <p>No script text yet.</p>}</div>
+      <footer className="script-preview__end"><ScrollText size={16} aria-hidden="true" /><span>End of script</span></footer>
+    </article>
+  </dialog>;
+}
+
 // Scripts, per campaign: every script it has, and a radio to pick the one the call screen shows.
 // A campaign has to be picked first (left), so it's always clear whose scripts you're looking at and adding to.
-function ScriptsPage({ leads, settings, campaign, onPick, onEdit, onChanged }: { leads: Lead[]; settings: Record<string, CampaignSettings>; campaign: string; onPick: (name: string) => void; onEdit: (name: string, tab: CampaignTab, scriptId?: string) => void; onChanged: (message: string) => Promise<void> }) {
+function ScriptsPage({ leads, calls, settings, campaign, onPick, onEdit, onChanged }: { leads: Lead[]; calls: CallRecord[]; settings: Record<string, CampaignSettings>; campaign: string; onPick: (name: string) => void; onEdit: (name: string, tab: CampaignTab, scriptId?: string) => void; onChanged: (message: string) => Promise<void> }) {
   const all = allCampaigns(leads, settings);
   const names = all.includes(campaign) ? [campaign] : [];
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<{ campaign: string; item: CampaignScript } | null>(null);
   const change = async (name: string, body: Record<string, string>, message: string) => {
     setBusy(true);
     try {
@@ -4252,7 +4291,7 @@ function ScriptsPage({ leads, settings, campaign, onPick, onEdit, onChanged }: {
   };
   return (
     <section className="scripts-page">
-      <p className="scripts-page__lede">The campaign's scripts. The one you pick is the one the call screen shows.</p>
+      <p className="scripts-page__lede">Choose the script to use when calling. Performance comes from logged outcomes.</p>
       {!all.length && <div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div>}
       {all.length > 0 && <div>
       {!names.length && <PickCampaign title="Scripts belong to one campaign" body="Pick the campaign whose scripts you want to see, add to or switch. The sidebar switches to it too." campaigns={all} detail={(name) => { const count = campaignScripts(settings[name] || {}).length; return `${count} script${count === 1 ? "" : "s"}`; }} onPick={onPick} />}
@@ -4261,30 +4300,37 @@ function ScriptsPage({ leads, settings, campaign, onPick, onEdit, onChanged }: {
         const scripts = campaignScripts(own);
         const inUse = scripts.some((item) => item.id === own.activeScript) ? own.activeScript : scripts[0]?.id;
         const count = leads.filter((lead) => lead.campaigns?.includes(name)).length;
+        const performance = scripts.map((script) => {
+          const attempts = calls.filter((call) => call.scriptCampaign === name && call.scriptId === script.id);
+          const results = attempts.map((call) => calls.find((result) => result.sourceCallId === call.id)).filter((call): call is CallRecord => Boolean(call));
+          const connects = results.filter((call) => conversationOutcomes.includes(call.outcome)).length;
+          const meetings = results.filter((call) => call.outcome === "Meeting booked").length;
+          return { id: script.id, attempts: attempts.length, results: results.length, connects, meetings };
+        });
+        const eligible = performance.filter((item) => item.connects >= 20 && item.meetings > 0).sort((left, right) => right.meetings / right.connects - left.meetings / left.connects);
+        const leader = eligible.length >= 2 && eligible[0].meetings / eligible[0].connects > eligible[1].meetings / eligible[1].connects ? eligible[0].id : null;
         return (
-          <section className="scripts-campaign" key={name} aria-labelledby={`scripts-${name}`}>
+          <section className="scripts-campaign" key={name} aria-label={`Scripts for ${name}`}>
             <header>
-              <h2 id={`scripts-${name}`}>{name}</h2>
-              <span>{count} lead{count === 1 ? "" : "s"}{own.pdf ? " · PDF attached" : ""}</span>
+              <div><h2>{name}</h2><span>{count} lead{count === 1 ? "" : "s"}{own.pdf ? " · PDF attached" : ""}</span></div>
               <button type="button" className="quiet-button" onClick={() => onEdit(name, "variables")}>Variables</button>
             </header>
             {!scripts.length && <p className="scripts-campaign__empty">No script yet. <button type="button" className="text-link" onClick={() => onEdit(name, "script", "new")}>Write the first one</button></p>}
-            <ul role="radiogroup" aria-label={`Script the call screen shows for ${name}`}>
+            <ul className="script-cards" aria-label={`Scripts for ${name}`}>
               {scripts.map((item) => {
                 const variables = scriptVariables(item.script).length;
                 const rules = scriptRules(item.script).length;
+                const { attempts, results, connects, meetings } = performance.find((entry) => entry.id === item.id)!;
                 return (
-                  <li key={item.id} className={item.id === inUse ? "is-in-use" : undefined}>
-                    <label>
-                      <input type="radio" name={`in-use-${name}`} checked={item.id === inUse} disabled={busy} onChange={() => void change(name, { activate: item.id }, `${item.name} is now the script for ${name}.`)} />
-                      <span>
-                        <b>{item.name}</b>
-                        <small>{[`${variables} variable${variables === 1 ? "" : "s"}`, rules ? `${rules} only-if rule${rules === 1 ? "" : "s"}` : "", item.script.split("\n").find((line) => line.trim())?.replace(/^\s*(#+|>|-|note:)\s*/i, "").slice(0, 80) || "Empty"].filter(Boolean).join(" · ")}</small>
-                      </span>
-                      {item.id === inUse && <em>In use</em>}
-                    </label>
-                    <button type="button" className="text-link" onClick={() => onEdit(name, "script", item.id)}>Edit</button>
-                    <button type="button" className="text-link" disabled={busy} onClick={() => { if (window.confirm(`Delete ${item.name}? This cannot be undone.`)) void change(name, { remove: item.id }, `${item.name} deleted.`); }}>Delete</button>
+                  <li key={item.id} className={`script-card${item.id === inUse ? " is-in-use" : ""}`}>
+                    <div className="script-card__heading"><div className="script-card__title"><span className="script-card__icon" aria-hidden="true"><ScrollText size={16} /></span><h3><button type="button" className="script-card__open" onClick={() => setPreview({ campaign: name, item })} aria-label={`Preview ${item.name}`}>{item.name}</button></h3></div>{item.id === inUse && <span className="script-card__badge">In use</span>}</div>
+                    <p className="script-card__meta">{variables} variable{variables === 1 ? "" : "s"}{rules ? ` · ${rules} only-if rule${rules === 1 ? "" : "s"}` : ""}</p>
+                    <div className="script-card__performance"><b>Script performance · All time{item.id === leader ? " · Highest meeting rate" : ""}</b>{attempts ? <><span>{attempts} call{attempts === 1 ? "" : "s"} · {connects} connect{connects === 1 ? "" : "s"} · {meetings} meeting{meetings === 1 ? "" : "s"}</span><span>{connects ? `${Math.round(meetings / connects * 100)}% meeting rate${connects < 20 ? " · Early results" : ""}` : "No logged connects yet"}{attempts > results ? ` · ${attempts - results} without a linked outcome` : ""}</span></> : <span>No tracked calls yet. Results start with new calls.</span>}</div>
+                    <div className="script-card__actions">
+                      {item.id !== inUse && <button type="button" className="quiet-button" disabled={busy} onClick={() => void change(name, { activate: item.id }, `${item.name} is now the script for ${name}.`)}>Use this script</button>}
+                      <button type="button" className="text-link" onClick={() => onEdit(name, "script", item.id)}>Edit</button>
+                      <button type="button" className="text-link" disabled={busy} onClick={() => { if (window.confirm(`Delete ${item.name}? This cannot be undone.`)) void change(name, { remove: item.id }, `${item.name} deleted.`); }}>Delete</button>
+                    </div>
                   </li>
                 );
               })}
@@ -4293,6 +4339,7 @@ function ScriptsPage({ leads, settings, campaign, onPick, onEdit, onChanged }: {
         );
       })}
       </div>}
+      {preview && <ScriptPreview item={preview.item} campaign={preview.campaign} onClose={() => setPreview(null)} onEdit={() => { setPreview(null); onEdit(preview.campaign, "script", preview.item.id); }} />}
     </section>
   );
 }
@@ -4719,7 +4766,22 @@ function leadsPlace(leads: Lead[]) {
   const city = top(located.filter((place) => place.state![0] === code && place.city).map((place) => place.city));
   return { label: city ? `${city}, ${code}` : state[1], search: city || state[1], state: state[1] };
 }
-const weatherCache = new Map<string, Promise<{ temperature: number; code: number } | null>>();
+const weatherIcons = import.meta.glob<string>("/node_modules/@meteocons/svg/flat/{clear-day,clear-night,partly-cloudy-day,partly-cloudy-night,cloudy,fog,drizzle,rain,snow,thunderstorms}.svg", { eager: true, query: "?url", import: "default" });
+const stillWeatherIcons = import.meta.glob<string>("/node_modules/@meteocons/svg-static/flat/{clear-day,clear-night,partly-cloudy-day,partly-cloudy-night,cloudy,fog,drizzle,rain,snow,thunderstorms}.svg", { eager: true, query: "?url", import: "default" });
+function weatherIcon(code: number, day: boolean) {
+  if (code === 0) return day ? "clear-day" : "clear-night";
+  if (code <= 2) return day ? "partly-cloudy-day" : "partly-cloudy-night";
+  if (code === 3) return "cloudy";
+  if (code <= 48) return "fog";
+  if (code <= 57) return "drizzle";
+  if (code <= 67) return "rain";
+  if (code <= 77) return "snow";
+  if (code <= 82) return "rain";
+  if (code <= 86) return "snow";
+  return "thunderstorms";
+}
+type CurrentWeather = { temperature: number; code: number; day: boolean };
+const weatherCache = new Map<string, Promise<CurrentWeather | null>>();
 function fetchWeather(place: { search: string; state: string }) {
   const key = `${place.search}|${place.state}`;
   if (!weatherCache.has(key))
@@ -4728,28 +4790,36 @@ function fetchWeather(place: { search: string; state: string }) {
       const results: { latitude: number; longitude: number; name: string; admin1?: string }[] = found.results || [];
       const spot = results.find((result) => result.admin1 === place.state || result.name === place.state) || results[0];
       if (!spot) return null;
-      const weather = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${spot.latitude}&longitude=${spot.longitude}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`).then((response) => response.json());
+      const weather = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${spot.latitude}&longitude=${spot.longitude}&current=temperature_2m,weather_code,is_day&temperature_unit=fahrenheit`).then((response) => response.json());
       const current = weather.current;
-      return typeof current?.temperature_2m === "number" ? { temperature: Math.round(current.temperature_2m), code: current.weather_code } : null;
+      return typeof current?.temperature_2m === "number" && typeof current?.weather_code === "number" ? { temperature: Math.round(current.temperature_2m), code: current.weather_code, day: current.is_day !== 0 } : null;
     })().catch(() => null));
   return weatherCache.get(key)!;
 }
 function WeatherCard({ leads }: { leads: Lead[] }) {
   const place = leadsPlace(leads);
-  const [weather, setWeather] = useState<{ temperature: number; code: number } | null>(null);
+  const key = place ? `${place.search}|${place.state}` : "";
+  const [result, setResult] = useState<{ key: string; weather: CurrentWeather | null } | null>(null);
   useEffect(() => {
     let live = true;
-    setWeather(null);
-    if (place) void fetchWeather(place).then((result) => { if (live) setWeather(result); });
+    if (place) void fetchWeather(place).then((weather) => { if (live) setResult({ key, weather }); });
     return () => { live = false; };
-  }, [place?.search, place?.state]);
-  // No place or no answer from the weather service: no card.
-  if (!place || !weather) return null;
+  }, [key]);
+  if (!place) return null;
+  const loading = result?.key !== key;
+  const weather = loading ? null : result.weather;
+  const icon = weather ? weatherIcon(weather.code, weather.day) : null;
   return (
-    <section className="analytics-card home-weather">
-      <h2>Weather in {place.label}</h2>
-      <p><b>{weather.temperature}°F</b> {weatherWords(weather.code)}</p>
-      <p className="field-hint">Where most of these leads are, right now.</p>
+    <section className="analytics-card home-weather" aria-busy={loading}>
+      <div className="home-weather__heading"><h2>Weather in {place.label}</h2><span>Right now</span></div>
+      {loading ? <div className="home-weather__current" role="status"><span className="sr-only">Loading weather</span><div aria-hidden="true"><span className="skeleton home-weather__skeleton-temperature" /><span className="skeleton home-weather__skeleton-condition" /></div><span className="skeleton home-weather__skeleton-icon" aria-hidden="true" /></div> : weather && icon ? <div className="home-weather__current">
+        <div><p className="home-weather__temperature">{weather.temperature}<span>°F</span></p><p className="home-weather__condition">{weatherWords(weather.code)}</p></div>
+        <picture aria-hidden="true">
+          <source media="(prefers-reduced-motion: reduce)" srcSet={stillWeatherIcons[`/node_modules/@meteocons/svg-static/flat/${icon}.svg`]} />
+          <img src={weatherIcons[`/node_modules/@meteocons/svg/flat/${icon}.svg`]} alt="" width="112" height="112" />
+        </picture>
+      </div> : <p className="home-weather__hint">Weather is unavailable right now.</p>}
+      <p className="home-weather__hint">Where most of your leads are</p>
     </section>
   );
 }
@@ -4784,7 +4854,7 @@ function Home({ state, all, followUps, onOpenLead, onStart, onGo }: { state: Sta
   const money = (value: number) => (value ? ` · $${value.toLocaleString()}` : "");
   const campaigns = campaignsOf(state.leads);
   return (
-    <section className="analytics-page">
+    <section className="analytics-page home-dashboard">
       <div className="analytics-grid">
         <section className="analytics-card">
           <h2>Today and this month</h2>
@@ -5106,8 +5176,9 @@ function DncList({ onClose, onSaved }: { onClose: () => void; onSaved: (message:
   return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="dnc-list-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="dnc-list-title">Do-not-call list</h2><p>Paste one phone number per line. Matching leads are immediately suppressed.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Phone numbers<textarea value={numbers} onChange={(event) => setNumbers(event.target.value)} placeholder={"+15551234567\n+15557654321"} required /></label><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Suppress numbers"}</button></form></div>;
 }
 
-function CallOutcome({ lead, automations, settings, bookingUrl, onBook, onClose, onSaved }: { lead: Lead; automations?: Automation[]; settings: Record<string, CampaignSettings>; bookingUrl: string; onBook: () => void; onClose: () => void; onSaved: (outcome: string) => Promise<void> }) {
+function CallOutcome({ lead, callId, automations, settings, bookingUrl, onBook, onClose, onSaved }: { lead: Lead; callId?: string; automations?: Automation[]; settings: Record<string, CampaignSettings>; bookingUrl: string; onBook: () => void; onClose: () => void; onSaved: (outcome: string) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
+  const [linkToCall, setLinkToCall] = useState(Boolean(callId));
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState("");
   const [followUpAt, setFollowUpAt] = useState("");
@@ -5121,13 +5192,14 @@ function CallOutcome({ lead, automations, settings, bookingUrl, onBook, onClose,
   };
   // A callback or a meeting without a time never becomes a task, so those two need one.
   const needsDate = outcome === "Callback" || outcome === "Meeting booked";
-  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt") }) }); await onSaved(String(form.get("outcome"))); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
+  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, callId: linkToCall ? callId : undefined, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt") }) }); await onSaved(String(form.get("outcome"))); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
   return (
     <div className="modal-backdrop">
       <form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="outcome-title">
         <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
         <h2 id="outcome-title">Log call outcome</h2>
         <p>Record the result for {leadLabel(lead)}. This updates the lead and call history, then moves you to the next lead.</p>
+        {callId && <label><span><input type="checkbox" checked={linkToCall} onChange={(event) => setLinkToCall(event.target.checked)} /> Link this result to your last call to this lead</span></label>}
         {error && <p className="form-error" role="alert">{error}</p>}
         <label>Outcome<select name="outcome" value={outcome} onChange={(event) => pickOutcome(event.target.value)} required><option value="" disabled>Choose what happened…</option><option>Interested</option><option>Meeting booked</option><option>Callback</option><option>Maybe later</option><option>No answer</option><option>Busy</option><option>Voicemail</option><option>Not interested</option><option>Wrong number</option><option>Do not call</option></select></label>
         {outcome === "Meeting booked" && (bookingUrl
