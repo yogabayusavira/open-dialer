@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="public/logo.png">
-  <img src="public/logo-ink.png" alt="Open Dialer" height="72">
+  <img src="docs/logo-light.png" alt="Open Dialer" height="72">
 </picture>
 
 **An outbound calling CRM you run yourself.**
