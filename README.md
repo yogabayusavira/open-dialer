@@ -134,6 +134,18 @@ Using Claude Code, Codex or another coding agent? Paste this:
 Open Dialer runs just as well on a server, so your team can use it from anywhere and nothing needs to stay open on your
 computer. A server has a fixed public address, so it needs no tunnel and no cloudflared.
 
+### Hosting and availability
+
+The current Open Dialer app requires a running Node.js service and a PostgreSQL database. Its backend handles
+requests and runs scheduled jobs in the same process. Deploying the app unchanged as an event-only serverless
+function on Cloudflare Pages or Vercel is not supported. Hosting only the frontend there does not provide the
+backend or database. Choose hosting that keeps the service available, including when idle.
+
+Cloudflare Tunnel can make a locally running Open Dialer reachable by Twilio, but it cannot keep the app online
+when the computer, app, internet connection, or tunnel is off. Temporary tunnel addresses can change on restart.
+Twilio Functions and other serverless services can handle call and SMS webhooks separately, but they do not run
+the full Open Dialer app without additional development.
+
 You need:
 
 - a server or hosting platform that runs Docker (a VPS with Dokploy or Coolify, Railway, Render, Fly.io…),
