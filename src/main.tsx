@@ -15,6 +15,7 @@ import {
   ClipboardList,
   ExternalLink,
   FileUp,
+  FileDown,
   Filter,
   LoaderCircle,
   LockKeyhole,
@@ -72,6 +73,8 @@ import {
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
+import { exampleAutomations, flowGraph, n8nTemplate, openDialerExport } from "./automation-export";
+import type { Automation, AutomationStep, AutomationTrigger, ConditionOp, FlowEdge, FlowNode } from "./automation-export";
 import { money, prices } from "./prices";
 import { about } from "./about";
 import { roadmap } from "./roadmap";
@@ -131,32 +134,6 @@ type CampaignScript = { id: string; name: string; script: string };
 type CampaignSettings = { script?: string; scripts?: CampaignScript[]; activeScript?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[]; transcribe?: boolean };
 // The workspace's automations, n8n style: a trigger (with the campaigns it listens to, none meaning any), then
 // nodes connected into branches (see FlowNode / FlowEdge). An "If" sends the lead down Yes or No.
-type AutomationTrigger = "lead" | "outcome" | "voicemail" | "transcribed";
-type ConditionOp = "is" | "is not" | "contains" | "is empty" | "is not empty";
-type AutomationStep =
-  | { type: "if"; field: string; op: ConditionOp; value: string }
-  | { type: "say"; text: string }
-  | { type: "ask"; prompt: string; field: string }
-  | { type: "wait"; amount: number; unit: "minutes" | "hours" | "days" }
-  | { type: "email"; to: string; subject: string; body: string }
-  | { type: "sms"; text: string }
-  | { type: "play"; recordingId: string }
-  | { type: "stage"; stage: string }
-  | { type: "followup"; days: number };
-// n8n-style graph: the trigger is node "trigger" (step null); a connection runs from a node's output ("out", or
-// "yes"/"no" on an If) to another node. One output can feed several nodes. `steps` is the pre-graph list format.
-type FlowNode = { id: string; step: AutomationStep | null; x: number; y: number };
-type FlowEdge = { from: string; port: "out" | "yes" | "no"; to: string };
-type Automation = { id: string; name: string; on: boolean; trigger: AutomationTrigger; campaigns?: string[]; outcomes?: string[]; nodes?: FlowNode[]; edges?: FlowEdge[]; steps?: AutomationStep[] };
-// An automation's graph; an old step list becomes a left-to-right chain (an If's Yes carries on), as on the server.
-function flowGraph(item: Automation): { nodes: FlowNode[]; edges: FlowEdge[] } {
-  if (item.nodes?.length) return { nodes: item.nodes, edges: item.edges || [] };
-  const steps = item.steps || [];
-  return {
-    nodes: [{ id: "trigger", step: null, x: 0, y: 0 }, ...steps.map((step, index) => ({ id: `s${index}`, step, x: (index + 1) * 300, y: 0 }))],
-    edges: steps.map((_, index) => ({ from: index ? `s${index - 1}` : "trigger", port: (index && steps[index - 1]?.type === "if" ? "yes" : "out") as FlowEdge["port"], to: `s${index}` })),
-  };
-}
 const flowSteps = (item: Automation) => flowGraph(item).nodes.flatMap((node) => (node.step ? [node.step] : []));
 // Whether `start` already reaches `target`; a connection target -> start would then make a loop.
 function flowReaches(edges: FlowEdge[], start: string, target: string) {
@@ -4435,6 +4412,19 @@ function triggerSummary(item: Automation) {
 // A step isn't done until its main field is filled in.
 const stepReady = (step: AutomationStep) => (step.type === "if" ? Boolean(step.field) : step.type === "say" ? Boolean(step.text.trim()) : step.type === "ask" ? Boolean(step.prompt.trim() && step.field.trim()) : step.type === "email" ? Boolean(step.to && step.subject.trim() && step.body.trim()) : step.type === "sms" ? Boolean(step.text.trim()) : step.type === "play" ? Boolean(step.recordingId) : true);
 
+function AutomationExport({ item }: { item: Automation }) {
+  const download = (format: "open-dialer" | "n8n") => {
+    const data = format === "n8n" ? n8nTemplate(item) : openDialerExport(item);
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${item.name.trim().replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "automation"}-${format}.json`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  return <details className="automation-export"><summary><FileDown size={15} aria-hidden="true" /> Export</summary><div className="automation-export__menu"><button type="button" aria-label="Download Open Dialer JSON" onClick={() => download("open-dialer")}>Open Dialer JSON</button><button type="button" aria-label="Download n8n template" onClick={() => download("n8n")}>n8n template</button><p>The n8n template preserves the diagram. Set up its triggers and actions in n8n before using it.</p></div></details>;
+}
+
 // The Automations page: every automation in the workspace. New ones start by picking a trigger, then open on the
 // canvas, where the trigger node says which campaigns it listens to.
 function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpenVault }: { automations: Automation[]; leads: Lead[]; settings: Record<string, CampaignSettings>; vault: Recording[]; onRefresh: () => Promise<unknown>; onOpenVault: () => void }) {
@@ -4443,14 +4433,18 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
   const [created, setCreated] = useState<Automation | null>(null);
   const [picking, setPicking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const list = automations;
   const save = async (next: Automation[]) => {
     setError(null);
+    setSaving(true);
     try {
       await api("/api/automations", { method: "PUT", body: JSON.stringify({ automations: next }) });
       await onRefresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Couldn't save the automation.");
+    } finally {
+      setSaving(false);
     }
   };
   const create = (trigger: AutomationTrigger) => {
@@ -4474,7 +4468,7 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
     <section className="flow-page">
       <div className="campaigns-head">
         <p>Choose what starts an automation, then build its steps. New automations stay off until you turn them on.</p>
-        <div className="campaigns-head__actions"><button type="button" className="primary-button" onClick={() => setPicking(true)}><Plus size={16} aria-hidden="true" /> New automation</button></div>
+        <div className="campaigns-head__actions"><button type="button" className="quiet-button" disabled={saving || ["Example · Friendly opening reminder", "Example · Follow up after no answer"].every((name) => list.some((item) => item.name === name)) || list.length >= 50} onClick={() => { const missing = exampleAutomations().filter((example) => !list.some((item) => item.name === example.name)); if (list.length + missing.length > 50) return setError("There isn't room for both examples. Remove an automation first."); void save([...list, ...missing]); }}>Add examples</button><button type="button" className="primary-button" onClick={() => setPicking(true)}><Plus size={16} aria-hidden="true" /> New automation</button></div>
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
       {list.length ? (
@@ -4491,6 +4485,7 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
                   <input type="checkbox" role="switch" checked={item.on} onChange={() => void save(list.map((entry) => (entry.id === item.id ? { ...entry, on: !entry.on } : entry)))} />
                   <span>{item.on ? "Active" : "Off"}</span>
                 </label>
+                <AutomationExport item={item} />
               </article>
             );
           })}
@@ -4626,6 +4621,7 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
           <input type="checkbox" role="switch" checked={draft.on} onChange={() => change({ ...draft, on: !draft.on })} />
           <span>{draft.on ? "Active" : "Off"}</span>
         </label>
+        <AutomationExport item={draft} />
         <button type="button" className="text-link" onClick={() => { if (window.confirm(`Delete ${draft.name}?`)) { dirty.current = false; onDelete(); } }}><Trash2 size={16} aria-hidden="true" /> Delete</button>
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}

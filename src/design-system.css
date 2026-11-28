@@ -1289,13 +1289,22 @@ button.flow-node:hover { border-color: var(--color-accent-text); transform: tran
 /* Automations, n8n style: the list, the canvas chain, and the pickers in the side panel. */
 .automation-list { display: grid; gap: var(--space-2); }
 .automation-row { display: flex; align-items: center; gap: var(--space-3); padding-right: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-surface); background: var(--color-surface); }
-.automation-row.is-off { opacity: 0.65; }
+.automation-row:has(.automation-export[open]) { position: relative; z-index: 2; }
+.automation-row.is-off .automation-row__icon { opacity: 0.65; }
 .automation-row__open { display: flex; flex: 1; align-items: center; gap: var(--space-3); min-width: 0; padding: var(--space-3) var(--space-4); border: 0; background: none; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; }
 .automation-row__open:hover b { color: var(--color-accent-text); }
 .automation-row__icon { display: grid; flex: none; place-items: center; width: 40px; height: 40px; border: 1px solid var(--color-border); border-radius: 10px; color: var(--color-warn, #d69e2e); }
 .automation-row__text { display: grid; gap: 2px; min-width: 0; }
 .automation-row__text b { font-size: var(--font-size-body); font-weight: 600; }
 .automation-row__text small { overflow: hidden; color: var(--color-text-muted); font-size: var(--font-size-label); text-overflow: ellipsis; white-space: nowrap; }
+.automation-export { position: relative; flex: none; }
+.automation-export summary { display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-2); border-radius: var(--radius-control); color: var(--color-text-muted); font-size: var(--font-size-meta); font-weight: 600; cursor: pointer; list-style: none; }
+.automation-export summary::-webkit-details-marker { display: none; }
+.automation-export summary:hover, .automation-export[open] summary { color: var(--color-accent-text); background: var(--color-accent-subtle); }
+.automation-export__menu { position: absolute; z-index: 20; top: calc(100% + 4px); right: 0; width: 260px; padding: var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-surface); box-shadow: var(--shadow-dialog); }
+.automation-export__menu button { display: block; width: 100%; padding: var(--space-2) var(--space-3); border: 0; border-radius: var(--radius-control); background: transparent; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; }
+.automation-export__menu button:hover { background: var(--color-accent-subtle); }
+.automation-export__menu p { margin: var(--space-2) var(--space-3); color: var(--color-text-muted); font-size: var(--font-size-meta); line-height: 1.45; }
 .automation-switch { display: inline-flex; flex: none; align-items: center; gap: var(--space-2); color: var(--color-text-muted); font-size: var(--font-size-meta); cursor: pointer; }
 .automation-switch input { appearance: none; position: relative; width: 34px; height: 20px; margin: 0; border-radius: 10px; background: var(--color-border-strong); cursor: pointer; transition: background 120ms ease; }
 .automation-switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform 120ms ease; }
