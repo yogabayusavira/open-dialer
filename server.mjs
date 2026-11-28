@@ -533,7 +533,7 @@ function safeState(state) {
   const { key: emailKey, ...email } = state.email || {};
   return { ...state, connection: state.connection ? connection : null, ai: { ...ai, ready: Boolean(key || process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY) }, email: { ...email, saved: Boolean(emailKey), envFallback: Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL) } };
 }
-function activity(state, action, detail) {
+function activity(state, action, detail, leadId) {
   state.activity.unshift({
     id: `event_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     at: new Intl.DateTimeFormat("en", {
@@ -544,6 +544,7 @@ function activity(state, action, detail) {
     }).format(new Date()),
     action,
     detail,
+    ...(leadId ? { leadId } : {}),
   });
   state.activity = state.activity.slice(0, 500);
 }
@@ -1334,7 +1335,7 @@ async function route(req, res, url) {
           call.outcome = status === "completed" ? "Call ended" : "Didn't connect";
           call.note = describeCallResult(status, sipCode, report.ErrorCode, String(state.connection?.bridgeNumber || "").startsWith("sip:"), Boolean(report.ParentCallSid));
           const lead = state.leads.find((item) => item.id === leadId);
-          activity(state, call.outcome, `${lead ? leadLabel(lead) : "Lead"} · ${call.note}`);
+          activity(state, call.outcome, `${lead ? leadLabel(lead) : "Lead"} · ${call.note}`, lead?.id);
         }
         return true;
       };
@@ -2028,7 +2029,7 @@ async function route(req, res, url) {
         lead.value = amount;
       }
       if (typeof body.due === "string") lead.due = cleanText(body.due, 40) || "Unscheduled";
-      activity(state, lead.dnc ? "DNC suppression" : "Lead updated", `${leadLabel(lead)} · ${lead.company}`);
+      activity(state, lead.dnc ? "DNC suppression" : "Lead updated", `${leadLabel(lead)} · ${lead.company}`, lead.id);
       await writeState(state);
       return json(res, 200, lead);
     }
@@ -2040,11 +2041,11 @@ async function route(req, res, url) {
       if (done === true && !lead.taskDone) {
         lead.taskDone = { at: new Date().toISOString(), due: lead.due };
         lead.due = "Unscheduled";
-        activity(state, "Task done", `${leadLabel(lead)} · ${lead.status}`);
+        activity(state, "Task done", `${leadLabel(lead)} · ${lead.status}`, lead.id);
       } else if (done === false && lead.taskDone) {
         lead.due = lead.taskDone.due;
         delete lead.taskDone;
-        activity(state, "Task reopened", `${leadLabel(lead)} · ${lead.status}`);
+        activity(state, "Task reopened", `${leadLabel(lead)} · ${lead.status}`, lead.id);
       }
       await writeState(state);
       return json(res, 200, lead);
@@ -2080,7 +2081,7 @@ async function route(req, res, url) {
       else if (followUp) lead.due = followUp;
       else if (["Callback", "Maybe later", "Interested"].includes(outcome)) lead.due = "Follow up";
       if (call.note) lead.note = call.note;
-      activity(state, "Call outcome recorded", `${leadLabel(lead)} · ${outcome}`);
+      activity(state, "Call outcome recorded", `${leadLabel(lead)} · ${outcome}`, lead.id);
       // The newest transcribed call of this lead waits for its outcome before "Call transcribed" automations run.
       const heard = state.calls.find((item) => item.sid && item.leadId === lead.id && item.transcribing && !item.loggedOutcome);
       if (heard) heard.loggedOutcome = outcome;

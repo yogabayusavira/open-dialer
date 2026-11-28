@@ -183,7 +183,7 @@ type State = {
   tasks?: Task[];
   campaignSettings?: Record<string, CampaignSettings>;
   leads: Lead[];
-  activity: { id: string; at: string; action: string; detail: string }[];
+  activity: { id: string; at: string; action: string; detail: string; leadId?: string }[];
   connection: Connection | null;
   calls: CallRecord[];
   dncNumbers: string[];
@@ -204,6 +204,7 @@ type LinkResult = { emailed?: boolean; link?: string; emailError?: string };
 type NumberOption = { sid: string; number: string; label: string };
 type Session = { authenticated: boolean; firstRun?: boolean };
 type Screen = "home" | "queue" | "scripts" | "automations" | "voicemails" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "analytics" | "settings";
+type CallingRegion = { campaign: string; kind: "state" | "zone"; value: string };
 type SettingsArea = "general" | "account";
 type SettingsPage =
   | "numbers"
@@ -908,6 +909,7 @@ function App() {
   const [importOpen, setImportOpen] = useState<false | "leads" | "campaign">(false);
   const [dncOpen, setDncOpen] = useState(false);
   const [campaign, setCampaign] = useState(() => { try { return localStorage.getItem("open-dialer-campaign") || ""; } catch { return ""; } });
+  const [callingRegion, setCallingRegion] = useState<CallingRegion | null>(null);
   useEffect(() => { try { localStorage.setItem("open-dialer-campaign", campaign); } catch { /* private mode: keep it for this visit only */ } }, [campaign]);
   const [outcomeLead, setOutcomeLead] = useState<Lead | null>(null);
   const lastStartedCall = useRef<{ leadId: string; callId: string; startedAt: number } | null>(null);
@@ -1006,7 +1008,7 @@ function App() {
     const inCampaign = singleCampaign ? fresh.leads.filter((lead) => lead.campaigns?.includes(singleCampaign)) : fresh.leads;
     let keepPlace = false;
     try { keepPlace = localStorage.getItem("open-dialer-queue-order") === "inplace"; } catch { /* private mode */ }
-    const list = callQueue(inCampaign, fresh.calls, keepPlace);
+    const list = callQueue(inCampaign, fresh.calls, keepPlace).filter((lead) => !callingRegion || callingRegion.campaign !== singleCampaign || matchesCallingRegion(lead, callingRegion));
     // In place: go on down the list from the lead just called instead of jumping back to the top.
     const from = keepPlace ? list.findIndex((lead) => lead.id === exclude[exclude.length - 1]) + 1 : 0;
     return list.slice(from).find((lead) => !exclude.includes(lead.id)) || null;
@@ -1014,6 +1016,7 @@ function App() {
   // Select the next lead and, when calls go through the app, start the countdown to it.
   const advanceFrom = (fresh: State | undefined, done: Lead, message: string) => {
     const next = fresh ? nextInQueue(fresh, [done.id]) : null;
+    if (!next && callingRegion?.campaign === singleCampaign) return notifyWith(`${message} No more leads in this area.`, "Show all areas", () => setCallingRegion(null));
     if (!next) return notifyWith(`${message} That was the last lead in the queue.`, "Import more leads", () => { setScreen("leads"); setImportOpen("leads"); });
     setSelectedId(next.id);
     setNotice(message);
@@ -1393,7 +1396,7 @@ function App() {
             onSkip={() => {
               const skipped = [...autoNext.skipped, autoNext.lead.id];
               const next = nextInQueue(state, skipped);
-              if (!next) { setAutoNext(null); return notifyWith("No more leads in the queue.", "Import more leads", () => { setScreen("leads"); setImportOpen("leads"); }); }
+              if (!next) { setAutoNext(null); return callingRegion?.campaign === singleCampaign ? notifyWith("No more leads in this area.", "Show all areas", () => setCallingRegion(null)) : notifyWith("No more leads in the queue.", "Import more leads", () => { setScreen("leads"); setImportOpen("leads"); }); }
               setSelectedId(next.id);
               setAutoNext({ lead: next, seconds: autoDialSeconds, paused: autoNext.paused, skipped });
             }}
@@ -1419,6 +1422,15 @@ function App() {
           <Queue
             state={dialerScoped}
             campaign={singleCampaign}
+            region={callingRegion?.campaign === singleCampaign ? callingRegion : null}
+            onRegionChange={(next) => {
+              setAutoNext(null);
+              setCallingRegion(next);
+              if (next) {
+                const first = callQueue(dialerScoped.leads, state.calls).find((lead) => matchesCallingRegion(lead, next));
+                if (first) setSelectedId(first.id);
+              }
+            }}
             selected={scopedSelected}
             onSelect={setSelectedId}
             onPrepare={prepareCall}
@@ -1466,7 +1478,6 @@ function App() {
               setSelectedId(state.leads.find((lead) => !lead.dnc)?.id || null);
               setScreen("queue");
             }}
-            onOpenPhoneNumbers={() => setScreen("settings")}
             onUpgrade={() => setScreen("settings")}
           />
         )}
@@ -1647,7 +1658,6 @@ function CallHistory({
   leads,
   onStartDialing,
   onOpenDialer,
-  onOpenPhoneNumbers,
   onUpgrade,
   initialView,
   onOpenLead,
@@ -1656,7 +1666,6 @@ function CallHistory({
   leads: Lead[];
   onStartDialing: () => void;
   onOpenDialer: () => void;
-  onOpenPhoneNumbers: () => void;
   onUpgrade: () => void;
   initialView: "conversations" | "attempts" | "callbacks";
   onOpenLead: (id: string) => void;
@@ -1683,7 +1692,7 @@ function CallHistory({
     anchor.click();
     URL.revokeObjectURL(href);
   };
-  const subtitle = view === "conversations" ? `${entries.length} recorded conversations` : view === "attempts" ? `${entries.length} recorded call attempts` : `${entries.length} callbacks`;
+  const subtitle = view === "conversations" ? `${entries.length} recorded connects` : view === "attempts" ? `${entries.length} recorded call attempts` : `${entries.length} callbacks`;
 
   return (
     <section className="calls-page" aria-label="Calls">
@@ -1711,7 +1720,7 @@ function CallHistory({
           aria-selected={view === "conversations"}
           onClick={() => setView("conversations")}
         >
-          Conversations
+          Connects
         </button>
         <button
           className={view === "attempts" ? "is-active" : ""}
@@ -1762,7 +1771,7 @@ function CallHistory({
         </div>
       )}
 
-      {!entries.length ? <div className="calls-empty"><p>{isCallbacks ? "No callbacks are recorded yet." : "No calls match this view."}</p><span><button type="button" onClick={onStartDialing}>Open leads →</button> or <button type="button" onClick={onOpenPhoneNumbers}>review phone settings →</button></span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><button type="button" className="text-link" onClick={() => call.lead && onOpenLead(call.lead.id)}><b>{call.lead && leadLabel(call.lead)}</b></button><small>{call.lead?.company} · {call.lead && formatPhone(call.lead.phone, call.lead.extension)}</small></div><Status tone={call.outcome === "Do not call" || call.outcome === "Didn't connect" ? "alert" : call.outcome === "In progress" || call.outcome === "Call ended" ? "quiet" : "good"}>{call.outcome}</Status><div><small>{dueLabel(call.at).text}{call.seconds ? ` · ${clockOf(call.seconds)}` : ""}</small>{call.note && <p>{call.note}</p>}{call.transcript?.length ? <details className="call-transcript"><summary>Transcript · {call.transcript.length} line{call.transcript.length === 1 ? "" : "s"}</summary>{call.transcript.map((line, index) => <p key={index} className={`is-${line.who}`}><b>{line.who === "you" ? "You" : "Them"}</b> {line.text}</p>)}</details> : null}</div></article>)}</div>}
+      {!entries.length ? <div className="calls-empty"><p>{!calls.length ? "Your call history starts here." : isCallbacks ? "No callbacks match this view." : "No calls match this view."}</p><span>{!calls.length ? <>Make or log a call to see its result here. <button type="button" onClick={onStartDialing}>Open leads →</button></> : <>Try another view or date range. <button type="button" onClick={() => { setQuery(""); setOutcome("All outcomes"); setRange("All time"); setView("attempts"); }}>Show all attempts →</button></>}</span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><button type="button" className="text-link" onClick={() => call.lead && onOpenLead(call.lead.id)}><b>{call.lead && leadLabel(call.lead)}</b></button><small>{call.lead?.company} · {call.lead && formatPhone(call.lead.phone, call.lead.extension)}</small></div><Status tone={call.outcome === "Do not call" || call.outcome === "Didn't connect" ? "alert" : call.outcome === "In progress" || call.outcome === "Call ended" ? "quiet" : "good"}>{call.outcome}</Status><div><small>{dueLabel(call.at).text}{call.seconds ? ` · ${clockOf(call.seconds)}` : ""}</small>{call.note && <p>{call.note}</p>}{call.transcript?.length ? <details className="call-transcript"><summary>Transcript · {call.transcript.length} line{call.transcript.length === 1 ? "" : "s"}</summary>{call.transcript.map((line, index) => <p key={index} className={`is-${line.who}`}><b>{line.who === "you" ? "You" : "Them"}</b> {line.text}</p>)}</details> : null}</div></article>)}</div>}
     </section>
   );
 }
@@ -1837,6 +1846,9 @@ function leadState(lead: Lead) {
 function leadStateCode(lead: Lead) {
   return leadState(lead)?.[0] || null;
 }
+function matchesCallingRegion(lead: Lead, region: CallingRegion) {
+  return region.kind === "state" ? leadStateCode(lead) === region.value : leadZone(lead)?.zone === region.value;
+}
 
 // Tile grid of the US: one square per state, [code, column, row].
 const stateTiles: [string, number, number][] = [
@@ -1850,18 +1862,23 @@ const stateTiles: [string, number, number][] = [
   ["HI", 0, 7], ["TX", 3, 7], ["FL", 8, 7],
 ];
 
-function StateTileMap({ leads, current, zone }: { leads: Lead[]; current: string | null; zone: string | null }) {
+function StateTileMap({ leads, current, zone, region, onPick, disabled, now }: { leads: Lead[]; current: string | null; zone: string | null; region: CallingRegion | null; onPick: (code: string) => void; disabled: boolean; now: Date }) {
   const counts = new Map<string, number>();
-  for (const lead of leads) { const code = leadStateCode(lead); if (code) counts.set(code, (counts.get(code) || 0) + 1); }
+  const zonesByState = new Map<string, Set<string>>();
+  for (const lead of leads) { const code = leadStateCode(lead); if (code) { counts.set(code, (counts.get(code) || 0) + 1); const area = leadZone(lead)?.zone; if (area) { if (!zonesByState.has(code)) zonesByState.set(code, new Set()); zonesByState.get(code)!.add(area); } } }
   const size = 22, gap = 3;
   return (
-    <svg className="state-map" viewBox={`0 0 ${11 * (size + gap) - gap} ${8 * (size + gap) - gap}`} role="img" aria-label={`Leads by state${current ? `, current lead in ${current}` : ""}`}>
+    <svg className="state-map" viewBox={`0 0 ${11 * (size + gap) - gap} ${8 * (size + gap) - gap}`} role="group" aria-label="Filter the calling queue by state">
       {stateTiles.map(([code, col, row]) => {
         const count = counts.get(code) || 0;
+        const localZones = [...(zonesByState.get(code) || [])];
+        const localTimes = localZones.map((area) => `${zoneName(area)} ${zoneClock(area, now)?.label || ""}`).join(", ");
+        const description = `${stateZones.find(([c]) => c === code)?.[1] || code}: ${count} lead${count === 1 ? "" : "s"} in calling queue${localTimes ? ` · ${localTimes}` : ""}`;
         return (
-          <g key={code} className={[code === current && "is-current", zone && stateZones.find(([c]) => c === code)?.[2] === zone && "in-zone", count && "has-leads"].filter(Boolean).join(" ")}>
-            <title>{`${code}: ${count} lead${count === 1 ? "" : "s"}`}</title>
+          <g key={code} className={[code === current && "is-current", zone && zonesByState.get(code)?.has(zone) && "in-zone", count && "has-leads", region?.kind === "state" && region.value === code && "is-filtered"].filter(Boolean).join(" ")} {...(count && !disabled ? { role: "button", tabIndex: 0, "aria-label": description, "aria-pressed": region?.kind === "state" && region.value === code, onClick: () => onPick(code), onKeyDown: (event: React.KeyboardEvent<SVGGElement>) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onPick(code); } } } : { "aria-hidden": true })}>
+            <title>{description}</title>
             <rect x={col * (size + gap)} y={row * (size + gap)} width={size} height={size} rx={4} />
+            {count > 0 && <text x={col * (size + gap) + size / 2} y={row * (size + gap) + size / 2} textAnchor="middle" dominantBaseline="central" aria-hidden="true">{code}</text>}
           </g>
         );
       })}
@@ -1943,33 +1960,30 @@ function zoneName(zone: string) {
   return zoneNames.get(zone)!;
 }
 // One clock per time zone that has leads still to work, biggest first, plus your own time.
-function ZoneClocks({ leads, current, now }: { leads: Lead[]; current: string | null; now: Date }) {
+function ZoneClocks({ leads, current, now, region, onPick, disabled }: { leads: Lead[]; current: string | null; now: Date; region: CallingRegion | null; onPick: (zone: string) => void; disabled: boolean }) {
   const zones = new Map<string, { zone: string; count: number }>();
   for (const lead of leads) {
-    if (lead.dnc || ["Won", "Lost"].includes(lead.status)) continue;
     const found = leadZone(lead);
     if (!found) continue;
-    const name = zoneName(found.zone);
-    const entry = zones.get(name) || { zone: found.zone, count: 0 };
+    const entry = zones.get(found.zone) || { zone: found.zone, count: 0 };
     entry.count += 1;
-    zones.set(name, entry);
+    zones.set(found.zone, entry);
   }
   const rows = [...zones].sort((left, right) => right[1].count - left[1].count);
-  const shown = rows.slice(0, 4);
-  const currentName = current ? zoneName(current) : null;
   return (
     <ul className="zone-clocks" aria-label="Local times where your leads are">
-      {shown.map(([name, { zone, count }]) => {
+      {rows.map(([key, { zone, count }]) => {
+        const name = zoneName(zone);
+        const label = rows.filter(([, row]) => zoneName(row.zone) === name).length > 1 ? `${name} · ${zone.split("/").pop()!.replace(/_/g, " ")}` : name;
         const clock = zoneClock(zone, now);
         if (!clock) return null;
         const note = hoursNote(clock);
         return (
-          <li key={name} className={`${note.open ? "is-open" : ""}${name === currentName ? " is-current" : ""}`} title={`${count} lead${count === 1 ? "" : "s"} in ${name} time`}>
-            <i aria-hidden="true" />{name} <b>{clock.label}</b> <span>{note.text}</span>
+          <li key={key} className={`${note.open ? "is-open" : ""}${zone === current ? " is-current" : ""}`}>
+            <button type="button" disabled={disabled} aria-pressed={region?.kind === "zone" && region.value === zone} onClick={() => onPick(zone)}><i aria-hidden="true" /><span className="zone-clocks__name">{label}</span> <b>{clock.label}</b> <span>{count} lead{count === 1 ? "" : "s"} · {note.text}</span></button>
           </li>
         );
       })}
-      {rows.length > shown.length && <li title={rows.slice(shown.length).map(([name]) => name).join(", ")}>+{rows.length - shown.length} more</li>}
     </ul>
   );
 }
@@ -2106,13 +2120,14 @@ function Analytics({ calls, team, isOwner, onOpenCalls }: { calls: CallRecord[];
       <div className="analytics-head">
         <dl className="analytics-totals">
           <div><dt>Calls</dt><dd>{attempts.length}</dd></div>
-          <div><dt>Conversations</dt><dd>{conversations}</dd></div>
+          <div><dt>Connects</dt><dd>{conversations}</dd></div>
           <div><dt>Connect rate</dt><dd>{attempts.length ? `${Math.round((conversations / attempts.length) * 100)}%` : "–"}</dd></div>
         </dl>
         <div className="segmented" role="group" aria-label="Date range">
           {[7, 14, 30].map((days) => <button key={days} type="button" className={range === days ? "is-active" : ""} aria-pressed={range === days} onClick={() => setRange(days)}>{days} days</button>)}
         </div>
       </div>
+      <p className="analytics-definition">Connect rate is connects divided by call attempts. Connects are based on logged outcomes.</p>
       <CallsChart key={range} calls={calls} range={range} onOpenCalls={onOpenCalls} />
       <div className="analytics-grid">
         <section className="analytics-card">
@@ -2130,7 +2145,7 @@ function Analytics({ calls, team, isOwner, onOpenCalls }: { calls: CallRecord[];
             <h2>Calls by person</h2>
             {callerRows.length ? (
               <table className="analytics-table">
-                <thead><tr><th scope="col">Person</th><th scope="col">Calls</th><th scope="col">Conversations</th></tr></thead>
+                <thead><tr><th scope="col">Person</th><th scope="col">Calls</th><th scope="col">Connects</th></tr></thead>
                 <tbody>{callerRows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.calls}</td><td>{row.conversations}</td></tr>)}</tbody>
               </table>
             ) : <p className="analytics-empty">No calls in the last {range} days.</p>}
@@ -2197,14 +2212,14 @@ function CallsChart({ calls, range: chartDays = 14, onOpenCalls }: { calls: Call
           <p><b>{todayCount}</b> today · <b>{yesterday}</b> yesterday · <b>{average}</b> a day on average over the last {chartDays - 1} days</p>
         </div>
         <ul className="calls-chart__legend" aria-label="Legend">
-          <li><i className="is-conversation" aria-hidden="true" /> Conversations</li>
+          <li><i className="is-conversation" aria-hidden="true" /> Connects</li>
           <li><i className="is-other" aria-hidden="true" /> Other calls</li>
         </ul>
         <button type="button" className="quiet-button" onClick={onOpenCalls}>See calls</button>
       </header>
-      <div className="calls-chart__plot" ref={plot}>
-        {!total && <p className="calls-chart__empty">No calls logged in the last {chartDays} days. Calls you make or log in the app show up here.</p>}
-        <svg viewBox={`0 -14 ${width} ${height + 34}`} role="img" aria-hidden="true">
+      <div className={`calls-chart__plot${total ? "" : " is-empty"}`} ref={plot}>
+        {!total && <p className="calls-chart__empty">No calls logged in the last {chartDays} days. Your calling trend will appear here.</p>}
+        {Boolean(total) && <svg viewBox={`0 -14 ${width} ${height + 34}`} role="img" aria-hidden="true">
           {[0.5, 1].map((share) => (
             <g key={share} className="calls-chart__grid">
               <line x1="0" x2={width} y1={y(top * share)} y2={y(top * share)} />
@@ -2229,18 +2244,18 @@ function CallsChart({ calls, range: chartDays = 14, onOpenCalls }: { calls: Call
               </g>
             );
           })}
-        </svg>
+        </svg>}
         {hover !== null && (
           <div className="calls-chart__tip" style={{ left: `${((hover + 0.5) / chartDays) * 100}%` }}>
             <b>{hover === chartDays - 1 ? "Today" : new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(days[hover].date)}</b>
             <span>{days[hover].calls} call{days[hover].calls === 1 ? "" : "s"}</span>
-            <span>{days[hover].conversations} conversation{days[hover].conversations === 1 ? "" : "s"}</span>
+            <span>{days[hover].conversations} connect{days[hover].conversations === 1 ? "" : "s"}</span>
           </div>
         )}
       </div>
       <table className="sr-only">
         <caption>Calls per day</caption>
-        <thead><tr><th scope="col">Day</th><th scope="col">Calls</th><th scope="col">Conversations</th></tr></thead>
+        <thead><tr><th scope="col">Day</th><th scope="col">Calls</th><th scope="col">Connects</th></tr></thead>
         <tbody>{days.map((day) => <tr key={day.key}><td>{label(day.date)}</td><td>{day.calls}</td><td>{day.conversations}</td></tr>)}</tbody>
       </table>
     </section>
@@ -2270,7 +2285,7 @@ function CallStrip({ calls, onOpen }: { calls: CallRecord[]; onOpen: () => void 
 type StatTarget = "calls-today" | "conversations" | "followups" | "to-call";
 
 // setup is counted on the whole workspace (not the picked campaign), so it doesn't come and go with the campaign.
-function DashboardBanner({ state, selected, setup, onStart, onAddLead, onGuide, onGo }: { state: State; selected: Lead; setup: { done: number; total: number }; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void }) {
+function DashboardBanner({ state, selected, setup, onStart, onAddLead, onGuide, onGo, campaign, region, onRegionChange, calling }: { state: State; selected: Lead; setup: { done: number; total: number }; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void; campaign: string; region: CallingRegion | null; onRegionChange: (region: CallingRegion | null) => void; calling: boolean }) {
   const setupDone = setup.done;
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -2289,6 +2304,12 @@ function DashboardBanner({ state, selected, setup, onStart, onAddLead, onGuide, 
   const zone = leadZone(selected);
   const clock = zone && zoneClock(zone.zone, now);
   const inHours = clock ? clock.hour >= 8 && clock.hour < 21 : null;
+  const available = callQueue(state.leads, state.calls);
+  const pick = (kind: CallingRegion["kind"], value: string) => onRegionChange(region?.kind === kind && region.value === value ? null : { campaign, kind, value });
+  const options = new Map<string, number>();
+  for (const lead of available) { const area = leadZone(lead)?.zone; if (area) options.set(area, (options.get(area) || 0) + 1); }
+  const remaining = clock ? 21 * 60 - (clock.hour * 60 + clock.minute) : null;
+  const suggestion = clock && (!inHours || (remaining !== null && remaining <= 90)) ? [...options].filter(([area]) => area !== zone?.zone).map(([area, count]) => ({ area, count, clock: zoneClock(area, now) })).filter((item) => item.clock && hoursNote(item.clock).open && 21 * 60 - (item.clock.hour * 60 + item.clock.minute) > 90).sort((left, right) => right.count - left.count)[0] : null;
   return (
     <section className="dash-banner" aria-label="Today">
       <div className="dash-banner__head">
@@ -2296,17 +2317,21 @@ function DashboardBanner({ state, selected, setup, onStart, onAddLead, onGuide, 
         <div className="dash-banner__actions">
           {setupDone < setup.total && <button className="quiet-button" onClick={onGuide}><BadgeCheck size={16} /> Setup {setupDone}/{setup.total}</button>}
           <button className="quiet-button" onClick={onAddLead}><Plus size={16} /> Add lead</button>
-          <button className="primary-button" data-tour="start-calling" onClick={onStart} disabled={!toCall}>Start calling <ChevronRight size={16} /></button>
+          <button className="primary-button" data-tour="start-calling" onClick={onStart} disabled={region ? !available.some((lead) => matchesCallingRegion(lead, region)) : !toCall}>Start calling <ChevronRight size={16} /></button>
         </div>
       </div>
       <div className="dash-banner__body">
         <div className="dash-banner__main">
-        <ZoneClocks leads={state.leads} current={zone ? zone.zone : null} now={now} />
+        <div className="region-picker__heading"><b>Calling windows</b><span>Choose a time zone or state to filter the queue · 8 AM–9 PM local time</span></div>
+        <ZoneClocks leads={available} current={zone ? zone.zone : null} now={now} region={region} onPick={(area) => pick("zone", area)} disabled={calling} />
+        {region && <div className="region-picker__active"><span>Showing {region.kind === "state" ? stateZones.find(([code]) => code === region.value)?.[1] || region.value : zoneName(region.value)} · {available.filter((lead) => matchesCallingRegion(lead, region)).length} in queue</span><button type="button" className="text-link" disabled={calling} onClick={() => onRegionChange(null)}>Show all areas</button></div>}
+        {suggestion && !calling && <div className="region-picker__suggestion"><span>More time to call: <b>{zoneName(suggestion.area)}</b> · {suggestion.count} in queue · {suggestion.clock?.label}</span><button type="button" className="text-link" onClick={() => pick("zone", suggestion.area)}>View leads</button></div>}
+        {calling && <p className="region-picker__hint">Finish the current call to change areas.</p>}
         <CallStrip calls={state.calls} onOpen={() => onGo("calls-today")} />
         <dl className="dash-stats">
           {/* Each number opens the list behind it; the label is a button stretched over the whole tile. */}
           <div><dt><button type="button" className="stretch-link" onClick={() => onGo("calls-today")}>Calls today</button></dt><dd>{attemptsToday.length}</dd></div>
-          <div><dt><button type="button" className="stretch-link" onClick={() => onGo("conversations")}>Conversations</button></dt><dd>{attemptsToday.filter((attempt) => attempt.conversation).length}</dd></div>
+          <div><dt><button type="button" className="stretch-link" onClick={() => onGo("conversations")}>Connects</button></dt><dd>{attemptsToday.filter((attempt) => attempt.conversation).length}</dd></div>
           <div><dt><button type="button" className="stretch-link" onClick={() => onGo("followups")}>Follow-ups due</button></dt><dd>{followUpsDue}</dd></div>
           <div><dt><button type="button" className="stretch-link" onClick={() => onGo("to-call")}>Left to call</button></dt><dd>{toCall}</dd></div>
         </dl>
@@ -2316,10 +2341,10 @@ function DashboardBanner({ state, selected, setup, onStart, onAddLead, onGuide, 
         </div>
         </div>
         <figure className="dash-where">
-          <StateTileMap leads={state.leads.filter((lead) => !lead.dnc)} current={leadStateCode(selected)} zone={zone ? zone.zone : null} />
+          <StateTileMap leads={available} current={leadStateCode(selected)} zone={zone ? zone.zone : null} region={region} onPick={(code) => pick("state", code)} disabled={calling} now={now} />
           <DaylightStrip hour={clock ? clock.hour : null} minute={clock ? clock.minute : 0} />
           <figcaption>
-            <b>{leadLabel(selected)}</b>
+            <span>Choose a highlighted state on the map</span><b>{leadLabel(selected)}</b>
             {clock && zone ? <span className={inHours ? "is-open" : ""}>{zone.place} · {clock.label}, {hoursNote(clock).text}</span> : <span>No state yet. Add one with Edit to check calling hours.</span>}
           </figcaption>
         </figure>
@@ -2331,6 +2356,8 @@ function DashboardBanner({ state, selected, setup, onStart, onAddLead, onGuide, 
 function Queue({
   state,
   campaign,
+  region,
+  onRegionChange,
   selected,
   onSelect,
   onPrepare,
@@ -2362,6 +2389,8 @@ function Queue({
   onGo: (target: StatTarget) => void;
   state: State;
   campaign: string;
+  region: CallingRegion | null;
+  onRegionChange: (region: CallingRegion | null) => void;
   selected: Lead;
   onSelect: (id: string) => void;
   onPrepare: (lead: Lead) => void;
@@ -2374,7 +2403,7 @@ function Queue({
   // What the list shows: everything in calling order, only new leads, or callbacks (follow-ups and set call-back times).
   const [view, setView] = useState<"all" | "new" | "callbacks">(() => { try { return (localStorage.getItem("open-dialer-queue-view") as "all" | "new" | "callbacks") || "all"; } catch { return "all"; } });
   const [order, setOrder] = useState<"queue" | "inplace" | "newest" | "location">(() => { try { const saved = localStorage.getItem("open-dialer-queue-order"); return saved === "newest" || saved === "location" || saved === "inplace" ? saved : "queue"; } catch { return "queue"; } });
-  const upcoming = callQueue(state.leads, state.calls, order === "inplace");
+  const upcoming = callQueue(state.leads, state.calls, order === "inplace").filter((lead) => !region || matchesCallingRegion(lead, region));
   const calledIds = new Set(state.calls.map((call) => call.leadId));
   // The lead auto-dial goes to after this one (same rule as nextInQueue).
   const nextId = order === "inplace" ? upcoming[upcoming.findIndex((lead) => lead.id === selected.id) + 1]?.id : upcoming.find((lead) => lead.id !== selected.id)?.id;
@@ -2455,6 +2484,10 @@ function Queue({
         setup={setup}
         state={state}
         selected={selected}
+        campaign={campaign}
+        region={region}
+        onRegionChange={(next) => { if (next) setView("all"); onRegionChange(next); }}
+        calling={calling}
         onAddLead={onAddLead}
         onGuide={onGuide}
         onGo={onGo}
@@ -2479,7 +2512,7 @@ function Queue({
               <option value="location">Location (state, then city)</option>
             </select>
           </div>
-          {!shown.length && <p className="call-list__empty">{view === "callbacks" ? "No callbacks waiting." : view === "new" ? "No new leads left to call." : "Nothing left to call."}</p>}
+          {!shown.length && <p className="call-list__empty">{region ? "No leads match this area and view. Try another view or show all areas." : view === "callbacks" ? "No callbacks waiting." : view === "new" ? "No new leads left to call." : "Nothing left to call."}</p>}
           {shown.map((lead) => {
             const label = leadLabel(lead);
             const subtitle = leadSubtitle(lead);
@@ -2958,7 +2991,7 @@ function FollowUps({
   // The app's own tasks are grouped: one for booked meetings (they have a set time, so they come first), one for callbacks.
   const groups = [
     { key: "meetings", title: (count: number) => `${count} booked meeting${count === 1 ? "" : "s"}`, leads: open.filter((lead) => lead.status === "Meeting booked"), icon: CalendarClock, startOpen: true },
-    { key: "callbacks", title: (count: number) => `Call back ${count} lead${count === 1 ? "" : "s"}`, leads: open.filter((lead) => lead.status !== "Meeting booked"), icon: PhoneOutgoing, startOpen: false },
+    { key: "callbacks", title: (count: number) => `Call back ${count} lead${count === 1 ? "" : "s"}`, leads: open.filter((lead) => lead.status !== "Meeting booked"), icon: PhoneOutgoing, startOpen: true },
   ].filter((group) => group.leads.length);
   const mine = tasks.filter((task) => !task.doneAt).sort((left, right) => soonest(left.due, right.due) || right.createdAt.localeCompare(left.createdAt));
   const leadById = new Map(allLeads.map((lead) => [lead.id, lead]));
@@ -3896,7 +3929,8 @@ function VoicemailsPage({ vault, automations, settings, campaigns, defaultCampai
           {vault.some((item) => !item.campaigns?.length) && <button type="button" className={filter === "-" ? "is-active" : ""} aria-pressed={filter === "-"} onClick={() => setFilter("-")}>No campaign <small>{vault.filter((item) => !item.campaigns?.length).length}</small></button>}
         </div>
       )}
-      {!vault.length && <div className="empty-state">No voicemails yet. Press New voicemail to record one in your own voice, or upload an MP3.</div>}
+      {!vault.length && <div className="vault-welcome"><span className="vault-welcome__icon" aria-hidden="true"><Mic size={24} /></span><div><h2>Your voice, ready when you need it</h2><p>Record a voicemail or upload an MP3, then use it in your automations.</p><button type="button" className="quiet-button" onClick={() => setRecording(true)}>Create your first voicemail <ArrowRight size={16} aria-hidden="true" /></button></div></div>}
+      {vault.length > 0 && !shown.length && <p className="empty-state">No voicemails match this campaign. Choose another filter to see your recordings.</p>}
       <div className="vault-list">
         {shown.map((item) => {
           const used = usedIn(item.id);
@@ -4109,6 +4143,7 @@ function Pipeline({
   settings: Record<string, CampaignSettings>;
 }) {
   const [dragging, setDragging] = useState<string | null>(null);
+  const boardRef = useRef<HTMLDivElement>(null);
   const [peekId, setPeekId] = useState<string | null>(null);
   const peek = leads.find((lead) => lead.id === peekId);
   const [over, setOver] = useState<string | null>(null);
@@ -4116,10 +4151,11 @@ function Pipeline({
   return (
     <section className="pipeline-page">
       <header className="pipeline-header">
-        <p>Drag a lead to another stage, or click it for details. Logging a call moves it for you.</p>
+        <p>Drag a lead to another stage, or open its details to change the stage. Logging a call moves it for you.</p>
         <div><strong>{leads.filter((lead) => lead.status === "Won").length} won</strong><small>{won ? `$${won.toLocaleString()} in deals` : `${leads.filter(inQueue).length} still open`}</small></div>
       </header>
-      <div className="pipeline-board">
+      <nav className="pipeline-stage-nav" aria-label="Jump to pipeline stage"><span>Jump to</span>{leadStages.map((stage, index) => <button type="button" key={stage} onClick={() => boardRef.current?.children[index]?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest", inline: "start" })}>{stage}</button>)}</nav>
+      <div className="pipeline-board" ref={boardRef}>
         {leadStages.map((stage) => {
           const items = leads.filter((lead) => lead.status === stage);
           return (
@@ -4195,7 +4231,7 @@ function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScri
           const toCall = items.filter(inQueue).length;
           return (
             <article className="campaign-card" key={name}>
-              <header><h2>{name}</h2><span>{items.length} lead{items.length === 1 ? "" : "s"}{settings[name]?.script || settings[name]?.pdf ? " · Script" : ""}{settings[name]?.value ? ` · $${settings[name]!.value!.toLocaleString()} a deal` : ""}</span></header>
+              <header><h2>{name}</h2><span>{items.length} lead{items.length === 1 ? "" : "s"}{settings[name]?.script || settings[name]?.pdf ? " · Script ready" : " · No script yet"}{settings[name]?.value ? ` · $${settings[name]!.value!.toLocaleString()} a deal` : ""}</span></header>
               {/* One bar for the whole campaign: each stage's share of its leads, same colors as the counts below. */}
               <div className="campaign-bar" aria-hidden="true">
                 {leadStages.map((stage) => { const count = items.filter((lead) => lead.status === stage).length; return count ? <i key={stage} className={`dot--${campaignStageTone[stage]}`} style={{ flexGrow: count }} /> : null; })}
@@ -4418,7 +4454,7 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
     }
   };
   const create = (trigger: AutomationTrigger) => {
-    const item: Automation = { id: `au_${Date.now()}`, name: triggerInfo[trigger].title, on: true, trigger, campaigns: [], ...(trigger === "outcome" || trigger === "transcribed" ? { outcomes: [] } : {}), nodes: [{ id: "trigger", step: null, x: 0, y: 0 }], edges: [] };
+    const item: Automation = { id: `au_${Date.now()}`, name: triggerInfo[trigger].title, on: false, trigger, campaigns: [], ...(trigger === "outcome" || trigger === "transcribed" ? { outcomes: [] } : {}), nodes: [{ id: "trigger", step: null, x: 0, y: 0 }], edges: [] };
     setPicking(false);
     setCreated(item);
     setOpenId(item.id);
@@ -4437,7 +4473,7 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
   return (
     <section className="flow-page">
       <div className="campaigns-head">
-        <p>Each automation starts with a trigger, from the campaigns you pick on it, and runs its steps in order.</p>
+        <p>Choose what starts an automation, then build its steps. New automations stay off until you turn them on.</p>
         <div className="campaigns-head__actions"><button type="button" className="primary-button" onClick={() => setPicking(true)}><Plus size={16} aria-hidden="true" /> New automation</button></div>
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
@@ -4593,6 +4629,7 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
         <button type="button" className="text-link" onClick={() => { if (window.confirm(`Delete ${draft.name}?`)) { dirty.current = false; onDelete(); } }}><Trash2 size={16} aria-hidden="true" /> Delete</button>
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
+      <p className="flow-editor-status">{draft.on ? "Active · " : "Off · "}{triggerInfo[draft.trigger].title}. {triggerSummary(draft)}. {flowSteps(draft).length ? `${flowSteps(draft).length} step${flowSteps(draft).length === 1 ? "" : "s"} added.` : "Add a step, then turn it on when you're ready."} Changes save automatically.</p>
       <FlowContext.Provider value={{ draft, vault, selected: panel, onAdd: (id, port) => { setAddFrom({ id, port }); setPanel("add"); } }}>
         <div className="flow-board">
           <ReactFlow
@@ -4855,6 +4892,7 @@ function Home({ state, all, followUps, onOpenLead, onStart, onGo }: { state: Sta
   const campaigns = campaignsOf(state.leads);
   return (
     <section className="analytics-page home-dashboard">
+      <section className="home-focus"><div><h2>{due.length ? `${due.length} follow-up${due.length === 1 ? "" : "s"} to check` : "Ready for your next call?"}</h2><p>{due.length ? "Callbacks and meetings due today are waiting in Tasks." : "Choose a campaign and pick up where you left off."}</p></div><button type="button" className="primary-button" onClick={() => due.length ? onGo("followups") : campaigns.length === 1 ? onStart(campaigns[0]) : onGo("campaigns")}>{due.length ? "Open Tasks" : campaigns.length === 1 ? "Start calling" : "View campaigns"} <ArrowRight size={16} aria-hidden="true" /></button></section>
       <div className="analytics-grid">
         <section className="analytics-card">
           <h2>Today and this month</h2>
@@ -4862,7 +4900,8 @@ function Home({ state, all, followUps, onOpenLead, onStart, onGo }: { state: Sta
             <thead><tr><th scope="col"><span className="sr-only">Measure</span></th><th scope="col">Today</th><th scope="col">This month</th></tr></thead>
             <tbody>
               <tr><td>Calls</td><td>{today.calls}</td><td>{month.calls}</td></tr>
-              <tr><td>Conversations</td><td>{today.conversations}</td><td>{month.conversations}</td></tr>
+              <tr><td>Connects</td><td>{today.conversations}</td><td>{month.conversations}</td></tr>
+              <tr><td>Connect rate</td><td>{today.calls ? `${Math.round(today.conversations / today.calls * 100)}%` : "–"}</td><td>{month.calls ? `${Math.round(month.conversations / month.calls * 100)}%` : "–"}</td></tr>
               <tr><td>Meetings booked</td><td>{today.meetings}</td><td>{month.meetings}</td></tr>
               <tr><td>Deals won</td><td>{today.won}{money(today.value)}</td><td>{month.won}{money(month.value)}</td></tr>
             </tbody>
@@ -5214,27 +5253,39 @@ function CallOutcome({ lead, callId, automations, settings, bookingUrl, onBook, 
 }
 
 function ActivityLog({ activity, leads, onOpenLead }: { activity: State["activity"]; leads: Lead[]; onOpenLead: (id: string) => void }) {
-  // Log lines about a lead start with its name ("Dr. Aaron Fleming · Follow-up").
-  // shortcut: matched by name, so two leads with the same name open the first; store the lead id on events if that matters.
-  const byLabel = new Map<string, Lead>();
-  for (const lead of leads) if (!byLabel.has(leadLabel(lead))) byLabel.set(leadLabel(lead), lead);
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("All activity");
+  const categoryOf = (action: string) => /call|outcome|voicemail|interested|meeting booked|no answer|busy|wrong number/i.test(action) ? "Calls" : /script|campaign/i.test(action) ? "Scripts & campaigns" : /task|follow-up/i.test(action) ? "Tasks" : /lead|dnc/i.test(action) ? "Leads" : "Workspace";
+  const icons: Record<string, typeof Phone> = { Calls: PhoneCall, "Scripts & campaigns": ScrollText, Tasks: ListChecks, Leads: UserRound, Workspace: SlidersHorizontal };
+  const filtered = activity.filter((event) => (category === "All activity" || categoryOf(event.action) === category) && `${event.action} ${event.detail} ${event.at}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const groups: { label: string; events: State["activity"] }[] = [];
+  for (const event of filtered) {
+    const label = event.at.includes(",") ? event.at.split(",")[0] : event.at || "Earlier";
+    if (groups.at(-1)?.label !== label) groups.push({ label, events: [] });
+    groups.at(-1)!.events.push(event);
+  }
   return (
-    <section className="activity-log">
-      {activity.map((event) => {
-        const lead = byLabel.get(event.detail.split(" · ")[0]);
-        return (
-        <article key={event.id}>
-          <span className="activity-mark">
-            <ClipboardList size={18} />
-          </span>
-          <div>
-            <h2>{event.action}</h2>
-            <p>{lead ? <button type="button" className="text-link" onClick={() => onOpenLead(lead.id)}>{event.detail}</button> : event.detail}</p>
-          </div>
-          <time>{event.at}</time>
-        </article>
-        );
-      })}
+    <section className="activity-log" aria-label="Workspace activity">
+      <div className="activity-log__controls">
+        <label className="activity-log__search"><Search size={17} aria-hidden="true" /><span className="sr-only">Search activity</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search activity" /></label>
+        <label className="activity-log__filter"><span className="sr-only">Activity type</span><select value={category} onChange={(event) => setCategory(event.target.value)}>{["All activity", "Calls", "Leads", "Scripts & campaigns", "Tasks", "Workspace"].map((option) => <option key={option}>{option}</option>)}</select></label>
+      </div>
+      <p className="activity-log__count" aria-live="polite">{filtered.length} {filtered.length === 1 ? "event" : "events"}{activity.length >= 500 ? " · Showing the latest 500 events" : ""}</p>
+      {groups.map((group, groupIndex) => <section className="activity-log__day" key={`${group.label}-${groupIndex}`}>
+        <h3>{group.label}</h3>
+        <div className="activity-log__events">{group.events.map((event) => {
+          const matches = leads.filter((lead) => leadLabel(lead) === event.detail.split(" · ")[0]);
+          const lead = event.leadId ? leads.find((candidate) => candidate.id === event.leadId) : matches.length === 1 ? matches[0] : undefined;
+          const kind = categoryOf(event.action);
+          const Icon = icons[kind];
+          return <article key={event.id}>
+            <span className="activity-mark" aria-hidden="true"><Icon size={16} /></span>
+            <div className="activity-log__event"><h4>{event.action}</h4>{event.detail && <p>{lead ? <button type="button" className="text-link" onClick={() => onOpenLead(lead.id)}>{event.detail}</button> : event.detail}</p>}<span>{kind}</span></div>
+            <time>{event.at.includes(",") ? event.at.split(",").slice(1).join(",").trim() : ""}</time>
+          </article>;
+        })}</div>
+      </section>)}
+      {!filtered.length && <div className="activity-log__empty"><ClipboardList size={22} aria-hidden="true" /><strong>{activity.length ? "No matching activity" : "No activity yet"}</strong><span>{activity.length ? "Try a different search or activity type." : "Workspace activity will appear here as you work."}</span></div>}
     </section>
   );
 }
@@ -5280,12 +5331,10 @@ function setupSteps(state: State): SetupStep[] {
 function Roadmap() {
   return (
     <section className="settings-panel roadmap">
-      <span className="panel-kicker">Getting started</span>
-      <h2>Roadmap</h2>
-      <p>What's planned for Open Dialer. Items come off this list once they're built.</p>
+      <header className="roadmap__intro"><div><h2>What's ahead</h2><p>A look at where Open Dialer is going, from the next improvements to ideas for later.</p></div><span className="roadmap__intro-icon" aria-hidden="true"><Workflow size={27} /></span></header>
       {roadmap.map((group) => (
-        <section key={group.stage} className="roadmap__group" aria-labelledby={`roadmap-${group.stage}`}>
-          <header><h3 id={`roadmap-${group.stage}`}>{group.stage}</h3><small>{group.note}</small></header>
+        <section key={group.stage} className={`roadmap__group${group.stage === "Unibox" ? " roadmap__group--feature" : ""}`} aria-labelledby={`roadmap-${group.stage}`}>
+          <header><span className="roadmap__marker" aria-hidden="true" /><div><h3 id={`roadmap-${group.stage}`}>{group.stage}</h3><p>{group.note}</p></div></header>
           <ul>
             {group.items.map((item) => (
               <li key={item.title}>
@@ -5578,7 +5627,7 @@ function Settings({
           <section className="settings-panel settings-panel--wide">
             <span className="panel-kicker">Workspace</span>
             <h2>Logs</h2>
-            <p>Everything done in this workspace, newest first.</p>
+            <p>Recent workspace activity, newest first. Up to 500 events are kept.</p>
             <ActivityLog activity={fullState.activity} leads={fullState.leads} onOpenLead={onOpenLead} />
           </section>
         ) : page === "numbers" ? (

@@ -47,6 +47,7 @@ try {
   const state = await api("/api/state");
   const call = state.calls.find((item) => item.id === started.callId);
   const outcome = state.calls.find((item) => item.sourceCallId === started.callId);
+  assert.equal(state.activity.find((item) => item.action === "Call outcome recorded")?.leadId, "lead_test");
   assert.equal(call.scriptId, "s1");
   assert.equal(call.scriptCampaign, "Demo");
   assert.equal(outcome.outcome, "Meeting booked");
