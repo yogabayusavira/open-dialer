@@ -44,8 +44,8 @@ Settings and can be switched off. Run it on your own computer or on a server.
 
 ## Screenshots
 
-<p align="center"><img src="docs/screenshots/dialer.png" alt="The dialer: the lead's details, local time and opening hours, pinned fields and the call script" width="900"></p>
-<p align="center"><sub>The dialer: who you're calling, their local time and opening hours, pinned details and the script.</sub></p>
+<p align="center"><img src="docs/screenshots/dialer.png" alt="The dialer: calling windows by time zone, the lead list, and the lead's details, local time and opening hours" width="900"></p>
+<p align="center"><sub>The dialer: calling windows by time zone, who you're calling, their local time and opening hours, pinned details and the script.</sub></p>
 
 <table>
   <tr>
@@ -61,7 +61,7 @@ Settings and can be switched off. Run it on your own computer or on a server.
     <td width="50%"><img src="docs/screenshots/dashboard.png" alt="The dashboard"><br><sub>Dashboard: today's calls, follow-ups and results.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/screenshots/scripts.png" alt="A campaign's scripts, with the one in use picked"><br><sub>Scripts: several per campaign; pick the one the call screen shows.</sub></td>
+    <td width="50%"><img src="docs/screenshots/scripts.png" alt="A campaign's scripts with calls, connects and meeting rate for each"><br><sub>Scripts: several per campaign, each with its own calls, connects and meeting rate.</sub></td>
     <td width="50%"><img src="docs/screenshots/voicemails.png" alt="Recorded voicemails with what each one says and its campaign tag"><br><sub>Voicemails: record once, tag the campaign, see what each one says.</sub></td>
   </tr>
 </table>
