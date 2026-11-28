@@ -49,7 +49,7 @@ Settings and can be switched off. Run it on your own computer or on a server.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/automations.png" alt="An automation on the canvas: call outcome, send text, wait, follow up"><br><sub>Automations: a trigger, then steps like send text, wait and follow up.</sub></td>
+    <td width="50%"><img src="docs/screenshots/automations.png" alt="An automation on the canvas: call outcome, an If with Yes and No branches to two texts, and a wait then follow-up"><br><sub>Automations: connect nodes into branches, like an If that texts each kind of lead differently.</sub></td>
     <td width="50%"><img src="docs/screenshots/pipeline.png" alt="The pipeline board with stages"><br><sub>Pipeline: drag leads between stages; deal values add up.</sub></td>
   </tr>
   <tr>
@@ -59,6 +59,10 @@ Settings and can be switched off. Run it on your own computer or on a server.
   <tr>
     <td width="50%"><img src="docs/screenshots/campaigns.png" alt="Campaign cards"><br><sub>Campaigns: each with its script, leads and settings.</sub></td>
     <td width="50%"><img src="docs/screenshots/dashboard.png" alt="The dashboard"><br><sub>Dashboard: today's calls, follow-ups and results.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/scripts.png" alt="A campaign's scripts, with the one in use picked"><br><sub>Scripts: several per campaign; pick the one the call screen shows.</sub></td>
+    <td width="50%"><img src="docs/screenshots/voicemails.png" alt="Recorded voicemails with what each one says and its campaign tag"><br><sub>Voicemails: record once, tag the campaign, see what each one says.</sub></td>
   </tr>
 </table>
 
@@ -173,7 +177,7 @@ transcription.
 ## License
 
 Open Dialer is © 2026 Yoga Bayu Savira, released under the [GNU AGPL-3.0](LICENSE) with the additional terms in
-[NOTICE.md](NOTICE.md): keep the "Powered by Open Dialer · by Yoga Bayu Savira" credit visible, don't use the Open
+[NOTICE.md](NOTICE.md): keep the "Powered by Open Dialer" credit visible and the full attribution available, don't use the Open
 Dialer name or logo for your own version, and share the source of any changed version you let others use.
 White-label and commercial licenses: [COMMERCIAL.md](COMMERCIAL.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 Contributors: [CONTRIBUTORS.md](CONTRIBUTORS.md).

@@ -83,6 +83,10 @@ components:
 
 # Design System: Open Dialer v2
 
+## User preference: personality
+
+Give Open Dialer a distinctive, expressive personality. Avoid bland or generic layouts; use the subject and purpose of each screen to give it character while keeping everyday tasks clear and comfortable. Script previews should feel like a reading experience, with editing as a separate action.
+
 ## Overview
 
 **Creative North Star: "The focused switchboard."**

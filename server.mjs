@@ -533,7 +533,7 @@ function safeState(state) {
   const { key: emailKey, ...email } = state.email || {};
   return { ...state, connection: state.connection ? connection : null, ai: { ...ai, ready: Boolean(key || process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY) }, email: { ...email, saved: Boolean(emailKey), envFallback: Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL) } };
 }
-function activity(state, action, detail) {
+function activity(state, action, detail, leadId) {
   state.activity.unshift({
     id: `event_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     at: new Intl.DateTimeFormat("en", {
@@ -544,6 +544,7 @@ function activity(state, action, detail) {
     }).format(new Date()),
     action,
     detail,
+    ...(leadId ? { leadId } : {}),
   });
   state.activity = state.activity.slice(0, 500);
 }
@@ -562,25 +563,72 @@ function leadLabel(lead) {
 const leadStages = ["New", "Follow-up", "Meeting booked", "Won", "Lost"];
 const callOutcomes = ["Interested", "Meeting booked", "Callback", "Maybe later", "No answer", "Busy", "Voicemail", "Not interested", "Wrong number", "Do not call"];
 // The workspace's automations, as sent by the Automations page: a trigger (with the campaigns it listens to, none
-// meaning any), then steps run in order.
+// meaning any) and a graph of nodes, n8n style. Each connection goes from a node's output ("out", or "yes"/"no" on an
+// If) to another node; an output can feed several nodes, and every connected branch runs.
 const automationTriggers = ["lead", "outcome", "voicemail", "transcribed"];
 const conditionOps = ["is", "is not", "contains", "is empty", "is not empty"];
+const flowPorts = ["out", "yes", "no"];
+function cleanStep(step, trigger) {
+  if (step?.type === "if") return { type: "if", field: cleanText(step.field, 120), op: conditionOps.includes(step.op) ? step.op : "is", value: cleanText(step.value, 200) };
+  if (step?.type === "say" && trigger === "lead") return { type: "say", text: cleanText(step.text, 1000) };
+  if (step?.type === "play" && trigger === "voicemail") return { type: "play", recordingId: /^vm_\w+$/.test(step.recordingId || "") ? step.recordingId : "" };
+  const later = trigger === "outcome" || trigger === "transcribed";
+  if (step?.type === "wait" && later) return { type: "wait", amount: Math.min(365, Math.max(1, Math.round(Number(step.amount) || 1))), unit: ["minutes", "hours", "days"].includes(step.unit) ? step.unit : "days" };
+  if (step?.type === "email" && later) return { type: "email", to: cleanText(step.to, 120), subject: cleanText(step.subject, 200), body: String(step.body || "").replace(/\r\n/g, "\n").slice(0, 5000) };
+  if (step?.type === "sms" && later) return { type: "sms", text: String(step.text || "").replace(/\r\n/g, "\n").slice(0, 640) };
+  if (step?.type === "ask" && trigger === "transcribed") return { type: "ask", prompt: cleanText(step.prompt, 1000), field: cleanText(step.field, 60) };
+  if (step?.type === "stage" && later) return { type: "stage", stage: leadStages.includes(step.stage) ? step.stage : "Follow-up" };
+  if (step?.type === "followup" && later) return { type: "followup", days: Math.min(60, Math.max(0, Math.round(Number(step.days) || 0))) };
+  return null;
+}
+// An automation's graph. Ones saved before the graph editor (a list of steps) become a left-to-right chain, with an
+// If's "yes" carrying on, which is how the old "Only continue if" behaved.
+function flowGraph(item) {
+  if (Array.isArray(item?.nodes) && item.nodes.length) return { nodes: item.nodes, edges: Array.isArray(item.edges) ? item.edges : [] };
+  const steps = Array.isArray(item?.steps) ? item.steps : [];
+  const nodes = [{ id: "trigger", step: null, x: 0, y: 0 }, ...steps.map((step, index) => ({ id: `s${index}`, step, x: (index + 1) * 300, y: 0 }))];
+  const edges = steps.map((_, index) => ({ from: index ? `s${index - 1}` : "trigger", port: index && steps[index - 1]?.type === "if" ? "yes" : "out", to: `s${index}` }));
+  return { nodes, edges };
+}
+// Whether `start` can already reach `target` through the connections; a connection target -> start would be a loop.
+function flowReaches(edges, start, target) {
+  const seen = new Set();
+  const stack = [start];
+  while (stack.length) {
+    const id = stack.pop();
+    if (id === target) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const edge of edges) if (edge.from === id) stack.push(edge.to);
+  }
+  return false;
+}
 function cleanAutomations(list) {
   return list.slice(0, 50).map((item) => {
     const trigger = automationTriggers.includes(item?.trigger) ? item.trigger : "lead";
-    const steps = (Array.isArray(item?.steps) ? item.steps : []).slice(0, 20).map((step) => {
-      if (step?.type === "if") return { type: "if", field: cleanText(step.field, 120), op: conditionOps.includes(step.op) ? step.op : "is", value: cleanText(step.value, 200) };
-      if (step?.type === "say" && trigger === "lead") return { type: "say", text: cleanText(step.text, 1000) };
-      if (step?.type === "play" && trigger === "voicemail") return { type: "play", recordingId: /^vm_\w+$/.test(step.recordingId || "") ? step.recordingId : "" };
-      const later = trigger === "outcome" || trigger === "transcribed";
-      if (step?.type === "wait" && later) return { type: "wait", amount: Math.min(365, Math.max(1, Math.round(Number(step.amount) || 1))), unit: ["minutes", "hours", "days"].includes(step.unit) ? step.unit : "days" };
-      if (step?.type === "email" && later) return { type: "email", to: cleanText(step.to, 120), subject: cleanText(step.subject, 200), body: String(step.body || "").replace(/\r\n/g, "\n").slice(0, 5000) };
-      if (step?.type === "sms" && later) return { type: "sms", text: String(step.text || "").replace(/\r\n/g, "\n").slice(0, 640) };
-      if (step?.type === "ask" && trigger === "transcribed") return { type: "ask", prompt: cleanText(step.prompt, 1000), field: cleanText(step.field, 60) };
-      if (step?.type === "stage" && (trigger === "outcome" || trigger === "transcribed")) return { type: "stage", stage: leadStages.includes(step.stage) ? step.stage : "Follow-up" };
-      if (step?.type === "followup" && (trigger === "outcome" || trigger === "transcribed")) return { type: "followup", days: Math.min(60, Math.max(0, Math.round(Number(step.days) || 0))) };
-      return null;
-    }).filter(Boolean);
+    const graph = flowGraph(item);
+    const nodes = [];
+    for (const node of graph.nodes.slice(0, 60)) {
+      const id = /^[\w-]{1,40}$/.test(node?.id || "") ? node.id : "";
+      if (!id || nodes.some((entry) => entry.id === id)) continue;
+      const isTrigger = id === "trigger";
+      const step = isTrigger ? null : cleanStep(node.step, trigger);
+      if (!isTrigger && !step) continue;
+      nodes.push({ id, step, x: Math.round(Number(node.x) || 0), y: Math.round(Number(node.y) || 0) });
+    }
+    if (!nodes.some((node) => node.id === "trigger")) nodes.unshift({ id: "trigger", step: null, x: 0, y: 0 });
+    const edges = [];
+    for (const edge of graph.edges.slice(0, 200)) {
+      const source = nodes.find((node) => node.id === edge?.from);
+      const target = nodes.find((node) => node.id === edge?.to);
+      const port = flowPorts.includes(edge?.port) ? edge.port : "out";
+      // Only an If has yes/no; nothing connects into the trigger, to itself, twice, or back into a loop.
+      if (!source || !target || target.id === "trigger" || source.id === target.id) continue;
+      if ((source.step?.type === "if") !== (port !== "out")) continue;
+      if (edges.some((entry) => entry.from === source.id && entry.port === port && entry.to === target.id)) continue;
+      if (flowReaches(edges, target.id, source.id)) continue;
+      edges.push({ from: source.id, port, to: target.id });
+    }
     return {
       id: /^au_\w+$/.test(item?.id || "") ? item.id : `au_${Date.now()}_${randomBytes(3).toString("hex")}`,
       name: cleanText(item?.name, 80) || "Untitled automation",
@@ -588,7 +636,8 @@ function cleanAutomations(list) {
       trigger,
       campaigns: (Array.isArray(item?.campaigns) ? item.campaigns : []).map(campaignName).filter(Boolean).slice(0, 50),
       ...(trigger === "outcome" || trigger === "transcribed" ? { outcomes: (Array.isArray(item?.outcomes) ? item.outcomes : []).filter((outcome) => callOutcomes.includes(outcome)) } : {}),
-      steps,
+      nodes,
+      edges,
     };
   });
 }
@@ -629,6 +678,14 @@ function stageAfterOutcome(current, outcome) {
 }
 function campaignName(value) {
   return cleanText(value, 80);
+}
+// A recording's organizing labels: the campaigns it's for (tags only, nothing is restricted by them) and what it says,
+// so it can be picked without listening. Only fields sent are returned, so a PATCH changes just those.
+function voicemailLabels(body) {
+  const labels = {};
+  if (Array.isArray(body.campaigns)) labels.campaigns = [...new Set(body.campaigns.map((name) => cleanText(name, 80)).filter(Boolean))].slice(0, 20);
+  if (typeof body.says === "string") labels.says = cleanText(body.says, 500);
+  return labels;
 }
 function cleanText(value, max = 500) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
@@ -710,6 +767,29 @@ function publicOrigin(req) {
   if (configured) return configured;
   const protocol = req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
   return `${protocol}://${req.headers.host}`;
+}
+// Capture the script actually shown on the dialer, before it can be changed mid-call.
+function callScript(lead, settings, selectedCampaign) {
+  const campaign = selectedCampaign ? ((lead.campaigns || []).includes(selectedCampaign) ? selectedCampaign : null) : (lead.campaigns || []).find((name) => settings[name]?.script || settings[name]?.pdf);
+  const own = settings[campaign];
+  if (!campaign || !own?.script) return null;
+  const scripts = own.scripts?.length ? own.scripts : [{ id: "s1", script: own.script }];
+  const active = scripts.find((item) => item.id === own.activeScript) || scripts[0];
+  return active?.id ? { scriptCampaign: campaign, scriptId: active.id } : null;
+}
+function signedScriptContext(leadId, callId, script) {
+  if (!script) return "";
+  const payload = Buffer.from(JSON.stringify({ ws: currentWorkspace(), leadId, callId, ...script })).toString("base64url");
+  return `${payload}.${createHmac("sha256", encryptionKey()).update(payload).digest("base64url")}`;
+}
+function readScriptContext(token, ws, leadId, callId) {
+  const [payload, signature] = String(token || "").split(".");
+  if (!payload || !signature || !safeEqual(signature, createHmac("sha256", encryptionKey()).update(payload).digest("base64url"))) return null;
+  try {
+    const context = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (context.ws !== ws || context.leadId !== leadId || context.callId !== callId || typeof context.scriptCampaign !== "string" || typeof context.scriptId !== "string") return null;
+    return { scriptCampaign: context.scriptCampaign, scriptId: context.scriptId };
+  } catch { return null; }
 }
 function voiceToken(leadId, expiresAt) {
   const payload = `${currentWorkspace()}.${leadId}.${expiresAt}`;
@@ -851,10 +931,13 @@ async function sendPlainEmail(config, to, subject, text) {
   }
 }
 const waitMs = { minutes: 60_000, hours: 3_600_000, days: 86_400_000 };
-// Runs one automation's steps for a lead, starting at `from`. Ask AI answers become lead fields later steps can
-// check. A Wait saves the rest as a job in state.scheduled, which the minute ticker picks up when it's due.
+// Runs one automation for a lead by following its connections from the trigger (or, after a Wait, from the nodes
+// in `from`). Every connected branch runs; an If sends the lead down Yes or No; a failed Ask AI ends its branch.
+// Ask AI answers become lead fields later nodes can check. A Wait saves the nodes after it as a job in
+// state.scheduled, which the minute ticker picks up when it's due; other branches carry on meanwhile.
 // ctx: { outcome, sid (the transcribed call), keepDue (the caller already picked a follow-up time) }.
-async function runAutomation(item, leadId, ctx, from = 0) {
+// `from` is a list of node ids, or a step index from a job saved before the graph editor.
+async function runAutomation(item, leadId, ctx, from) {
   const state = await readState();
   const lead = state.leads.find((entry) => entry.id === leadId);
   if (!lead) return;
@@ -867,21 +950,33 @@ async function runAutomation(item, leadId, ctx, from = 0) {
   const log = [];
   let stage = "";
   let due = "";
-  let wait = null;
+  const waits = [];
   const blocked = lead.dnc || state.dncNumbers.includes(phoneKey(lead.phone));
-  for (let index = from; index < item.steps.length; index++) {
-    const step = item.steps[index];
-    if (step.type === "if" && !automationMatches(step, automationField(step.field, view, state.campaignSettings, campaign))) break;
+  const { nodes, edges } = flowGraph(item);
+  const after = (id, port = "out") => edges.filter((edge) => edge.from === id && edge.port === port).map((edge) => edge.to);
+  const queue = Array.isArray(from) ? [...from] : typeof from === "number" ? [`s${from}`] : after("trigger");
+  const ran = new Set();
+  while (queue.length) {
+    const id = queue.shift();
+    const node = nodes.find((entry) => entry.id === id);
+    // Each node runs once per run, even when two branches lead into it.
+    if (!node?.step || ran.has(id)) continue;
+    ran.add(id);
+    const step = node.step;
+    if (step.type === "if") {
+      queue.push(...after(id, automationMatches(step, automationField(step.field, view, state.campaignSettings, campaign)) ? "yes" : "no"));
+      continue;
+    }
     if (step.type === "ask") {
       const config = aiConfig(state);
-      if (!config || !text || !step.prompt || !step.field) break;
+      if (!config || !text || !step.prompt || !step.field) continue;
       try {
         const answer = cleanText(await aiChat(config, "You read a sales call transcript and answer one question about it. \"You\" is the caller, \"Them\" is the lead. Answer in plain words, as short as the question allows, and never invent anything the transcript doesn't say.", `Question: ${step.prompt}\n\nTranscript:\n${text}`), 500);
         details[step.field] = answer;
         view.details[step.field] = answer;
       } catch (error) {
         log.push(["Automation step failed", `${item.name} · Ask AI: ${error.message}`]);
-        break;
+        continue;
       }
     }
     if (step.type === "stage") stage = step.stage;
@@ -916,19 +1011,24 @@ async function runAutomation(item, leadId, ctx, from = 0) {
       }
     }
     if (step.type === "wait") {
-      wait = { id: `job_${Date.now()}_${randomBytes(3).toString("hex")}`, automationId: item.id, leadId, next: index + 1, ctx: { outcome: ctx.outcome || "", sid: ctx.sid || "" }, runAt: Date.now() + Math.max(1, step.amount) * (waitMs[step.unit] || waitMs.days) };
-      log.push(["Automation waiting", `${item.name} · ${leadLabel(lead)} · until ${new Date(wait.runAt).toLocaleString("en-US")}`]);
-      break;
+      const next = after(id);
+      if (next.length) {
+        const wait = { id: `job_${Date.now()}_${randomBytes(3).toString("hex")}`, automationId: item.id, leadId, next, ctx: { outcome: ctx.outcome || "", sid: ctx.sid || "" }, runAt: Date.now() + Math.max(1, step.amount) * (waitMs[step.unit] || waitMs.days) };
+        waits.push(wait);
+        log.push(["Automation waiting", `${item.name} · ${leadLabel(lead)} · until ${new Date(wait.runAt).toLocaleString("en-US")}`]);
+      }
+      continue;
     }
+    queue.push(...after(id));
   }
-  if (!Object.keys(details).length && !stage && !due && !wait && !log.length) return;
+  if (!Object.keys(details).length && !stage && !due && !waits.length && !log.length) return;
   await updateState((fresh) => {
     const person = fresh.leads.find((entry) => entry.id === leadId);
     if (!person) return false;
     if (Object.keys(details).length) person.details = { ...(person.details || {}), ...details };
     if (stage && !person.dnc) enterStage(person, stage);
     if (due && !person.dnc && !["Won", "Lost"].includes(person.status)) person.due = due;
-    if (wait) fresh.scheduled = [...(fresh.scheduled || []), wait];
+    if (waits.length) fresh.scheduled = [...(fresh.scheduled || []), ...waits];
     for (const [action, detail] of log) activity(fresh, action, detail);
     if (stage || due || Object.keys(details).length) activity(fresh, "Automation ran", `${item.name} · ${leadLabel(person)}${stage ? ` · ${stage}` : ""}`);
   });
@@ -1235,7 +1335,7 @@ async function route(req, res, url) {
           call.outcome = status === "completed" ? "Call ended" : "Didn't connect";
           call.note = describeCallResult(status, sipCode, report.ErrorCode, String(state.connection?.bridgeNumber || "").startsWith("sip:"), Boolean(report.ParentCallSid));
           const lead = state.leads.find((item) => item.id === leadId);
-          activity(state, call.outcome, `${lead ? leadLabel(lead) : "Lead"} · ${call.note}`);
+          activity(state, call.outcome, `${lead ? leadLabel(lead) : "Lead"} · ${call.note}`, lead?.id);
         }
         return true;
       };
@@ -1316,7 +1416,9 @@ async function route(req, res, url) {
       const transcribe = transcribeFor(state, lead);
       await updateState((fresh) => {
         if (fresh.calls.some((item) => item.sid === params.CallSid)) return false;
-        fresh.calls.unshift({ id: /^call_[\w]+$/.test(params.callId || "") ? params.callId : `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling from the app.", at: new Date().toISOString(), sid: params.CallSid, ...(/^user_\w+$/.test(params.userId || "") ? { userId: params.userId } : {}), ...(transcribe ? { transcribing: true } : {}) });
+        const callId = /^call_[\w]+$/.test(params.callId || "") ? params.callId : `call_${Date.now()}`;
+        const script = readScriptContext(params.scriptContext, ws, lead.id, callId);
+        fresh.calls.unshift({ id: callId, leadId: lead.id, outcome: "In progress", note: "Calling from the app.", at: new Date().toISOString(), sid: params.CallSid, ...(/^user_\w+$/.test(params.userId || "") ? { userId: params.userId } : {}), ...(script || {}), ...(transcribe ? { transcribing: true } : {}) });
         activity(fresh, "Call started", `${leadLabel(lead)} · from the app`);
       });
       const statusUrl = statusUrlFor(req, lead.id);
@@ -1567,7 +1669,7 @@ async function route(req, res, url) {
       return json(res, 201, lead);
     }
     if (url.pathname === "/api/campaigns/script" && req.method === "PUT") {
-      const { campaign, script, variables, value, clean, pinned, transcribe } = await getBody(req);
+      const { campaign, script, variables, value, clean, pinned, transcribe, scriptId, scriptName, activate, remove } = await getBody(req);
       const name = campaignName(campaign);
       if (!name) return json(res, 400, { error: "Choose a campaign." });
       // What one won deal in this campaign is worth; blank clears it.
@@ -1581,7 +1683,29 @@ async function route(req, res, url) {
       const map = variables && typeof variables === "object" && !Array.isArray(variables)
         ? Object.fromEntries(Object.entries(variables).slice(0, 60).map(([key, value]) => [cleanText(key, 60), cleanText(value, 120)]).filter(([key, value]) => key && value))
         : current.variables || {};
-      state.campaignSettings[name] = { ...current, script: text, variables: map };
+      // A campaign keeps several named scripts; the one picked on the Scripts page is "in use" and is mirrored into
+      // `script`, which the call screen, variables and AI cleanup read. Campaigns saved before this get one "Script 1".
+      const scripts = Array.isArray(current.scripts) && current.scripts.length
+        ? current.scripts.map((item) => ({ ...item }))
+        : current.script ? [{ id: "s1", name: "Script 1", script: current.script }] : [];
+      let inUse = scripts.some((item) => item.id === current.activeScript) ? current.activeScript : scripts[0]?.id;
+      let target = scripts.find((item) => item.id === (scriptId || inUse));
+      if (typeof script === "string") {
+        if (!target) {
+          target = { id: `s${Date.now().toString(36)}`, name: `Script ${scripts.length + 1}`, script: "" };
+          scripts.push(target);
+        }
+        target.script = text;
+      }
+      if (target && typeof scriptName === "string" && cleanText(scriptName, 60)) target.name = cleanText(scriptName, 60);
+      if (typeof remove === "string") {
+        const index = scripts.findIndex((item) => item.id === remove);
+        if (index >= 0) scripts.splice(index, 1);
+      }
+      if (typeof activate === "string" && scripts.some((item) => item.id === activate)) inUse = activate;
+      if (!scripts.some((item) => item.id === inUse)) inUse = scripts[0]?.id;
+      state.campaignSettings[name] = { ...current, scripts, activeScript: inUse, script: scripts.find((item) => item.id === inUse)?.script || "", variables: map };
+      if (!scripts.length) delete state.campaignSettings[name].activeScript;
       if (amount === null) delete state.campaignSettings[name].value;
       else if (amount !== undefined) state.campaignSettings[name].value = amount;
       // Lead details shown first on the call screen for this campaign, in the order they were pinned.
@@ -1595,7 +1719,7 @@ async function route(req, res, url) {
         for (const variable of Object.keys(current.clean || {})) if (!rules[variable]) forgetSpoken(state, name, variable);
         state.campaignSettings[name].clean = rules;
       }
-      activity(state, Array.isArray(pinned) && typeof script !== "string" ? "Pinned details updated" : typeof script !== "string" ? "Script variables saved" : "Campaign settings saved", name);
+      activity(state, typeof activate === "string" ? "Script in use changed" : typeof remove === "string" ? "Script deleted" : Array.isArray(pinned) && typeof script !== "string" ? "Pinned details updated" : typeof script !== "string" ? "Script variables saved" : "Campaign settings saved", name);
       await writeState(state);
       return json(res, 200, state.campaignSettings[name]);
     }
@@ -1615,7 +1739,7 @@ async function route(req, res, url) {
       const bytes = typeof body.data === "string" ? Buffer.from(body.data, "base64") : Buffer.alloc(0);
       const type = audioType(bytes);
       if (!type) return json(res, 400, { error: "Use an MP3 or WAV file, or record one here." });
-      const item = { id: `vm_${Date.now()}_${randomBytes(3).toString("hex")}`, name: cleanText(body.name, 80) || "Voicemail", size: bytes.length, seconds: Math.max(0, Math.round(Number(body.seconds) || 0)), createdAt: new Date().toISOString() };
+      const item = { id: `vm_${Date.now()}_${randomBytes(3).toString("hex")}`, name: cleanText(body.name, 80) || "Voicemail", size: bytes.length, seconds: Math.max(0, Math.round(Number(body.seconds) || 0)), createdAt: new Date().toISOString(), ...voicemailLabels(body) };
       await writeBlob(scopedBlob(`voicemail-file:${item.id}`), { type, data: bytes.toString("base64") });
       await updateState((state) => {
         state.voicemails.unshift(item);
@@ -1633,13 +1757,14 @@ async function route(req, res, url) {
         return res.end(Buffer.from(file.data, "base64"));
       }
       if (!vaultMatch[2] && req.method === "PATCH") {
-        const { name } = await getBody(req);
-        const label = cleanText(name, 80);
-        if (!label) return json(res, 400, { error: "Give it a name." });
+        const body = await getBody(req);
+        const label = body.name === undefined ? undefined : cleanText(body.name, 80);
+        if (label === "") return json(res, 400, { error: "Give it a name." });
         const found = await updateState((state) => {
           const item = state.voicemails.find((entry) => entry.id === id);
           if (!item) return false;
-          item.name = label;
+          if (label) item.name = label;
+          Object.assign(item, voicemailLabels(body));
           return true;
         });
         return found ? json(res, 200, { ok: true }) : json(res, 404, { error: "That recording is gone." });
@@ -1662,7 +1787,7 @@ async function route(req, res, url) {
       if (!call || !findLead(state, call.leadId)) return json(res, 404, { error: "That call isn't running anymore." });
       if (!call.leadLegSid) return json(res, 409, { error: "The lead's side hasn't picked up yet. Wait for the beep, then drop it." });
       const name = campaignName(campaign);
-      const played = (state.automations || []).some((item) => item.on && item.trigger === "voicemail" && (!item.campaigns?.length || item.campaigns.includes(name)) && item.steps.some((step) => step.type === "play" && step.recordingId === recordingId));
+      const played = (state.automations || []).some((item) => item.on && item.trigger === "voicemail" && (!item.campaigns?.length || item.campaigns.includes(name)) && flowGraph(item).nodes.some(({ step }) => step && step.type === "play" && step.recordingId === recordingId));
       const recording = played && state.voicemails.find((entry) => entry.id === recordingId);
       if (!recording) return json(res, 400, { error: "This campaign has no voicemail for this lead. Add a Voicemail dropped automation in Automations." });
       const audio = new URL("/api/twilio/voice/voicemail", publicOrigin(req));
@@ -1904,7 +2029,7 @@ async function route(req, res, url) {
         lead.value = amount;
       }
       if (typeof body.due === "string") lead.due = cleanText(body.due, 40) || "Unscheduled";
-      activity(state, lead.dnc ? "DNC suppression" : "Lead updated", `${leadLabel(lead)} · ${lead.company}`);
+      activity(state, lead.dnc ? "DNC suppression" : "Lead updated", `${leadLabel(lead)} · ${lead.company}`, lead.id);
       await writeState(state);
       return json(res, 200, lead);
     }
@@ -1916,11 +2041,11 @@ async function route(req, res, url) {
       if (done === true && !lead.taskDone) {
         lead.taskDone = { at: new Date().toISOString(), due: lead.due };
         lead.due = "Unscheduled";
-        activity(state, "Task done", `${leadLabel(lead)} · ${lead.status}`);
+        activity(state, "Task done", `${leadLabel(lead)} · ${lead.status}`, lead.id);
       } else if (done === false && lead.taskDone) {
         lead.due = lead.taskDone.due;
         delete lead.taskDone;
-        activity(state, "Task reopened", `${leadLabel(lead)} · ${lead.status}`);
+        activity(state, "Task reopened", `${leadLabel(lead)} · ${lead.status}`, lead.id);
       }
       await writeState(state);
       return json(res, 200, lead);
@@ -1936,12 +2061,13 @@ async function route(req, res, url) {
       return json(res, 204, {});
     }
     if (url.pathname === "/api/calls/record" && req.method === "POST") {
-      const { leadId, outcome, note, followUpAt } = await getBody(req);
+      const { leadId, outcome, note, followUpAt, callId } = await getBody(req);
       const state = await readState();
       const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
       if (!callOutcomes.includes(outcome)) return json(res, 400, { error: "Choose a valid call outcome." });
-      const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString(), userId: currentUser().id };
+      const source = callId && !state.calls.some((item) => item.sourceCallId === callId) && state.calls.find((item) => item.id === callId && item.leadId === lead.id && item.userId === currentUser().id && item.sid);
+      const call = { id: `call_${Date.now()}`, leadId: lead.id, outcome, note: String(note || "").trim().slice(0, 1000), at: new Date().toISOString(), userId: currentUser().id, ...(source ? { sourceCallId: source.id } : {}) };
       state.calls.unshift(call);
       enterStage(lead, stageAfterOutcome(lead.status, outcome));
       if (lead.status === "Follow-up" && followUpReasons[outcome]) lead.followUpReason = followUpReasons[outcome];
@@ -1955,7 +2081,7 @@ async function route(req, res, url) {
       else if (followUp) lead.due = followUp;
       else if (["Callback", "Maybe later", "Interested"].includes(outcome)) lead.due = "Follow up";
       if (call.note) lead.note = call.note;
-      activity(state, "Call outcome recorded", `${leadLabel(lead)} · ${outcome}`);
+      activity(state, "Call outcome recorded", `${leadLabel(lead)} · ${outcome}`, lead.id);
       // The newest transcribed call of this lead waits for its outcome before "Call transcribed" automations run.
       const heard = state.calls.find((item) => item.sid && item.leadId === lead.id && item.transcribing && !item.loggedOutcome);
       if (heard) heard.loggedOutcome = outcome;
@@ -2245,7 +2371,7 @@ async function route(req, res, url) {
       return json(res, 200, { token: voiceAccessToken({ accountSid: connection.accountSid, keySid: connection.apiKeySid, keySecret, appSid: connection.twimlAppSid, identity: operatorIdentity }) });
     }
     if (url.pathname === "/api/calls/browser-start" && req.method === "POST") {
-      const { leadId } = await getBody(req);
+      const { leadId, campaign } = await getBody(req);
       const state = await readState();
       const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
@@ -2254,10 +2380,10 @@ async function route(req, res, url) {
       // The call record is created when Twilio actually starts the call (voice/client), so a blocked
       // microphone or failed connection never leaves a call stuck "In progress".
       const callId = `call_${Date.now()}_${randomBytes(3).toString("hex")}`;
-      return json(res, 201, { callId, leadId: lead.id, userId: currentUser().id, token: voiceToken(lead.id, Date.now() + 10 * 60 * 1000) });
+      return json(res, 201, { callId, leadId: lead.id, userId: currentUser().id, token: voiceToken(lead.id, Date.now() + 10 * 60 * 1000), scriptContext: signedScriptContext(lead.id, callId, callScript(lead, state.campaignSettings, campaign)) });
     }
     if (url.pathname === "/api/calls/start" && req.method === "POST") {
-      const { leadId } = await getBody(req);
+      const { leadId, campaign } = await getBody(req);
       const state = await readState();
       const lead = findLead(state, leadId);
       if (!lead) return json(res, 404, { error: "Lead not found." });
@@ -2290,11 +2416,13 @@ async function route(req, res, url) {
         return json(res, 502, { error: `Twilio could not start the call${detail.message ? `: ${detail.message}` : ". Check the outbound number and where you answer calls."}` });
       }
       const remote = await response.json();
+      const callId = `call_${Date.now()}_${randomBytes(3).toString("hex")}`;
+      const script = callScript(lead, state.campaignSettings, campaign);
       await updateState((fresh) => {
-        fresh.calls.unshift({ id: `call_${Date.now()}`, leadId: lead.id, outcome: "In progress", note: "Calling bridge started.", at: new Date().toISOString(), sid: remote.sid, userId: currentUser().id });
+        fresh.calls.unshift({ id: callId, leadId: lead.id, outcome: "In progress", note: "Calling bridge started.", at: new Date().toISOString(), sid: remote.sid, userId: currentUser().id, ...(script || {}) });
         activity(fresh, "Call bridge started", `${leadLabel(lead)} · answer your bridge call to connect`);
       });
-      return json(res, 201, { sid: remote.sid });
+      return json(res, 201, { sid: remote.sid, callId });
     }
     const requested =
       url.pathname === "/" ? "index.html" : url.pathname.replace(/^\//, "");

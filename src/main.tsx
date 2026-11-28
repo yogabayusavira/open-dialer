@@ -1,4 +1,6 @@
-import { FormEvent, Fragment, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, FormEvent, Fragment, ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Background, Controls, Handle, Position, ReactFlow, useEdgesState, useNodesState } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
 import { createRoot } from "react-dom/client";
 import {
   Inbox,
@@ -57,11 +59,22 @@ import {
   ScrollText,
   Workflow,
   Voicemail,
+  ArrowRight,
+  Sun,
+  Moon,
+  House,
+  ListChecks,
+  Megaphone,
+  Contact,
+  Kanban,
+  ChartLine,
+  Headset,
 } from "lucide-react";
 import { Call, Device } from "@twilio/voice-sdk";
 import { hoursStatus, nowIn, parseHours } from "./hours";
 import { money, prices } from "./prices";
 import { about } from "./about";
+import { roadmap } from "./roadmap";
 import { checkCondition, describeCondition, isOtherwise, parseCondition } from "./conditions";
 import "./styles.css";
 import "./design-system.css";
@@ -103,6 +116,9 @@ type CallRecord = {
   note: string;
   at: string;
   userId?: string;
+  scriptCampaign?: string;
+  scriptId?: string;
+  sourceCallId?: string;
   // Talk time of the lead's side, from Twilio; transcript lines when live transcription was on.
   seconds?: number;
   transcribing?: boolean;
@@ -110,10 +126,11 @@ type CallRecord = {
 };
 type Task = { id: string; title: string; details?: string; due: string; leadId: string | null; createdAt: string; doneAt: string | null };
 type TaskFields = { title: string; details: string; due: string; leadId: string | null };
-type CampaignSettings = { script?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[]; transcribe?: boolean };
+type CampaignScript = { id: string; name: string; script: string };
+// `script` is always the text of the script in use (picked on the Scripts page); `scripts` holds all of them.
+type CampaignSettings = { script?: string; scripts?: CampaignScript[]; activeScript?: string; pdf?: { name: string; size: number; updatedAt: string }; variables?: Record<string, string>; value?: number; clean?: Record<string, CleanRule>; pinned?: string[]; transcribe?: boolean };
 // The workspace's automations, n8n style: a trigger (with the campaigns it listens to, none meaning any), then
-// steps run in order. "Only continue if" stops the rest
-// when the lead doesn't match.
+// nodes connected into branches (see FlowNode / FlowEdge). An "If" sends the lead down Yes or No.
 type AutomationTrigger = "lead" | "outcome" | "voicemail" | "transcribed";
 type ConditionOp = "is" | "is not" | "contains" | "is empty" | "is not empty";
 type AutomationStep =
@@ -126,8 +143,36 @@ type AutomationStep =
   | { type: "play"; recordingId: string }
   | { type: "stage"; stage: string }
   | { type: "followup"; days: number };
-type Automation = { id: string; name: string; on: boolean; trigger: AutomationTrigger; campaigns?: string[]; outcomes?: string[]; steps: AutomationStep[] };
-type Recording = { id: string; name: string; size: number; seconds: number; createdAt: string };
+// n8n-style graph: the trigger is node "trigger" (step null); a connection runs from a node's output ("out", or
+// "yes"/"no" on an If) to another node. One output can feed several nodes. `steps` is the pre-graph list format.
+type FlowNode = { id: string; step: AutomationStep | null; x: number; y: number };
+type FlowEdge = { from: string; port: "out" | "yes" | "no"; to: string };
+type Automation = { id: string; name: string; on: boolean; trigger: AutomationTrigger; campaigns?: string[]; outcomes?: string[]; nodes?: FlowNode[]; edges?: FlowEdge[]; steps?: AutomationStep[] };
+// An automation's graph; an old step list becomes a left-to-right chain (an If's Yes carries on), as on the server.
+function flowGraph(item: Automation): { nodes: FlowNode[]; edges: FlowEdge[] } {
+  if (item.nodes?.length) return { nodes: item.nodes, edges: item.edges || [] };
+  const steps = item.steps || [];
+  return {
+    nodes: [{ id: "trigger", step: null, x: 0, y: 0 }, ...steps.map((step, index) => ({ id: `s${index}`, step, x: (index + 1) * 300, y: 0 }))],
+    edges: steps.map((_, index) => ({ from: index ? `s${index - 1}` : "trigger", port: (index && steps[index - 1]?.type === "if" ? "yes" : "out") as FlowEdge["port"], to: `s${index}` })),
+  };
+}
+const flowSteps = (item: Automation) => flowGraph(item).nodes.flatMap((node) => (node.step ? [node.step] : []));
+// Whether `start` already reaches `target`; a connection target -> start would then make a loop.
+function flowReaches(edges: FlowEdge[], start: string, target: string) {
+  const seen = new Set<string>();
+  const stack = [start];
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (id === target) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const edge of edges) if (edge.from === id) stack.push(edge.to);
+  }
+  return false;
+}
+// campaigns and says are labels for staying organized (which campaigns it is for, what it says); they restrict nothing.
+type Recording = { id: string; name: string; size: number; seconds: number; createdAt: string; campaigns?: string[]; says?: string };
 type CleanRule = { from: string; to: string; notes: string };
 // A won lead is worth its own value if set, else its campaign's deal value.
 function dealValue(lead: Lead, settings: Record<string, CampaignSettings>) {
@@ -138,7 +183,7 @@ type State = {
   tasks?: Task[];
   campaignSettings?: Record<string, CampaignSettings>;
   leads: Lead[];
-  activity: { id: string; at: string; action: string; detail: string }[];
+  activity: { id: string; at: string; action: string; detail: string; leadId?: string }[];
   connection: Connection | null;
   calls: CallRecord[];
   dncNumbers: string[];
@@ -159,6 +204,7 @@ type LinkResult = { emailed?: boolean; link?: string; emailError?: string };
 type NumberOption = { sid: string; number: string; label: string };
 type Session = { authenticated: boolean; firstRun?: boolean };
 type Screen = "home" | "queue" | "scripts" | "automations" | "voicemails" | "campaigns" | "calls" | "leads" | "followups" | "activity" | "pipeline" | "analytics" | "settings";
+type CallingRegion = { campaign: string; kind: "state" | "zone"; value: string };
 type SettingsArea = "general" | "account";
 type SettingsPage =
   | "numbers"
@@ -171,7 +217,11 @@ type SettingsPage =
   | "ai"
   | "email"
   | "costs"
-  | "companies";
+  | "companies"
+  | "setup"
+  | "roadmap"
+  | "appearance"
+  | "logs";
 
 class ApiError extends Error {
   constructor(
@@ -182,20 +232,22 @@ class ApiError extends Error {
   }
 }
 
-// Campaigns govern the dialer, scripts, automations and analytics, so those sit under it (sub: indented).
+// The sidebar, in groups. Top: your day across everything. "campaign": the pages the campaign picker filters, with
+// the picker as the group's header. Advanced: automations and voicemails, which work across campaigns. The menu scrolls on
+// its own so your profile, pinned at the bottom, is never pushed off; Settings, Logs and the theme live in Settings.
 const nav = [
-  { id: "home", key: "home", label: "Dashboard", icon: LayoutDashboard },
-  { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Tag },
-  { id: "dashboard", key: "queue", label: "Dialer", icon: Activity, sub: true },
-  { id: "scripts", key: "scripts", label: "Scripts", icon: ScrollText, sub: true },
-  { id: "automations", key: "automations", label: "Automations", icon: Workflow, sub: true },
-  { id: "voicemails", key: "voicemails", label: "Voicemails", icon: Voicemail, sub: true },
-  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartColumn, sub: true },
-  { id: "leads", key: "leads", label: "Leads", icon: Users },
-  { id: "calls", key: "calls", label: "Calls", icon: Phone },
-  { id: "tasks", key: "followups", label: "Tasks", icon: CalendarClock },
-  { id: "pipeline", key: "pipeline", label: "Pipeline", icon: SlidersHorizontal },
-  { id: "logs", key: "activity", label: "Logs", icon: ClipboardList },
+  { id: "home", key: "home", label: "Dashboard", icon: House, group: "" },
+  { id: "tasks", key: "followups", label: "Tasks", icon: ListChecks, group: "" },
+  // Campaigns sits right above the picker: you create campaigns here, and they're what the picker lists.
+  { id: "campaigns", key: "campaigns", label: "Campaigns", icon: Megaphone, group: "" },
+  { id: "dashboard", key: "queue", label: "Dialer", icon: Headset, group: "campaign" },
+  { id: "scripts", key: "scripts", label: "Scripts", icon: ScrollText, group: "campaign" },
+  { id: "leads", key: "leads", label: "Leads", icon: Contact, group: "campaign" },
+  { id: "pipeline", key: "pipeline", label: "Pipeline", icon: Kanban, group: "campaign" },
+  { id: "calls", key: "calls", label: "Calls", icon: PhoneCall, group: "campaign" },
+  { id: "analytics", key: "analytics", label: "Analytics", icon: ChartLine, group: "campaign" },
+  { id: "automations", key: "automations", label: "Automations", icon: Workflow, group: "Advanced" },
+  { id: "voicemails", key: "voicemails", label: "Voicemails", icon: Voicemail, group: "Advanced" },
 ] as const;
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -271,8 +323,8 @@ function heardThrough(item: Automation, lead: Lead, settings: Record<string, Cam
   if (!item.campaigns?.length) return scriptCampaignOf(lead, settings) || own[0] || "";
   return own.find((name) => item.campaigns!.includes(name)) ?? null;
 }
-// What a trigger does for a lead: the steps of each switched-on automation listening to it, in order, up to the
-// first "Only continue if" the lead doesn't match.
+// What a trigger does for a lead right away: the steps of each switched-on automation listening to it, following its
+// connections (an If goes down Yes or No for this lead) and stopping at a Wait, as the server does.
 function automationSteps(trigger: AutomationTrigger, lead: Lead, automations: Automation[] = [], settings: Record<string, CampaignSettings>, outcome = "") {
   return automations
     .filter((item) => item.on && item.trigger === trigger && (trigger !== "outcome" || !item.outcomes?.length || item.outcomes.includes(outcome)))
@@ -280,10 +332,19 @@ function automationSteps(trigger: AutomationTrigger, lead: Lead, automations: Au
       const campaign = heardThrough(item, lead, settings);
       if (campaign === null) return [];
       const out: { campaign: string; step: AutomationStep }[] = [];
-      for (const step of item.steps) {
-        if (step.type === "wait") break;
-        if (step.type !== "if") out.push({ campaign, step });
-        else if (!matches(step, lead, settings[campaign]?.variables)) break;
+      const { nodes, edges } = flowGraph(item);
+      const after = (id: string, port: FlowEdge["port"] = "out") => edges.filter((edge) => edge.from === id && edge.port === port).map((edge) => edge.to);
+      const queue = after("trigger");
+      const ran = new Set<string>();
+      while (queue.length) {
+        const id = queue.shift()!;
+        const step = nodes.find((node) => node.id === id)?.step;
+        if (!step || ran.has(id)) continue;
+        ran.add(id);
+        if (step.type === "wait") continue;
+        if (step.type === "if") { queue.push(...after(id, matches(step, lead, settings[campaign]?.variables) ? "yes" : "no")); continue; }
+        out.push({ campaign, step });
+        queue.push(...after(id));
       }
       return out;
     });
@@ -583,13 +644,15 @@ function campaignsOf(leads: Lead[]) {
   return [...new Set(leads.flatMap((lead) => lead.campaigns || []))].sort((left, right) => left.localeCompare(right));
 }
 
-function CampaignPicker({ campaigns, value, onChange }: { campaigns: string[]; value: string; onChange: (name: string) => void }) {
+// The app-wide campaign. "All campaigns" is listed first, only where a page can show several at once, and is never the default.
+const allCampaignsValue = "__all__";
+function CampaignPicker({ campaigns, value, onChange, allowAll = true }: { campaigns: string[]; value: string; onChange: (name: string) => void; allowAll?: boolean }) {
   if (!campaigns.length) return null;
   return (
     <label className="campaign-picker">
-      <Tag size={16} aria-hidden="true" />
+      <Megaphone size={16} aria-hidden="true" />
       <select value={value} onChange={(event) => onChange(event.target.value)} aria-label="Campaign">
-        <option value="">All campaigns</option>
+        {allowAll && <option value={allCampaignsValue}>All campaigns</option>}
         {campaigns.map((name) => <option key={name}>{name}</option>)}
       </select>
     </label>
@@ -638,10 +701,12 @@ function resting(entry: CallStat | undefined) {
 }
 
 // The calling order: leads never called first (in the order they were added), then retries, least recently called first.
-function callQueue(leads: Lead[], calls: CallRecord[]) {
+// keepPlace: called leads stay where they are (the order they were added), for working straight down a list.
+function callQueue(leads: Lead[], calls: CallRecord[], keepPlace = false) {
   const calledIds = new Set(calls.map((call) => call.leadId));
   const stats = callStats(calls);
   const queue = leads.filter((lead) => inQueue(lead) && !resting(stats.get(lead.id)));
+  if (keepPlace) return queue;
   const lastAt = (lead: Lead) => stats.get(lead.id)?.lastAt || "";
   return [...queue.filter((lead) => !calledBefore(lead, calledIds)), ...queue.filter((lead) => calledBefore(lead, calledIds)).sort((left, right) => lastAt(left).localeCompare(lastAt(right)))];
 }
@@ -844,10 +909,14 @@ function App() {
   const [importOpen, setImportOpen] = useState<false | "leads" | "campaign">(false);
   const [dncOpen, setDncOpen] = useState(false);
   const [campaign, setCampaign] = useState(() => { try { return localStorage.getItem("open-dialer-campaign") || ""; } catch { return ""; } });
+  const [callingRegion, setCallingRegion] = useState<CallingRegion | null>(null);
   useEffect(() => { try { localStorage.setItem("open-dialer-campaign", campaign); } catch { /* private mode: keep it for this visit only */ } }, [campaign]);
   const [outcomeLead, setOutcomeLead] = useState<Lead | null>(null);
+  const lastStartedCall = useRef<{ leadId: string; callId: string; startedAt: number } | null>(null);
   const [editLead, setEditLead] = useState<Lead | null>(null);
-  const [guideOpen, setGuideOpen] = useState(false);
+  // Settings opens on this page when set (the Dashboard's Setup button opens Setup); the key remounts it there.
+  const [settingsPage, setSettingsPage] = useState<{ page: SettingsPage; key: number } | null>(null);
+  const openSetup = () => { setSettingsPage({ page: "setup", key: Date.now() }); setScreen("settings"); };
   const [tourAt, setTourAt] = useState<number | null>(null);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [welcomeToken, setWelcomeToken] = useState(() => (hashParts().page === "welcome" ? hashParts().lead : null));
@@ -936,12 +1005,18 @@ function App() {
   // Set while a voicemail drop is under way, so the hang-up that follows logs it instead of asking.
   const droppedVoicemail = useRef<string | null>(null);
   const nextInQueue = (fresh: State, exclude: string[]) => {
-    const inCampaign = campaign && fresh.leads.some((lead) => lead.campaigns?.includes(campaign)) ? fresh.leads.filter((lead) => lead.campaigns?.includes(campaign)) : fresh.leads;
-    return callQueue(inCampaign, fresh.calls).find((lead) => !exclude.includes(lead.id)) || null;
+    const inCampaign = singleCampaign ? fresh.leads.filter((lead) => lead.campaigns?.includes(singleCampaign)) : fresh.leads;
+    let keepPlace = false;
+    try { keepPlace = localStorage.getItem("open-dialer-queue-order") === "inplace"; } catch { /* private mode */ }
+    const list = callQueue(inCampaign, fresh.calls, keepPlace).filter((lead) => !callingRegion || callingRegion.campaign !== singleCampaign || matchesCallingRegion(lead, callingRegion));
+    // In place: go on down the list from the lead just called instead of jumping back to the top.
+    const from = keepPlace ? list.findIndex((lead) => lead.id === exclude[exclude.length - 1]) + 1 : 0;
+    return list.slice(from).find((lead) => !exclude.includes(lead.id)) || null;
   };
   // Select the next lead and, when calls go through the app, start the countdown to it.
   const advanceFrom = (fresh: State | undefined, done: Lead, message: string) => {
     const next = fresh ? nextInQueue(fresh, [done.id]) : null;
+    if (!next && callingRegion?.campaign === singleCampaign) return notifyWith(`${message} No more leads in this area.`, "Show all areas", () => setCallingRegion(null));
     if (!next) return notifyWith(`${message} That was the last lead in the queue.`, "Import more leads", () => { setScreen("leads"); setImportOpen("leads"); });
     setSelectedId(next.id);
     setNotice(message);
@@ -954,13 +1029,15 @@ function App() {
   };
   const startAppCall = async (lead: Lead) => {
     if (activeCall) return;
+    lastStartedCall.current = null;
     setAutoNext(null);
     hungUpByMe.current = false;
     setActiveCall({ lead, call: null, status: "connecting", muted: false, startedAt: null });
     try {
-      const start = await api<{ callId: string; leadId: string; token: string; userId: string }>("/api/calls/browser-start", { method: "POST", body: JSON.stringify({ leadId: lead.id }) });
+      const start = await api<{ callId: string; leadId: string; token: string; userId: string; scriptContext: string }>("/api/calls/browser-start", { method: "POST", body: JSON.stringify({ leadId: lead.id, campaign: singleCampaign }) });
       const phone = await getPhone(state?.connection?.accountSid || "");
-      const call = await phone.connect({ params: { leadId: start.leadId, callId: start.callId, token: start.token, userId: start.userId } });
+      const call = await phone.connect({ params: { leadId: start.leadId, callId: start.callId, token: start.token, userId: start.userId, scriptContext: start.scriptContext || "" } });
+      lastStartedCall.current = { leadId: lead.id, callId: start.callId, startedAt: Date.now() };
       setActiveCall((current) => current && { ...current, call, callId: start.callId });
       const end = (message?: string, isError = false) => {
         setActiveCall(null);
@@ -977,7 +1054,7 @@ function App() {
           droppedVoicemail.current = null;
           setActiveCall(null);
           const auto = outcomeActions(lead, state?.automations, state?.campaignSettings || {}, "Voicemail");
-          void api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: "Voicemail", note: `Voicemail dropped: ${recording}`, followUpAt: auto.followUpAt || voicemailFollowUp() }) })
+          void api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, callId: start.callId, outcome: "Voicemail", note: `Voicemail dropped: ${recording}`, followUpAt: auto.followUpAt || voicemailFollowUp() }) })
             .then(() => refresh())
             .then((fresh) => advanceFrom(fresh, lead, `Voicemail dropped for ${leadLabel(lead)}. Follow-up set for 2 business days out.`))
             .catch((error) => showError(error instanceof Error ? error.message : "Couldn't log the voicemail."));
@@ -1020,11 +1097,13 @@ function App() {
   }, [autoNext, activeCall]);
   const prepareCall = async (lead: Lead) => {
     if (usesAppPhone(state?.connection)) return startAppCall(lead);
+    lastStartedCall.current = null;
     try {
-      await api("/api/calls/start", {
+      const started = await api<{ callId: string }>("/api/calls/start", {
         method: "POST",
-        body: JSON.stringify({ leadId: lead.id }),
+        body: JSON.stringify({ leadId: lead.id, campaign: singleCampaign }),
       });
+      lastStartedCall.current = { leadId: lead.id, callId: started.callId, startedAt: Date.now() };
       await refresh();
       setNotice(`Ringing ${state?.connection?.bridgeNumber?.startsWith("sip:") ? "Zoiper" : "your phone"} now. Answer it to connect with ${leadLabel(lead)}.`);
     } catch (error) {
@@ -1075,7 +1154,9 @@ function App() {
   const [scriptFor, setScriptFor] = useState<string | null>(null);
   // Which part of the campaign Settings popup opens first (Scripts and Automations link straight to one).
   const [scriptTab, setScriptTab] = useState<CampaignTab>("script");
-  const editCampaign = (name: string, tab: CampaignTab = "script") => { setScriptTab(tab); setScriptFor(name); };
+  // Which of the campaign's scripts the dialog edits: an id, "new" for a new one, or undefined for the one in use.
+  const [scriptEditId, setScriptEditId] = useState<string | undefined>(undefined);
+  const editCampaign = (name: string, tab: CampaignTab = "script", scriptId?: string) => { setScriptTab(tab); setScriptEditId(scriptId); setScriptFor(name); };
   const [pdfFor, setPdfFor] = useState<string | null>(null);
   // The task dialog: "new" to add one, or the task being viewed and edited.
   const [taskDialog, setTaskDialog] = useState<{ task?: Task; leadId?: string } | null>(null);
@@ -1184,18 +1265,22 @@ function App() {
         </section>
       </main>
     );
-  const campaigns = campaignsOf(state.leads);
-  const activeCampaign = campaigns.includes(campaign) ? campaign : "";
-  // The campaign picker narrows the dashboard, leads list and board together.
-  const scoped = activeCampaign
-    ? (() => {
-        const leads = state.leads.filter((lead) => lead.campaigns?.includes(activeCampaign));
-        const ids = new Set(leads.map((lead) => lead.id));
-        return { ...state, leads, calls: state.calls.filter((call) => ids.has(call.leadId)) };
-      })()
-    : state;
-  const scopedSelected = scoped.leads.find((lead) => lead.id === selected?.id) || scoped.leads[0];
-  const picker = <CampaignPicker campaigns={campaigns} value={activeCampaign} onChange={setCampaign} />;
+  const campaigns = allCampaigns(state.leads, state.campaignSettings || {});
+  // One campaign for the whole app, picked anywhere. The first campaign is the default; "All campaigns" only when chosen.
+  const singleCampaign = campaigns.includes(campaign) ? campaign : campaigns[0] || "";
+  const activeCampaign = campaign === allCampaignsValue ? "" : singleCampaign;
+  const scopeTo = (name: string) => {
+    if (!name) return state;
+    const leads = state.leads.filter((lead) => lead.campaigns?.includes(name));
+    const ids = new Set(leads.map((lead) => lead.id));
+    return { ...state, leads, calls: state.calls.filter((call) => ids.has(call.leadId)), tasks: (state.tasks || []).filter((task) => !task.leadId || ids.has(task.leadId)) };
+  };
+  // Pages that can show every campaign follow activeCampaign; the Dialer and Scripts always work on one.
+  const scoped = scopeTo(activeCampaign);
+  const dialerScoped = scopeTo(singleCampaign);
+  const scopedSelected = dialerScoped.leads.find((lead) => lead.id === selected?.id) || dialerScoped.leads[0];
+  // Pages that work on one campaign ask for one when "All campaigns" is picked; pages that don't use a campaign say so.
+  const allPicked = campaign === allCampaignsValue && campaigns.length > 0;
   const startCampaign = (name: string) => {
     setCampaign(name);
     const first = callQueue(state.leads.filter((lead) => lead.campaigns?.includes(name)), state.calls)[0];
@@ -1208,40 +1293,34 @@ function App() {
         <Brand />
         <div className="workspace-label">Workspace</div>
         <nav aria-label="Workspace navigation">
-          {nav.map(({ id, key, label, icon: Icon, ...item }) => (
-            <button
-              key={id}
-              data-tour={`nav-${key}`}
-              className={`nav-item${"sub" in item ? " nav-item--sub" : ""}${screen === key ? " nav-item--active" : ""}`}
-              onClick={() => { setLeadsView("all"); setCallsView("conversations"); setScreen(key); }}
-            >
-              <Icon size={18} />
-              <span>{label}</span>
-              {id === "tasks" && followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length > 0 && <b>{followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length}</b>}
-            </button>
+          {nav.map(({ id, key, label, icon: Icon, group }, index, list) => (
+            <Fragment key={id}>
+              {group && group !== list[index - 1]?.group && (group !== "campaign" ? <div className="nav-group">{group}</div> : campaigns.length
+                ? <div className="sidebar-campaign"><CampaignPicker campaigns={campaigns} value={allPicked ? allCampaignsValue : singleCampaign} onChange={setCampaign} /></div>
+                : <button type="button" className="quiet-button sidebar-campaign sidebar-campaign--new" onClick={() => editCampaign("", "general")}><Plus size={16} aria-hidden="true" /> New campaign</button>)}
+              <button
+                data-tour={`nav-${key}`}
+                className={`nav-item${screen === key ? " nav-item--active" : ""}`}
+                aria-current={screen === key ? "page" : undefined}
+                onClick={() => { setLeadsView("all"); setCallsView("conversations"); setScreen(key); }}
+              >
+                <Icon size={18} />
+                <span>{label}</span>
+                {id === "tasks" && followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length > 0 && <b>{followUps.length + (state.tasks || []).filter((task) => !task.doneAt).length}</b>}
+              </button>
+              {/* Unibox: SMS and email replies in one place. Not built yet, so it can't be opened. */}
+              {id === "tasks" && (
+                <button className="nav-item nav-item--soon" type="button" disabled aria-disabled="true" title="Coming soon">
+                  <Inbox size={18} />
+                  <span>Unibox</span>
+                  <small className="nav-soon">Soon</small>
+                </button>
+              )}
+            </Fragment>
           ))}
-          {/* Unibox: SMS and email replies in one place. Not built yet, so it can't be opened. */}
-          <button className="nav-item nav-item--soon" type="button" disabled aria-disabled="true" title="Coming soon">
-            <Inbox size={18} />
-            <span>Unibox</span>
-            <small className="nav-soon">Soon</small>
-          </button>
-          {/* Placeholder for tools that come later; for now it opens the logs. */}
-          <button className="nav-item" type="button" onClick={() => setScreen("activity")}>
-            <MoreHorizontal size={18} />
-            <span>More</span>
-          </button>
         </nav>
         <div className="sidebar-footer">
-          <button className="nav-item sidebar-utility" type="button" onClick={() => setLightMode((current) => !current)}>
-            <ShieldCheck size={18} />
-            <span>{lightMode ? "Dark mode" : "Light mode"}</span>
-          </button>
-          <button className="nav-item sidebar-utility" type="button" onClick={() => setScreen("settings")}>
-            <SlidersHorizontal size={18} />
-            <span>Settings</span>
-          </button>
-          <button className="account-summary" type="button" onClick={() => setScreen("settings")}>
+          <button className={`account-summary${screen === "settings" ? " is-active" : ""}`} type="button" title="Settings" aria-label={`${state.me.name}, ${state.workspace.name}: open Settings`} onClick={() => { setSettingsPage(null); setScreen("settings"); }}>
             {/* Notion-style face, the same DiceBear "notionists" avatar Guramo uses; seeded with the random user id, nothing personal. */}
             <span className="account-summary__avatar"><img src={`https://api.dicebear.com/7.x/notionists/svg?seed=${encodeURIComponent(state.me.id)}`} alt="" /></span>
             <span>
@@ -1250,16 +1329,18 @@ function App() {
             </span>
             <ChevronRight size={15} />
           </button>
-          {/* Required to stay visible: NOTICE.md, additional term 1. */}
-          <a className="sidebar-credit" href={about.sourceUrl} target="_blank" rel="noreferrer">Powered by {about.name} · by {about.author}</a>
+          <a className="sidebar-credit" href={about.sourceUrl} target="_blank" rel="noreferrer" aria-label={`Powered by ${about.name} · by ${about.author} (opens GitHub)`}>
+            Powered by {about.name}
+            <span className="sidebar-credit__tooltip" aria-hidden="true">Powered by {about.name} · by {about.author}</span>
+          </a>
         </div>
       </aside>
       <section className="workbench">
-        {screen !== "queue" && <header className="topbar">
+        {screen !== "queue" && <header className="topbar page-enter" key={`header-${screen}`}>
           <div>
             <p className="date-line">Workspace</p>
             <h1>
-              {screen === "settings" ? "Settings" : nav.find((item) => item.key === screen)?.label}
+              {screen === "settings" ? "Settings" : screen === "activity" ? "Logs" : nav.find((item) => item.key === screen)?.label}
             </h1>
             {screen === "leads" && (
               <p className="page-subtitle">
@@ -1268,19 +1349,11 @@ function App() {
             )}
           </div>
           <div className="top-actions">
-            {(screen === "home" || screen === "leads" || screen === "pipeline" || screen === "analytics" || screen === "scripts" || screen === "voicemails") && picker}
-            <button
-              className="quick-tour-button"
-              onClick={() => setGuideOpen(true)}
-            >
-              <BadgeCheck size={17} /> Setup guide
-            </button>
-            <button
-              className="primary-button"
-              onClick={() => (screen === "followups" ? setTaskDialog({}) : setShowLeadForm(true))}
-            >
-              <Plus size={18} /> {screen === "followups" ? "Add task" : "Add lead"}
-            </button>
+            
+            {/* The page's own main action: leads on Leads and Pipeline, tasks on Tasks, scripts on Scripts; none elsewhere. */}
+            {(screen === "leads" || screen === "pipeline") && <button className="primary-button" onClick={() => setShowLeadForm(true)}><Plus size={18} /> Add lead</button>}
+            {screen === "followups" && <button className="primary-button" onClick={() => setTaskDialog({})}><Plus size={18} /> Add task</button>}
+            {screen === "scripts" && singleCampaign && !allPicked && <button className="primary-button" onClick={() => editCampaign(singleCampaign, "script", "new")}><Plus size={18} /> New script</button>}
           </div>
         </header>}
         {activeCall?.callId && featuresOf(state).transcription && featuresOf(state).captions && <LiveCaptions callId={activeCall.callId} />}
@@ -1323,7 +1396,7 @@ function App() {
             onSkip={() => {
               const skipped = [...autoNext.skipped, autoNext.lead.id];
               const next = nextInQueue(state, skipped);
-              if (!next) { setAutoNext(null); return notifyWith("No more leads in the queue.", "Import more leads", () => { setScreen("leads"); setImportOpen("leads"); }); }
+              if (!next) { setAutoNext(null); return callingRegion?.campaign === singleCampaign ? notifyWith("No more leads in this area.", "Show all areas", () => setCallingRegion(null)) : notifyWith("No more leads in the queue.", "Import more leads", () => { setScreen("leads"); setImportOpen("leads"); }); }
               setSelectedId(next.id);
               setAutoNext({ lead: next, seconds: autoDialSeconds, paused: autoNext.paused, skipped });
             }}
@@ -1343,11 +1416,22 @@ function App() {
             </button>
           </div>
         )}
-        {screen === "queue" && scopedSelected && (
+        <div className="page-enter" key={`content-${screen}`}>
+        {screen === "queue" && allPicked && <PickCampaign title="The Dialer calls one campaign at a time" body="Pick the campaign to call. The sidebar switches to it too." campaigns={campaigns} detail={(name) => { const count = scopeTo(name).leads.length; return `${count} lead${count === 1 ? "" : "s"}`; }} onPick={setCampaign} />}
+        {screen === "queue" && !allPicked && scopedSelected && (
           <Queue
-            state={scoped}
+            state={dialerScoped}
+            campaign={singleCampaign}
+            region={callingRegion?.campaign === singleCampaign ? callingRegion : null}
+            onRegionChange={(next) => {
+              setAutoNext(null);
+              setCallingRegion(next);
+              if (next) {
+                const first = callQueue(dialerScoped.leads, state.calls).find((lead) => matchesCallingRegion(lead, next));
+                if (first) setSelectedId(first.id);
+              }
+            }}
             selected={scopedSelected}
-            picker={picker}
             onSelect={setSelectedId}
             onPrepare={prepareCall}
             calling={Boolean(activeCall)}
@@ -1359,7 +1443,8 @@ function App() {
             onRefresh={refresh}
             onNotice={setNotice}
             onAddLead={() => setShowLeadForm(true)}
-            onGuide={() => setGuideOpen(true)}
+            onGuide={openSetup}
+            setup={(() => { const required = setupSteps(state).filter((step) => !step.optional); return { done: required.filter((step) => step.done).length, total: required.length }; })()}
             onAddTask={(lead) => setTaskDialog({ leadId: lead.id })}
             onOpenPdf={setPdfFor}
             onEditScript={(name) => editCampaign(name)}
@@ -1371,7 +1456,7 @@ function App() {
             }}
           />
         )}
-        {screen === "queue" && !scopedSelected && (
+        {screen === "queue" && !allPicked && !scopedSelected && (
           <section className="dash-empty" aria-label="No leads yet">
             <h1>No leads yet</h1>
             <p>Import a CSV of the people you want to call, or add one lead by hand. They show up here, ready to dial.</p>
@@ -1384,7 +1469,7 @@ function App() {
         {screen === "calls" && (
           <CallHistory
             key={callsView}
-            calls={state.calls}
+            calls={scoped.calls}
             leads={state.leads}
             initialView={callsView}
             onOpenLead={(id) => { setSelectedId(id); setScreen("queue"); }}
@@ -1393,7 +1478,6 @@ function App() {
               setSelectedId(state.leads.find((lead) => !lead.dnc)?.id || null);
               setScreen("queue");
             }}
-            onOpenPhoneNumbers={() => setScreen("settings")}
             onUpgrade={() => setScreen("settings")}
           />
         )}
@@ -1454,7 +1538,7 @@ function App() {
         {screen === "analytics" && <Analytics calls={scoped.calls} team={state.team} isOwner={state.me.role === "owner"} onOpenCalls={() => setScreen("calls")} />}
         {screen === "home" && (
           <Home
-            state={scoped}
+            state={state}
             all={state}
             followUps={followUps}
             onOpenLead={(id) => { setSelectedId(id); setScreen("queue"); }}
@@ -1462,9 +1546,9 @@ function App() {
             onGo={setScreen}
           />
         )}
-        {screen === "scripts" && <ScriptsPage leads={state.leads} settings={state.campaignSettings || {}} campaign={activeCampaign} onEdit={editCampaign} />}
+        {screen === "scripts" && <ScriptsPage leads={state.leads} calls={state.calls} settings={state.campaignSettings || {}} campaign={allPicked ? "" : singleCampaign} onPick={setCampaign} onEdit={editCampaign} onChanged={async (message) => { await refresh(); setNotice(message); }} />}
         {screen === "automations" && <AutomationsPage automations={state.automations || []} leads={state.leads} settings={state.campaignSettings || {}} vault={state.voicemails || []} onRefresh={refresh} onOpenVault={() => setScreen("voicemails")} />}
-        {screen === "voicemails" && <VoicemailsPage vault={state.voicemails || []} automations={state.automations || []} settings={state.campaignSettings || {}} campaign={activeCampaign} onRefresh={refresh} onNotice={setNotice} />}
+        {screen === "voicemails" && <VoicemailsPage vault={state.voicemails || []} automations={state.automations || []} settings={state.campaignSettings || {}} campaigns={campaigns} defaultCampaign={singleCampaign} onRefresh={refresh} onNotice={setNotice} />}
         {screen === "campaigns" && (
           <Campaigns
             leads={state.leads}
@@ -1478,6 +1562,12 @@ function App() {
         )}
         {screen === "settings" && (
           <Settings
+            key={settingsPage?.key}
+            initialPage={settingsPage?.page}
+            onTour={setTourAt}
+            lightMode={lightMode}
+            onTheme={setLightMode}
+            onOpenLead={(id) => { setSelectedId(id); setScreen("queue"); }}
             fullState={state}
             me={state.me}
             workspace={state.workspace}
@@ -1495,11 +1585,13 @@ function App() {
             onNotice={setNotice}
           />
         )}
+        </div>
       </section>
       {scriptFor !== null && (
         <ScriptDialog
           campaign={scriptFor}
           initialTab={scriptTab}
+          scriptId={scriptEditId}
           settings={state.campaignSettings?.[scriptFor] || {}}
           columns={[...new Set([...(state.settings?.fields || []), ...state.leads.filter((lead) => !scriptFor || lead.campaigns?.includes(scriptFor)).flatMap((lead) => Object.keys(lead.details || {}))])].sort()}
           leads={state.leads.filter((lead) => lead.campaigns?.includes(scriptFor))}
@@ -1548,23 +1640,14 @@ function App() {
           }}
         />
       )}
-      {importOpen && <ImportLeads campaigns={[...new Set([...campaigns, ...Object.keys(state.campaignSettings || {})])]} settings={state.campaignSettings || {}} fields={state.settings?.fields} defaultCampaign={importOpen === "campaign" && campaign ? campaign : activeCampaign} requireCampaign={importOpen === "campaign"} onClose={() => setImportOpen(false)} onSaved={async (message, name) => { setImportOpen(false); await refresh(); notifyWith(message, "Start calling", () => { setCampaign(name); setScreen("queue"); }); }} />}
+      {importOpen && <ImportLeads campaigns={[...new Set([...campaigns, ...Object.keys(state.campaignSettings || {})])]} settings={state.campaignSettings || {}} fields={state.settings?.fields} defaultCampaign={importOpen === "campaign" ? singleCampaign : activeCampaign} requireCampaign={importOpen === "campaign"} onClose={() => setImportOpen(false)} onSaved={async (message, name) => { setImportOpen(false); await refresh(); notifyWith(message, "Start calling", () => { setCampaign(name); setScreen("queue"); }); }} />}
       {dncOpen && <DncList onClose={() => setDncOpen(false)} onSaved={async (message) => { setDncOpen(false); await refresh(); setNotice(message); }} />}
-      {outcomeLead && <CallOutcome lead={outcomeLead} automations={state.automations} settings={state.campaignSettings || {}} bookingUrl={state.settings?.bookingUrl || ""} onBook={() => openBooking(state.settings!.bookingUrl!, outcomeLead.name).catch((error) => showError(error instanceof Error ? error.message : "Couldn't open the booking page."))} onClose={() => setOutcomeLead(null)} onSaved={async (outcome) => {
+      {outcomeLead && <CallOutcome lead={outcomeLead} callId={lastStartedCall.current?.leadId === outcomeLead.id && Date.now() - lastStartedCall.current.startedAt < 6 * 60 * 60 * 1000 ? lastStartedCall.current.callId : undefined} automations={state.automations} settings={state.campaignSettings || {}} bookingUrl={state.settings?.bookingUrl || ""} onBook={() => openBooking(state.settings!.bookingUrl!, outcomeLead.name).catch((error) => showError(error instanceof Error ? error.message : "Couldn't open the booking page."))} onClose={() => setOutcomeLead(null)} onSaved={async (outcome) => {
+        lastStartedCall.current = null;
         setOutcomeLead(null);
         advanceFrom(await refresh(), outcomeLead, `${outcome} saved for ${leadLabel(outcomeLead)}.`);
       }} />}
       {editLead && <LeadForm lead={editLead} campaigns={campaigns} fields={state.settings?.fields} onClose={() => setEditLead(null)} onSaved={async () => { setEditLead(null); await refresh(); setNotice("Lead updated."); }} onDeleted={async () => { const name = leadLabel(editLead); setEditLead(null); if (selectedId === editLead.id) setSelectedId(null); await refresh(); setNotice(`${name} deleted.`); }} />}
-      {guideOpen && (
-        <SetupGuide
-          state={state}
-          onClose={() => setGuideOpen(false)}
-          onTour={(step) => {
-            setGuideOpen(false);
-            setTourAt(step);
-          }}
-        />
-      )}
       {tourAt !== null && <SetupTour steps={setupSteps(state)} start={tourAt} onScreen={setScreen} onClose={() => setTourAt(null)} />}
     </main>
   );
@@ -1575,7 +1658,6 @@ function CallHistory({
   leads,
   onStartDialing,
   onOpenDialer,
-  onOpenPhoneNumbers,
   onUpgrade,
   initialView,
   onOpenLead,
@@ -1584,7 +1666,6 @@ function CallHistory({
   leads: Lead[];
   onStartDialing: () => void;
   onOpenDialer: () => void;
-  onOpenPhoneNumbers: () => void;
   onUpgrade: () => void;
   initialView: "conversations" | "attempts" | "callbacks";
   onOpenLead: (id: string) => void;
@@ -1611,7 +1692,7 @@ function CallHistory({
     anchor.click();
     URL.revokeObjectURL(href);
   };
-  const subtitle = view === "conversations" ? `${entries.length} recorded conversations` : view === "attempts" ? `${entries.length} recorded call attempts` : `${entries.length} callbacks`;
+  const subtitle = view === "conversations" ? `${entries.length} recorded connects` : view === "attempts" ? `${entries.length} recorded call attempts` : `${entries.length} callbacks`;
 
   return (
     <section className="calls-page" aria-label="Calls">
@@ -1639,7 +1720,7 @@ function CallHistory({
           aria-selected={view === "conversations"}
           onClick={() => setView("conversations")}
         >
-          Conversations
+          Connects
         </button>
         <button
           className={view === "attempts" ? "is-active" : ""}
@@ -1690,7 +1771,7 @@ function CallHistory({
         </div>
       )}
 
-      {!entries.length ? <div className="calls-empty"><p>{isCallbacks ? "No callbacks are recorded yet." : "No calls match this view."}</p><span><button type="button" onClick={onStartDialing}>Open leads →</button> or <button type="button" onClick={onOpenPhoneNumbers}>review phone settings →</button></span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><button type="button" className="text-link" onClick={() => call.lead && onOpenLead(call.lead.id)}><b>{call.lead && leadLabel(call.lead)}</b></button><small>{call.lead?.company} · {call.lead && formatPhone(call.lead.phone, call.lead.extension)}</small></div><Status tone={call.outcome === "Do not call" || call.outcome === "Didn't connect" ? "alert" : call.outcome === "In progress" || call.outcome === "Call ended" ? "quiet" : "good"}>{call.outcome}</Status><div><small>{dueLabel(call.at).text}{call.seconds ? ` · ${clockOf(call.seconds)}` : ""}</small>{call.note && <p>{call.note}</p>}{call.transcript?.length ? <details className="call-transcript"><summary>Transcript · {call.transcript.length} line{call.transcript.length === 1 ? "" : "s"}</summary>{call.transcript.map((line, index) => <p key={index} className={`is-${line.who}`}><b>{line.who === "you" ? "You" : "Them"}</b> {line.text}</p>)}</details> : null}</div></article>)}</div>}
+      {!entries.length ? <div className="calls-empty"><p>{!calls.length ? "Your call history starts here." : isCallbacks ? "No callbacks match this view." : "No calls match this view."}</p><span>{!calls.length ? <>Make or log a call to see its result here. <button type="button" onClick={onStartDialing}>Open leads →</button></> : <>Try another view or date range. <button type="button" onClick={() => { setQuery(""); setOutcome("All outcomes"); setRange("All time"); setView("attempts"); }}>Show all attempts →</button></>}</span></div> : <div className="call-history-list">{entries.map((call) => <article key={call.id}><div><button type="button" className="text-link" onClick={() => call.lead && onOpenLead(call.lead.id)}><b>{call.lead && leadLabel(call.lead)}</b></button><small>{call.lead?.company} · {call.lead && formatPhone(call.lead.phone, call.lead.extension)}</small></div><Status tone={call.outcome === "Do not call" || call.outcome === "Didn't connect" ? "alert" : call.outcome === "In progress" || call.outcome === "Call ended" ? "quiet" : "good"}>{call.outcome}</Status><div><small>{dueLabel(call.at).text}{call.seconds ? ` · ${clockOf(call.seconds)}` : ""}</small>{call.note && <p>{call.note}</p>}{call.transcript?.length ? <details className="call-transcript"><summary>Transcript · {call.transcript.length} line{call.transcript.length === 1 ? "" : "s"}</summary>{call.transcript.map((line, index) => <p key={index} className={`is-${line.who}`}><b>{line.who === "you" ? "You" : "Them"}</b> {line.text}</p>)}</details> : null}</div></article>)}</div>}
     </section>
   );
 }
@@ -1765,6 +1846,9 @@ function leadState(lead: Lead) {
 function leadStateCode(lead: Lead) {
   return leadState(lead)?.[0] || null;
 }
+function matchesCallingRegion(lead: Lead, region: CallingRegion) {
+  return region.kind === "state" ? leadStateCode(lead) === region.value : leadZone(lead)?.zone === region.value;
+}
 
 // Tile grid of the US: one square per state, [code, column, row].
 const stateTiles: [string, number, number][] = [
@@ -1778,18 +1862,23 @@ const stateTiles: [string, number, number][] = [
   ["HI", 0, 7], ["TX", 3, 7], ["FL", 8, 7],
 ];
 
-function StateTileMap({ leads, current, zone }: { leads: Lead[]; current: string | null; zone: string | null }) {
+function StateTileMap({ leads, current, zone, region, onPick, disabled, now }: { leads: Lead[]; current: string | null; zone: string | null; region: CallingRegion | null; onPick: (code: string) => void; disabled: boolean; now: Date }) {
   const counts = new Map<string, number>();
-  for (const lead of leads) { const code = leadStateCode(lead); if (code) counts.set(code, (counts.get(code) || 0) + 1); }
+  const zonesByState = new Map<string, Set<string>>();
+  for (const lead of leads) { const code = leadStateCode(lead); if (code) { counts.set(code, (counts.get(code) || 0) + 1); const area = leadZone(lead)?.zone; if (area) { if (!zonesByState.has(code)) zonesByState.set(code, new Set()); zonesByState.get(code)!.add(area); } } }
   const size = 22, gap = 3;
   return (
-    <svg className="state-map" viewBox={`0 0 ${11 * (size + gap) - gap} ${8 * (size + gap) - gap}`} role="img" aria-label={`Leads by state${current ? `, current lead in ${current}` : ""}`}>
+    <svg className="state-map" viewBox={`0 0 ${11 * (size + gap) - gap} ${8 * (size + gap) - gap}`} role="group" aria-label="Filter the calling queue by state">
       {stateTiles.map(([code, col, row]) => {
         const count = counts.get(code) || 0;
+        const localZones = [...(zonesByState.get(code) || [])];
+        const localTimes = localZones.map((area) => `${zoneName(area)} ${zoneClock(area, now)?.label || ""}`).join(", ");
+        const description = `${stateZones.find(([c]) => c === code)?.[1] || code}: ${count} lead${count === 1 ? "" : "s"} in calling queue${localTimes ? ` · ${localTimes}` : ""}`;
         return (
-          <g key={code} className={[code === current && "is-current", zone && stateZones.find(([c]) => c === code)?.[2] === zone && "in-zone", count && "has-leads"].filter(Boolean).join(" ")}>
-            <title>{`${code}: ${count} lead${count === 1 ? "" : "s"}`}</title>
+          <g key={code} className={[code === current && "is-current", zone && zonesByState.get(code)?.has(zone) && "in-zone", count && "has-leads", region?.kind === "state" && region.value === code && "is-filtered"].filter(Boolean).join(" ")} {...(count && !disabled ? { role: "button", tabIndex: 0, "aria-label": description, "aria-pressed": region?.kind === "state" && region.value === code, onClick: () => onPick(code), onKeyDown: (event: React.KeyboardEvent<SVGGElement>) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onPick(code); } } } : { "aria-hidden": true })}>
+            <title>{description}</title>
             <rect x={col * (size + gap)} y={row * (size + gap)} width={size} height={size} rx={4} />
+            {count > 0 && <text x={col * (size + gap) + size / 2} y={row * (size + gap) + size / 2} textAnchor="middle" dominantBaseline="central" aria-hidden="true">{code}</text>}
           </g>
         );
       })}
@@ -1871,33 +1960,30 @@ function zoneName(zone: string) {
   return zoneNames.get(zone)!;
 }
 // One clock per time zone that has leads still to work, biggest first, plus your own time.
-function ZoneClocks({ leads, current, now }: { leads: Lead[]; current: string | null; now: Date }) {
+function ZoneClocks({ leads, current, now, region, onPick, disabled }: { leads: Lead[]; current: string | null; now: Date; region: CallingRegion | null; onPick: (zone: string) => void; disabled: boolean }) {
   const zones = new Map<string, { zone: string; count: number }>();
   for (const lead of leads) {
-    if (lead.dnc || ["Won", "Lost"].includes(lead.status)) continue;
     const found = leadZone(lead);
     if (!found) continue;
-    const name = zoneName(found.zone);
-    const entry = zones.get(name) || { zone: found.zone, count: 0 };
+    const entry = zones.get(found.zone) || { zone: found.zone, count: 0 };
     entry.count += 1;
-    zones.set(name, entry);
+    zones.set(found.zone, entry);
   }
   const rows = [...zones].sort((left, right) => right[1].count - left[1].count);
-  const shown = rows.slice(0, 4);
-  const currentName = current ? zoneName(current) : null;
   return (
     <ul className="zone-clocks" aria-label="Local times where your leads are">
-      {shown.map(([name, { zone, count }]) => {
+      {rows.map(([key, { zone, count }]) => {
+        const name = zoneName(zone);
+        const label = rows.filter(([, row]) => zoneName(row.zone) === name).length > 1 ? `${name} · ${zone.split("/").pop()!.replace(/_/g, " ")}` : name;
         const clock = zoneClock(zone, now);
         if (!clock) return null;
         const note = hoursNote(clock);
         return (
-          <li key={name} className={`${note.open ? "is-open" : ""}${name === currentName ? " is-current" : ""}`} title={`${count} lead${count === 1 ? "" : "s"} in ${name} time`}>
-            <i aria-hidden="true" />{name} <b>{clock.label}</b> <span>{note.text}</span>
+          <li key={key} className={`${note.open ? "is-open" : ""}${zone === current ? " is-current" : ""}`}>
+            <button type="button" disabled={disabled} aria-pressed={region?.kind === "zone" && region.value === zone} onClick={() => onPick(zone)}><i aria-hidden="true" /><span className="zone-clocks__name">{label}</span> <b>{clock.label}</b> <span>{count} lead{count === 1 ? "" : "s"} · {note.text}</span></button>
           </li>
         );
       })}
-      {rows.length > shown.length && <li title={rows.slice(shown.length).map(([name]) => name).join(", ")}>+{rows.length - shown.length} more</li>}
     </ul>
   );
 }
@@ -1945,6 +2031,29 @@ function FollowUpTag({ lead, calls }: { lead: Lead; calls: CallRecord[] }) {
       {info.exhausted ? `${followUpLimit} follow-ups, no reply` : `Follow-up ${info.step} of ${followUpLimit}`}
       {info.reason && <em>{info.reason}</em>}
     </span>
+  );
+}
+
+// A lead's stage as one small circle, after Linear's issue status: empty ring for not called yet, a ring filling a third
+// per follow-up in that follow-up's color, a check for meeting booked and won, an x for lost.
+function StageCircle({ lead, calls, called }: { lead: Lead; calls: CallRecord[]; called: boolean }) {
+  const info = followUpInfo(lead, calls);
+  const [tone, fill, mark, label] =
+    lead.status === "Won" ? ["var(--dot-good)", 1, "check", "Won"]
+    : lead.status === "Meeting booked" ? ["var(--fu-1)", 1, "check", "Meeting booked"]
+    : lead.status === "Lost" ? ["var(--fu-done)", 1, "x", "Lost"]
+    : info ? (info.exhausted ? ["var(--fu-done)", 1, "", `${followUpLimit} follow-ups, no reply`] : [`var(--fu-${info.step})`, info.step / followUpLimit, "", `Follow-up ${info.step} of ${followUpLimit}`])
+    : called ? ["var(--dot-tried)", 0.25, "", "Called, no follow-up set"]
+    : ["var(--color-text-faint, var(--color-text-muted))", 0, "", "Not called yet"];
+  const pie = 2 * Math.PI * 2.5;
+  return (
+    <svg className="stage-circle" width="14" height="14" viewBox="0 0 14 14" role="img" aria-label={label}>
+      <title>{label}</title>
+      {mark ? <circle cx="7" cy="7" r="6.25" fill={tone} /> : <circle cx="7" cy="7" r="5.75" fill="none" stroke={tone} strokeWidth="1.5" />}
+      {!mark && fill > 0 && <circle cx="7" cy="7" r="2.5" fill="none" stroke={tone} strokeWidth="5" strokeDasharray={`${pie * fill} ${pie}`} transform="rotate(-90 7 7)" />}
+      {mark === "check" && <path d="M4.3 7.2 6.2 9 9.7 5.3" fill="none" stroke="var(--color-surface)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />}
+      {mark === "x" && <path d="M5 5l4 4M9 5l-4 4" stroke="var(--color-surface)" strokeWidth="1.6" strokeLinecap="round" />}
+    </svg>
   );
 }
 
@@ -2011,13 +2120,14 @@ function Analytics({ calls, team, isOwner, onOpenCalls }: { calls: CallRecord[];
       <div className="analytics-head">
         <dl className="analytics-totals">
           <div><dt>Calls</dt><dd>{attempts.length}</dd></div>
-          <div><dt>Conversations</dt><dd>{conversations}</dd></div>
+          <div><dt>Connects</dt><dd>{conversations}</dd></div>
           <div><dt>Connect rate</dt><dd>{attempts.length ? `${Math.round((conversations / attempts.length) * 100)}%` : "–"}</dd></div>
         </dl>
         <div className="segmented" role="group" aria-label="Date range">
           {[7, 14, 30].map((days) => <button key={days} type="button" className={range === days ? "is-active" : ""} aria-pressed={range === days} onClick={() => setRange(days)}>{days} days</button>)}
         </div>
       </div>
+      <p className="analytics-definition">Connect rate is connects divided by call attempts. Connects are based on logged outcomes.</p>
       <CallsChart key={range} calls={calls} range={range} onOpenCalls={onOpenCalls} />
       <div className="analytics-grid">
         <section className="analytics-card">
@@ -2035,7 +2145,7 @@ function Analytics({ calls, team, isOwner, onOpenCalls }: { calls: CallRecord[];
             <h2>Calls by person</h2>
             {callerRows.length ? (
               <table className="analytics-table">
-                <thead><tr><th scope="col">Person</th><th scope="col">Calls</th><th scope="col">Conversations</th></tr></thead>
+                <thead><tr><th scope="col">Person</th><th scope="col">Calls</th><th scope="col">Connects</th></tr></thead>
                 <tbody>{callerRows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.calls}</td><td>{row.conversations}</td></tr>)}</tbody>
               </table>
             ) : <p className="analytics-empty">No calls in the last {range} days.</p>}
@@ -2102,14 +2212,14 @@ function CallsChart({ calls, range: chartDays = 14, onOpenCalls }: { calls: Call
           <p><b>{todayCount}</b> today · <b>{yesterday}</b> yesterday · <b>{average}</b> a day on average over the last {chartDays - 1} days</p>
         </div>
         <ul className="calls-chart__legend" aria-label="Legend">
-          <li><i className="is-conversation" aria-hidden="true" /> Conversations</li>
+          <li><i className="is-conversation" aria-hidden="true" /> Connects</li>
           <li><i className="is-other" aria-hidden="true" /> Other calls</li>
         </ul>
         <button type="button" className="quiet-button" onClick={onOpenCalls}>See calls</button>
       </header>
-      <div className="calls-chart__plot" ref={plot}>
-        {!total && <p className="calls-chart__empty">No calls logged in the last {chartDays} days. Calls you make or log in the app show up here.</p>}
-        <svg viewBox={`0 -14 ${width} ${height + 34}`} role="img" aria-hidden="true">
+      <div className={`calls-chart__plot${total ? "" : " is-empty"}`} ref={plot}>
+        {!total && <p className="calls-chart__empty">No calls logged in the last {chartDays} days. Your calling trend will appear here.</p>}
+        {Boolean(total) && <svg viewBox={`0 -14 ${width} ${height + 34}`} role="img" aria-hidden="true">
           {[0.5, 1].map((share) => (
             <g key={share} className="calls-chart__grid">
               <line x1="0" x2={width} y1={y(top * share)} y2={y(top * share)} />
@@ -2134,18 +2244,18 @@ function CallsChart({ calls, range: chartDays = 14, onOpenCalls }: { calls: Call
               </g>
             );
           })}
-        </svg>
+        </svg>}
         {hover !== null && (
           <div className="calls-chart__tip" style={{ left: `${((hover + 0.5) / chartDays) * 100}%` }}>
             <b>{hover === chartDays - 1 ? "Today" : new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(days[hover].date)}</b>
             <span>{days[hover].calls} call{days[hover].calls === 1 ? "" : "s"}</span>
-            <span>{days[hover].conversations} conversation{days[hover].conversations === 1 ? "" : "s"}</span>
+            <span>{days[hover].conversations} connect{days[hover].conversations === 1 ? "" : "s"}</span>
           </div>
         )}
       </div>
       <table className="sr-only">
         <caption>Calls per day</caption>
-        <thead><tr><th scope="col">Day</th><th scope="col">Calls</th><th scope="col">Conversations</th></tr></thead>
+        <thead><tr><th scope="col">Day</th><th scope="col">Calls</th><th scope="col">Connects</th></tr></thead>
         <tbody>{days.map((day) => <tr key={day.key}><td>{label(day.date)}</td><td>{day.calls}</td><td>{day.conversations}</td></tr>)}</tbody>
       </table>
     </section>
@@ -2174,9 +2284,9 @@ function CallStrip({ calls, onOpen }: { calls: CallRecord[]; onOpen: () => void 
 
 type StatTarget = "calls-today" | "conversations" | "followups" | "to-call";
 
-function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide, onGo }: { state: State; selected: Lead; picker: ReactNode; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void }) {
-  const setup = setupSteps(state).filter((step) => !step.optional);
-  const setupDone = setup.filter((step) => step.done).length;
+// setup is counted on the whole workspace (not the picked campaign), so it doesn't come and go with the campaign.
+function DashboardBanner({ state, selected, setup, onStart, onAddLead, onGuide, onGo, campaign, region, onRegionChange, calling }: { state: State; selected: Lead; setup: { done: number; total: number }; onStart: () => void; onAddLead: () => void; onGuide: () => void; onGo: (target: StatTarget) => void; campaign: string; region: CallingRegion | null; onRegionChange: (region: CallingRegion | null) => void; calling: boolean }) {
+  const setupDone = setup.done;
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 30_000);
@@ -2194,25 +2304,34 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
   const zone = leadZone(selected);
   const clock = zone && zoneClock(zone.zone, now);
   const inHours = clock ? clock.hour >= 8 && clock.hour < 21 : null;
+  const available = callQueue(state.leads, state.calls);
+  const pick = (kind: CallingRegion["kind"], value: string) => onRegionChange(region?.kind === kind && region.value === value ? null : { campaign, kind, value });
+  const options = new Map<string, number>();
+  for (const lead of available) { const area = leadZone(lead)?.zone; if (area) options.set(area, (options.get(area) || 0) + 1); }
+  const remaining = clock ? 21 * 60 - (clock.hour * 60 + clock.minute) : null;
+  const suggestion = clock && (!inHours || (remaining !== null && remaining <= 90)) ? [...options].filter(([area]) => area !== zone?.zone).map(([area, count]) => ({ area, count, clock: zoneClock(area, now) })).filter((item) => item.clock && hoursNote(item.clock).open && 21 * 60 - (item.clock.hour * 60 + item.clock.minute) > 90).sort((left, right) => right.count - left.count)[0] : null;
   return (
     <section className="dash-banner" aria-label="Today">
       <div className="dash-banner__head">
         <h1 className="dash-date">{new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long" }).format(now)}<span> · {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(now)} your time</span></h1>
         <div className="dash-banner__actions">
-          {picker}
-          {setupDone < setup.length && <button className="quiet-button" onClick={onGuide}><BadgeCheck size={16} /> Setup {setupDone}/{setup.length}</button>}
+          {setupDone < setup.total && <button className="quiet-button" onClick={onGuide}><BadgeCheck size={16} /> Setup {setupDone}/{setup.total}</button>}
           <button className="quiet-button" onClick={onAddLead}><Plus size={16} /> Add lead</button>
-          <button className="primary-button" data-tour="start-calling" onClick={onStart} disabled={!toCall}>Start calling <ChevronRight size={16} /></button>
+          <button className="primary-button" data-tour="start-calling" onClick={onStart} disabled={region ? !available.some((lead) => matchesCallingRegion(lead, region)) : !toCall}>Start calling <ChevronRight size={16} /></button>
         </div>
       </div>
       <div className="dash-banner__body">
         <div className="dash-banner__main">
-        <ZoneClocks leads={state.leads} current={zone ? zone.zone : null} now={now} />
+        <div className="region-picker__heading"><b>Calling windows</b><span>Choose a time zone or state to filter the queue · 8 AM–9 PM local time</span></div>
+        <ZoneClocks leads={available} current={zone ? zone.zone : null} now={now} region={region} onPick={(area) => pick("zone", area)} disabled={calling} />
+        {region && <div className="region-picker__active"><span>Showing {region.kind === "state" ? stateZones.find(([code]) => code === region.value)?.[1] || region.value : zoneName(region.value)} · {available.filter((lead) => matchesCallingRegion(lead, region)).length} in queue</span><button type="button" className="text-link" disabled={calling} onClick={() => onRegionChange(null)}>Show all areas</button></div>}
+        {suggestion && !calling && <div className="region-picker__suggestion"><span>More time to call: <b>{zoneName(suggestion.area)}</b> · {suggestion.count} in queue · {suggestion.clock?.label}</span><button type="button" className="text-link" onClick={() => pick("zone", suggestion.area)}>View leads</button></div>}
+        {calling && <p className="region-picker__hint">Finish the current call to change areas.</p>}
         <CallStrip calls={state.calls} onOpen={() => onGo("calls-today")} />
         <dl className="dash-stats">
           {/* Each number opens the list behind it; the label is a button stretched over the whole tile. */}
           <div><dt><button type="button" className="stretch-link" onClick={() => onGo("calls-today")}>Calls today</button></dt><dd>{attemptsToday.length}</dd></div>
-          <div><dt><button type="button" className="stretch-link" onClick={() => onGo("conversations")}>Conversations</button></dt><dd>{attemptsToday.filter((attempt) => attempt.conversation).length}</dd></div>
+          <div><dt><button type="button" className="stretch-link" onClick={() => onGo("conversations")}>Connects</button></dt><dd>{attemptsToday.filter((attempt) => attempt.conversation).length}</dd></div>
           <div><dt><button type="button" className="stretch-link" onClick={() => onGo("followups")}>Follow-ups due</button></dt><dd>{followUpsDue}</dd></div>
           <div><dt><button type="button" className="stretch-link" onClick={() => onGo("to-call")}>Left to call</button></dt><dd>{toCall}</dd></div>
         </dl>
@@ -2222,10 +2341,10 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
         </div>
         </div>
         <figure className="dash-where">
-          <StateTileMap leads={state.leads.filter((lead) => !lead.dnc)} current={leadStateCode(selected)} zone={zone ? zone.zone : null} />
+          <StateTileMap leads={available} current={leadStateCode(selected)} zone={zone ? zone.zone : null} region={region} onPick={(code) => pick("state", code)} disabled={calling} now={now} />
           <DaylightStrip hour={clock ? clock.hour : null} minute={clock ? clock.minute : 0} />
           <figcaption>
-            <b>{leadLabel(selected)}</b>
+            <span>Choose a highlighted state on the map</span><b>{leadLabel(selected)}</b>
             {clock && zone ? <span className={inHours ? "is-open" : ""}>{zone.place} · {clock.label}, {hoursNote(clock).text}</span> : <span>No state yet. Add one with Edit to check calling hours.</span>}
           </figcaption>
         </figure>
@@ -2236,6 +2355,9 @@ function DashboardBanner({ state, selected, picker, onStart, onAddLead, onGuide,
 
 function Queue({
   state,
+  campaign,
+  region,
+  onRegionChange,
   selected,
   onSelect,
   onPrepare,
@@ -2246,12 +2368,12 @@ function Queue({
   onSettings,
   onAddLead,
   onGuide,
+  setup,
   onAddTask,
   onGo,
   onOpenPdf,
   onEditScript,
   calling,
-  picker,
   onRefresh,
   onNotice,
 }: {
@@ -2260,12 +2382,15 @@ function Queue({
   onOpenPdf: (campaign: string) => void;
   onEditScript: (campaign: string) => void;
   calling: boolean;
-  picker: ReactNode;
   onAddLead: () => void;
   onGuide: () => void;
+  setup: { done: number; total: number };
   onAddTask: (lead: Lead) => void;
   onGo: (target: StatTarget) => void;
   state: State;
+  campaign: string;
+  region: CallingRegion | null;
+  onRegionChange: (region: CallingRegion | null) => void;
   selected: Lead;
   onSelect: (id: string) => void;
   onPrepare: (lead: Lead) => void;
@@ -2275,10 +2400,23 @@ function Queue({
   onStatus: (lead: Lead, status: string) => void;
   onSettings: () => void;
 }) {
-  const upcoming = callQueue(state.leads, state.calls);
   // What the list shows: everything in calling order, only new leads, or callbacks (follow-ups and set call-back times).
   const [view, setView] = useState<"all" | "new" | "callbacks">(() => { try { return (localStorage.getItem("open-dialer-queue-view") as "all" | "new" | "callbacks") || "all"; } catch { return "all"; } });
-  const [order, setOrder] = useState<"queue" | "newest" | "location">(() => { try { const saved = localStorage.getItem("open-dialer-queue-order"); return saved === "newest" || saved === "location" ? saved : "queue"; } catch { return "queue"; } });
+  const [order, setOrder] = useState<"queue" | "inplace" | "newest" | "location">(() => { try { const saved = localStorage.getItem("open-dialer-queue-order"); return saved === "newest" || saved === "location" || saved === "inplace" ? saved : "queue"; } catch { return "queue"; } });
+  const upcoming = callQueue(state.leads, state.calls, order === "inplace").filter((lead) => !region || matchesCallingRegion(lead, region));
+  const calledIds = new Set(state.calls.map((call) => call.leadId));
+  // The lead auto-dial goes to after this one (same rule as nextInQueue).
+  const nextId = order === "inplace" ? upcoming[upcoming.findIndex((lead) => lead.id === selected.id) + 1]?.id : upcoming.find((lead) => lead.id !== selected.id)?.id;
+  // Keep the lead being called in view as the list scrolls on its own.
+  // Scrolls only the lead list (scrollIntoView would scroll the whole page too and push the banner away).
+  useEffect(() => {
+    const item = document.querySelector<HTMLElement>(".call-list-item.is-selected");
+    const list = item?.closest<HTMLElement>(".call-list");
+    if (!item || !list) return;
+    const top = item.getBoundingClientRect().top - list.getBoundingClientRect().top;
+    const filters = list.querySelector<HTMLElement>(".call-list__filters")?.offsetHeight || 0;
+    if (top < filters || top + item.offsetHeight > list.clientHeight) list.scrollTop += top - filters - (list.clientHeight - filters) / 3;
+  }, [selected.id]);
   const remember = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* private mode */ } };
   const isCallback = (lead: Lead) => lead.status === "Follow-up" || /^\d{4}-\d{2}-\d{2}/.test(lead.due);
   const addedAt = (lead: Lead) => Number(lead.id.split("_")[1]) || 0;
@@ -2287,8 +2425,7 @@ function Queue({
   const place = (lead: Lead) => [leadState(lead)?.[1] || "\uffff", Object.entries(lead.details || {}).find(([key]) => /^(city|town)$/i.test(key.trim()))?.[1]?.trim() || "\uffff"].join("|").toLowerCase();
   const shown = order === "newest" ? [...filtered].sort((left, right) => addedAt(right) - addedAt(left)) : order === "location" ? [...filtered].sort((left, right) => place(left).localeCompare(place(right))) : view === "callbacks" ? [...filtered].sort((left, right) => (left.due || "").localeCompare(right.due || "")) : filtered;
   const counts = { all: upcoming.length, new: upcoming.filter((lead) => lead.status === "New" && !isCallback(lead)).length, callbacks: upcoming.filter(isCallback).length };
-  // The script of the lead's first campaign that has one.
-  const scriptCampaign = scriptCampaignOf(selected, state.campaignSettings || {});
+  const scriptCampaign = selected.campaigns?.includes(campaign) && (state.campaignSettings?.[campaign]?.script || state.campaignSettings?.[campaign]?.pdf) ? campaign : undefined;
   const script = scriptCampaign ? state.campaignSettings![scriptCampaign] : undefined;
   // Pinned details (picked per campaign by the owner) sit at the top; the rest are grouped as before.
   const pinCampaign = scriptCampaign || selected.campaigns?.[0];
@@ -2318,7 +2455,7 @@ function Queue({
   const sourcesSection = section("@sources", "Sources & history", groups.sources);
   // While calling, clean the script values of this lead and the next 4 in the background (5 at a time, saved once).
   const nextFive = [selected, ...upcoming.filter((lead) => lead.id !== selected.id).slice(0, 4)];
-  const pending = state.ai?.ready ? cleanupItems(nextFive, state.campaignSettings || {}) : [];
+  const pending = state.ai?.ready ? cleanupItems(nextFive, state.campaignSettings || {}, false, campaign) : [];
   const pendingKey = pending.map((item) => `${item.leadId}:${item.variable}:${item.text}`).join("|");
   const asked = useRef(new Set<string>());
   const [cleaning, setCleaning] = useState(false);
@@ -2344,9 +2481,13 @@ function Queue({
   return (
     <div className="queue-page">
       <DashboardBanner
+        setup={setup}
         state={state}
         selected={selected}
-        picker={picker}
+        campaign={campaign}
+        region={region}
+        onRegionChange={(next) => { if (next) setView("all"); onRegionChange(next); }}
+        calling={calling}
         onAddLead={onAddLead}
         onGuide={onGuide}
         onGo={onGo}
@@ -2364,32 +2505,43 @@ function Queue({
                 <button key={key} type="button" className={view === key ? "is-active" : ""} aria-pressed={view === key} onClick={() => { setView(key); remember("open-dialer-queue-view", key); }}>{label} <small>{counts[key]}</small></button>
               ))}
             </div>
-            <select value={order} aria-label="Order" onChange={(event) => { const next = event.target.value as "queue" | "newest" | "location"; setOrder(next); remember("open-dialer-queue-order", next); }}>
-              <option value="queue">{view === "callbacks" ? "Soonest first" : "Calling order"}</option>
+            <select value={order} aria-label="Order" onChange={(event) => { const next = event.target.value as "queue" | "inplace" | "newest" | "location"; setOrder(next); remember("open-dialer-queue-order", next); }}>
+              <option value="queue">{view === "callbacks" ? "Soonest first" : "Calling order (called go last)"}</option>
+              <option value="inplace">List order (called stay in place)</option>
               <option value="newest">Newest added</option>
               <option value="location">Location (state, then city)</option>
             </select>
           </div>
-          {!shown.length && <p className="call-list__empty">{view === "callbacks" ? "No callbacks waiting." : view === "new" ? "No new leads left to call." : "Nothing left to call."}</p>}
-          {shown.map((lead) => (
-            <button
-              key={lead.id}
-              className={
-                selected.id === lead.id
-                  ? "call-list-item is-selected"
-                  : "call-list-item"
-              }
-              onClick={() => onSelect(lead.id)}
-            >
-              <i aria-hidden="true" className="lead-avatar lead-avatar--small"><LeadFace id={lead.id} /></i>
-              <span>
-                <b>{leadLabel(lead)}</b>
-                <small>{leadSubtitle(lead)}</small>
-                {lead.due && lead.due !== "Unscheduled" && <span className="lead-time">{lead.due.replace("T", " ")}</span>}
-              </span>
-              <ChevronRight size={17} />
-            </button>
-          ))}
+          {!shown.length && <p className="call-list__empty">{region ? "No leads match this area and view. Try another view or show all areas." : view === "callbacks" ? "No callbacks waiting." : view === "new" ? "No new leads left to call." : "Nothing left to call."}</p>}
+          {shown.map((lead) => {
+            const label = leadLabel(lead);
+            const subtitle = leadSubtitle(lead);
+            const called = calledBefore(lead, calledIds);
+            const due = lead.due && lead.due !== "Unscheduled" ? dueLabel(lead.due) : null;
+            const zone = leadZone(lead);
+            const isNext = lead.id === nextId && selected.id !== lead.id;
+            // Linear-style row: called leads dim with a small check, the next lead gets a dot, local time on the right.
+            return (
+              <button
+                key={lead.id}
+                className={`call-list-item${selected.id === lead.id ? " is-selected" : ""}${called ? " is-called" : ""}`}
+                aria-current={selected.id === lead.id || undefined}
+                onClick={() => onSelect(lead.id)}
+              >
+                {selected.id === lead.id && <ArrowRight className="call-list-item__arrow" size={14} aria-hidden="true" />}
+                <i aria-hidden="true" className="lead-avatar lead-avatar--small"><LeadFace id={lead.id} /></i>
+                <span>
+                  <b>{isNext && <span className="call-list-item__dot" title="Next" />}{label}</b>
+                  {due ? <small className={due.overdue ? "is-overdue" : undefined}>Callback {due.text}</small> : subtitle !== label && <small>{subtitle}</small>}
+                </span>
+                <span className="call-list-item__side">
+                  {zone && <time>{localTime(zone.zone)}</time>}
+                  <StageCircle lead={lead} calls={state.calls} called={called} />
+                </span>
+                {isNext && <span className="sr-only">Next</span>}
+              </button>
+            );
+          })}
         </aside>
         <article className="call-panel">
           {selected.dnc && (
@@ -2521,7 +2673,7 @@ function Queue({
                 <div className="call-script-full__tools">
                   {script.pdf && <button type="button" className="quiet-button" onClick={() => onOpenPdf(scriptCampaign)}><FileText size={16} aria-hidden="true" /> Open {script.pdf.name}</button>}
                   <button type="button" className="quiet-button" onClick={() => onEditScript(scriptCampaign)}>Edit script</button>
-                  {cleanable && <button type="button" className="quiet-button" disabled={cleaning} onClick={() => void clean(cleanupItems([selected], state.campaignSettings || {}, true), true)}><Sparkles size={16} aria-hidden="true" /> {cleaning ? "Cleaning…" : "Regenerate"}</button>}
+                  {cleanable && <button type="button" className="quiet-button" disabled={cleaning} onClick={() => void clean(cleanupItems([selected], state.campaignSettings || {}, true, campaign), true)}><Sparkles size={16} aria-hidden="true" /> {cleaning ? "Cleaning…" : "Regenerate"}</button>}
                 </div>
                 {script.script && <ScriptView text={script.script} lead={selected} variables={script.variables} />}
                 {script.pdf && !script.script && <PdfPages campaign={scriptCampaign} />}
@@ -2839,7 +2991,7 @@ function FollowUps({
   // The app's own tasks are grouped: one for booked meetings (they have a set time, so they come first), one for callbacks.
   const groups = [
     { key: "meetings", title: (count: number) => `${count} booked meeting${count === 1 ? "" : "s"}`, leads: open.filter((lead) => lead.status === "Meeting booked"), icon: CalendarClock, startOpen: true },
-    { key: "callbacks", title: (count: number) => `Call back ${count} lead${count === 1 ? "" : "s"}`, leads: open.filter((lead) => lead.status !== "Meeting booked"), icon: PhoneOutgoing, startOpen: false },
+    { key: "callbacks", title: (count: number) => `Call back ${count} lead${count === 1 ? "" : "s"}`, leads: open.filter((lead) => lead.status !== "Meeting booked"), icon: PhoneOutgoing, startOpen: true },
   ].filter((group) => group.leads.length);
   const mine = tasks.filter((task) => !task.doneAt).sort((left, right) => soonest(left.due, right.due) || right.createdAt.localeCompare(left.createdAt));
   const leadById = new Map(allLeads.map((lead) => [lead.id, lead]));
@@ -3037,13 +3189,19 @@ function fillVariable(name: string, lead: Lead | undefined, variables: Record<st
   return spoken && spoken.from === raw ? spoken.text : raw;
 }
 // The campaign whose script a lead's call screen shows: its first campaign with a script.
+// A campaign's scripts; one saved before campaigns could hold several counts as "Script 1" (the server does the same).
+function campaignScripts(settings: CampaignSettings): CampaignScript[] {
+  if (settings.scripts?.length) return settings.scripts;
+  return settings.script ? [{ id: "s1", name: "Script 1", script: settings.script }] : [];
+}
+
 function scriptCampaignOf(lead: Lead, settings: Record<string, CampaignSettings>) {
   return lead.campaigns?.find((name) => settings[name]?.script || settings[name]?.pdf);
 }
 // What still needs AI cleanup for these leads: variables with an example or notes whose value has no cleaned version yet.
-function cleanupItems(leads: Lead[], settings: Record<string, CampaignSettings>, force = false) {
+function cleanupItems(leads: Lead[], settings: Record<string, CampaignSettings>, force = false, selectedCampaign?: string) {
   return leads.flatMap((lead) => {
-    const campaign = scriptCampaignOf(lead, settings);
+    const campaign = selectedCampaign ? (lead.campaigns?.includes(selectedCampaign) && settings[selectedCampaign]?.script ? selectedCampaign : undefined) : scriptCampaignOf(lead, settings);
     const config = campaign ? settings[campaign] : undefined;
     return Object.keys(config?.clean || {}).flatMap((variable) => {
       const text = rawVariable(variable, lead, config!.variables);
@@ -3513,13 +3671,17 @@ function VariableMap({ names, value, columns, onChange, auto }: { names: string[
 // One campaign's settings, one part at a time from a sidebar: General (name, deal value, leads), Script (text, PDF),
 // Variables (what fills each {{variable}}, and how AI should clean it). Every part stays mounted, so switching keeps edits.
 type CampaignTab = "general" | "script" | "variables";
-function ScriptDialog({ campaign, initialTab = "script", settings, columns, leads, aiReady, vault = [], onOpenVault = () => {}, onImport, onViewPdf, onClose, onChanged }: { campaign: string; initialTab?: CampaignTab; settings: CampaignSettings; columns: string[]; leads: Lead[]; aiReady: boolean; vault?: Recording[]; onOpenVault?: () => void; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
+function ScriptDialog({ campaign, initialTab = "script", scriptId, settings, columns, leads, aiReady, vault = [], onOpenVault = () => {}, onImport, onViewPdf, onClose, onChanged }: { campaign: string; initialTab?: CampaignTab; scriptId?: string; settings: CampaignSettings; columns: string[]; leads: Lead[]; aiReady: boolean; vault?: Recording[]; onOpenVault?: () => void; onImport: () => void; onViewPdf: () => void; onClose: () => void; onChanged: (message: string, close: boolean, name: string) => Promise<void> }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   // An empty campaign name means a new campaign: name it, write the script, then import its leads.
   const isNew = !campaign;
   const [name, setName] = useState(campaign);
   const [value, setValue] = useState(settings.value ? String(settings.value) : "");
-  const [text, setText] = useState(settings.script || "");
+  const scripts = campaignScripts(settings);
+  const editing = scriptId === "new" ? undefined : scripts.find((item) => item.id === (scriptId || settings.activeScript)) || scripts[0];
+  const initialText = scriptId === "new" ? "" : editing?.script || "";
+  const [scriptName, setScriptName] = useState(editing?.name || `Script ${scripts.length + 1}`);
+  const [text, setText] = useState(initialText);
   const [variables, setVariables] = useState<Record<string, string>>(settings.variables || {});
   const [clean, setClean] = useState<Record<string, CleanRule>>(settings.clean || {});
   const [tab, setTab] = useState<CampaignTab>(isNew ? "general" : initialTab);
@@ -3545,12 +3707,13 @@ function ScriptDialog({ campaign, initialTab = "script", settings, columns, lead
   };
   const save = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const script = editorRef.current ? serializeScript(editorRef.current) : settings.script || "";
+    const script = editorRef.current ? serializeScript(editorRef.current) : initialText;
     if (!name.trim()) return setError("Name the campaign first.");
-    // Only keep choices for variables still in the script.
-    const kept = Object.fromEntries(Object.entries(variables).filter(([key, source]) => source && scriptVariables(script).includes(key)));
-    const rules = Object.fromEntries(Object.entries(clean).filter(([key, rule]) => scriptVariables(script).includes(key) && (rule.to.trim() || rule.notes.trim())));
-    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name.trim(), script, variables: kept, clean: rules, value: value.replace(/[$,\s]/g, "") }) }), isNew ? `${name.trim()} created.` : `${name.trim()} saved.`, true);
+    // Only keep choices for variables still used, in this script or in the campaign's other scripts.
+    const used = new Set([...scriptVariables(script), ...scripts.filter((item) => item.id !== editing?.id).flatMap((item) => scriptVariables(item.script))]);
+    const kept = Object.fromEntries(Object.entries(variables).filter(([key, source]) => source && used.has(key)));
+    const rules = Object.fromEntries(Object.entries(clean).filter(([key, rule]) => used.has(key) && (rule.to.trim() || rule.notes.trim())));
+    void run(() => api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name.trim(), script, scriptId: editing?.id || "new", scriptName: scriptName.trim(), variables: kept, clean: rules, value: value.replace(/[$,\s]/g, "") }) }), isNew ? `${name.trim()} created.` : `${scriptName.trim() || "Script"} saved.`, true);
   };
   const upload = (file: File | undefined) => {
     if (!file) return;
@@ -3594,8 +3757,9 @@ function ScriptDialog({ campaign, initialTab = "script", settings, columns, lead
               {isNew && <p className="campaign-settings__hint">Next, write the script. Put {"{{variables}}"} where each lead's details go; you'll match them to your CSV's columns when you import the leads.</p>}
             </section>
             <section hidden={tab !== "script"} className="campaign-settings__section">
-              <p className="campaign-settings__hint">Shows on the call screen for every lead in this campaign.</p>
-              <ScriptEditor initial={settings.script || ""} editorRef={editorRef} onTextChange={setText} />
+              <label>Script name<input value={scriptName} onChange={(event) => setScriptName(event.target.value)} placeholder="Opener A" maxLength={60} /></label>
+              <p className="campaign-settings__hint">{scripts.length > 1 || scriptId === "new" ? "Pick which script the call screen shows on the Scripts page." : "Shows on the call screen for every lead in this campaign."}</p>
+              <ScriptEditor initial={initialText} editorRef={editorRef} onTextChange={setText} />
               <div className="script-dialog__pdf">
                 <FileText size={18} aria-hidden="true" />
                 {settings.pdf ? (
@@ -3645,8 +3809,18 @@ function ScriptDialog({ campaign, initialTab = "script", settings, columns, lead
   );
 }
 
-function RecorderDialog({ script, onClose, onSaved }: { script: string; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+// The first voicemail line in a campaign's script (a Note or a line mentioning voicemail), shown as a prompt to read.
+function voicemailLine(settings: CampaignSettings | undefined) {
+  return (settings?.script || "").split("\n").map((line) => line.trim()).find((line) => /voicemail/i.test(line) && line.length > 20)?.replace(/^(>|note:|example:)\s*/i, "") || "";
+}
+
+function RecorderDialog({ campaigns, settings, defaultCampaign, onClose, onSaved }: { campaigns: string[]; settings: Record<string, CampaignSettings>; defaultCampaign: string; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
   const [name, setName] = useState("");
+  // Pick the campaign first: it tags the recording, and its script's voicemail line is what to read (saved as "what it says").
+  const [campaign, setCampaign] = useState(campaigns.includes(defaultCampaign) ? defaultCampaign : campaigns[0] || "");
+  const script = voicemailLine(settings[campaign]);
+  // Starts empty: the script's "voicemail" line is sometimes a note about the call, not the words, so copying it is a choice.
+  const [says, setSays] = useState("");
   const [state, setState] = useState<"idle" | "recording" | "ready" | "saving">("idle");
   const [error, setError] = useState<string | null>(null);
   const [take, setTake] = useState<{ blob: Blob; seconds: number; url: string; fileName: string } | null>(null);
@@ -3689,7 +3863,7 @@ function RecorderDialog({ script, onClose, onSaved }: { script: string; onClose:
     if (take.blob.size > 3_500_000) return setError("That recording is over 3.5 MB. Keep voicemails short.");
     setState("saving");
     try {
-      await api("/api/voicemails", { method: "POST", body: JSON.stringify({ name: name.trim() || "Voicemail", seconds: take.seconds, data: await blobToBase64(take.blob) }) });
+      await api("/api/voicemails", { method: "POST", body: JSON.stringify({ name: name.trim() || "Voicemail", seconds: take.seconds, data: await blobToBase64(take.blob), campaigns: campaign ? [campaign] : [], says }) });
       await onSaved(`${name.trim() || "Voicemail"} saved.`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Couldn't save the recording.");
@@ -3702,8 +3876,11 @@ function RecorderDialog({ script, onClose, onSaved }: { script: string; onClose:
         <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
         <h2 id="recorder-title">New voicemail</h2>
         {error && <p className="form-error" role="alert">{error}</p>}
+        {campaigns.length > 0 && <label>For campaign<select value={campaign} onChange={(event) => setCampaign(event.target.value)}>{campaigns.map((item) => <option key={item}>{item}</option>)}<option value="">Any campaign</option></select></label>}
         <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="No website, friendly" maxLength={80} autoFocus /></label>
         {script && <div className="recorder__script"><small>What to say</small><p>{script}</p></div>}
+        <label><span>What it says<small>So you can pick it later without listening</small></span><textarea rows={2} value={says} onChange={(event) => setSays(event.target.value)} placeholder="Hey, this is Bayu with Growth for Locals…" maxLength={500} /></label>
+        {script && says !== script && <button type="button" className="text-link recorder__use-line" onClick={() => setSays(script)}>Use the line above</button>}
         <div className="recorder__stage">
           {state === "recording"
             ? <button type="button" className="recorder__button is-recording" onClick={() => recorder.current?.stop()} aria-label="Stop recording"><span /></button>
@@ -3724,26 +3901,39 @@ function RecorderDialog({ script, onClose, onSaved }: { script: string; onClose:
 }
 
 // The voicemail vault: every recording once, reusable in any campaign.
-function VoicemailsPage({ vault, automations, settings, campaign, onRefresh, onNotice }: { vault: Recording[]; automations: Automation[]; settings: Record<string, CampaignSettings>; campaign: string; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
+// Voicemails for the whole workspace. Each one is tagged with the campaigns it's for and says what's in it, so you can
+// find and pick one without listening again. Tags only organize; automations decide where a recording is dropped.
+function VoicemailsPage({ vault, automations, settings, campaigns, defaultCampaign, onRefresh, onNotice }: { vault: Recording[]; automations: Automation[]; settings: Record<string, CampaignSettings>; campaigns: string[]; defaultCampaign: string; onRefresh: () => Promise<unknown>; onNotice: (message: string) => void }) {
   const [recording, setRecording] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-  const usedIn = (id: string) => automations.filter((item) => item.steps.some((step) => step.type === "play" && step.recordingId === id)).map((item) => item.name);
-  // While recording, the picked campaign's first voicemail line (a Note or line mentioning voicemail) is shown as a prompt.
-  const prompt = (settings[campaign]?.script || "").split("\n").map((line) => line.trim()).find((line) => /voicemail/i.test(line) && line.length > 20)?.replace(/^(>|note:|example:)\s*/i, "") || "";
+  const [filter, setFilter] = useState("");
+  const [editing, setEditing] = useState<{ id: string; campaigns: string[]; says: string } | null>(null);
+  const usedIn = (id: string) => automations.filter((item) => flowSteps(item).some((step) => step.type === "play" && step.recordingId === id)).map((item) => item.name);
   const act = async (work: () => Promise<unknown>, message: string) => {
     try { await work(); await onRefresh(); onNotice(message); } catch (cause) { onNotice(cause instanceof Error ? cause.message : "Something went wrong."); }
   };
+  const tagged = (item: Recording) => !filter || (filter === "-" ? !item.campaigns?.length : item.campaigns?.includes(filter));
+  const shown = vault.filter(tagged);
+  const tags = campaigns.filter((name) => vault.some((item) => item.campaigns?.includes(name)));
   return (
     <section className="campaigns-page">
       <div className="campaigns-head">
-        <p>Your recorded voicemails. Record once, then pick them in any campaign's automations.</p>
+        <p>Your recorded voicemails. Record once, tag the campaigns it's for, then pick it in any automation.</p>
         <div className="campaigns-head__actions"><button type="button" className="primary-button" onClick={() => setRecording(true)}><Mic size={16} aria-hidden="true" /> New voicemail</button></div>
       </div>
-      {!vault.length && <div className="empty-state">No voicemails yet. Press New voicemail to record one in your own voice, or upload an MP3.</div>}
+      {vault.length > 0 && (tags.length > 0 || vault.some((item) => !item.campaigns?.length)) && (
+        <div className="call-list__views vault-filter" role="group" aria-label="Show voicemails for">
+          <button type="button" className={!filter ? "is-active" : ""} aria-pressed={!filter} onClick={() => setFilter("")}>All <small>{vault.length}</small></button>
+          {tags.map((name) => <button key={name} type="button" className={filter === name ? "is-active" : ""} aria-pressed={filter === name} onClick={() => setFilter(name)}>{name} <small>{vault.filter((item) => item.campaigns?.includes(name)).length}</small></button>)}
+          {vault.some((item) => !item.campaigns?.length) && <button type="button" className={filter === "-" ? "is-active" : ""} aria-pressed={filter === "-"} onClick={() => setFilter("-")}>No campaign <small>{vault.filter((item) => !item.campaigns?.length).length}</small></button>}
+        </div>
+      )}
+      {!vault.length && <div className="vault-welcome"><span className="vault-welcome__icon" aria-hidden="true"><Mic size={24} /></span><div><h2>Your voice, ready when you need it</h2><p>Record a voicemail or upload an MP3, then use it in your automations.</p><button type="button" className="quiet-button" onClick={() => setRecording(true)}>Create your first voicemail <ArrowRight size={16} aria-hidden="true" /></button></div></div>}
+      {vault.length > 0 && !shown.length && <p className="empty-state">No voicemails match this campaign. Choose another filter to see your recordings.</p>}
       <div className="vault-list">
-        {vault.map((item) => {
-          const campaigns = usedIn(item.id);
+        {shown.map((item) => {
+          const used = usedIn(item.id);
           return (
             <article className="vault-item" key={item.id}>
               <div className="vault-item__head">
@@ -3752,16 +3942,29 @@ function VoicemailsPage({ vault, automations, settings, campaign, onRefresh, onN
                   : <button type="button" className="vault-item__name" title="Rename" onClick={() => { setRenaming(item.id); setDraft(item.name); }}>{item.name}</button>}
                 <small>{clockOf(item.seconds)}{item.seconds > 30 ? " · long" : ""}</small>
               </div>
+              {editing?.id === item.id ? (
+                <form className="vault-item__edit" onSubmit={(event) => { event.preventDefault(); const next = editing; setEditing(null); void act(() => api(`/api/voicemails/${item.id}`, { method: "PATCH", body: JSON.stringify({ campaigns: next.campaigns, says: next.says }) }), `${item.name} updated.`); }}>
+                  <fieldset><legend>For campaigns</legend>{campaigns.map((name) => <label key={name}><input type="checkbox" checked={editing.campaigns.includes(name)} onChange={(event) => setEditing({ ...editing, campaigns: event.target.checked ? [...editing.campaigns, name] : editing.campaigns.filter((tag) => tag !== name) })} />{name}</label>)}</fieldset>
+                  <label>What it says<textarea rows={2} value={editing.says} onChange={(event) => setEditing({ ...editing, says: event.target.value })} maxLength={500} /></label>
+                  <div><button type="button" className="quiet-button" onClick={() => setEditing(null)}>Cancel</button><button type="submit" className="primary-button">Save</button></div>
+                </form>
+              ) : (
+                <>
+                  {item.says ? <p className="vault-item__says">"{item.says}"</p> : <p className="vault-item__says is-empty">No text yet. Add what it says so you can pick it without listening.</p>}
+                  <div className="vault-item__tags">{item.campaigns?.length ? item.campaigns.map((name) => <span key={name}>{name}</span>) : <span className="is-any">Any campaign</span>}</div>
+                </>
+              )}
               <audio controls preload="none" src={`/api/voicemails/${item.id}/audio`} />
               <div className="vault-item__foot">
-                <small>{campaigns.length ? `Used in ${campaigns.join(", ")}` : "Not used in an automation yet"}</small>
-                <button type="button" className="text-link" onClick={() => { if (window.confirm(`Delete ${item.name}?${campaigns.length ? " Automations using it will stop dropping it." : ""}`)) void act(() => api(`/api/voicemails/${item.id}`, { method: "DELETE" }), `${item.name} deleted.`); }}>Delete</button>
+                <small>{used.length ? `Used in ${used.join(", ")}` : "Not used in an automation yet"}</small>
+                {editing?.id !== item.id && <button type="button" className="text-link" onClick={() => setEditing({ id: item.id, campaigns: item.campaigns || [], says: item.says || "" })}>Edit details</button>}
+                <button type="button" className="text-link" onClick={() => { if (window.confirm(`Delete ${item.name}?${used.length ? " Automations using it will stop dropping it." : ""}`)) void act(() => api(`/api/voicemails/${item.id}`, { method: "DELETE" }), `${item.name} deleted.`); }}>Delete</button>
               </div>
             </article>
           );
         })}
       </div>
-      {recording && <RecorderDialog script={prompt} onClose={() => setRecording(false)} onSaved={async (message) => { setRecording(false); await onRefresh(); onNotice(message); }} />}
+      {recording && <RecorderDialog campaigns={campaigns} settings={settings} defaultCampaign={defaultCampaign} onClose={() => setRecording(false)} onSaved={async (message) => { setRecording(false); await onRefresh(); onNotice(message); }} />}
     </section>
   );
 }
@@ -3940,6 +4143,7 @@ function Pipeline({
   settings: Record<string, CampaignSettings>;
 }) {
   const [dragging, setDragging] = useState<string | null>(null);
+  const boardRef = useRef<HTMLDivElement>(null);
   const [peekId, setPeekId] = useState<string | null>(null);
   const peek = leads.find((lead) => lead.id === peekId);
   const [over, setOver] = useState<string | null>(null);
@@ -3947,10 +4151,11 @@ function Pipeline({
   return (
     <section className="pipeline-page">
       <header className="pipeline-header">
-        <p>Drag a lead to another stage, or click it for details. Logging a call moves it for you.</p>
+        <p>Drag a lead to another stage, or open its details to change the stage. Logging a call moves it for you.</p>
         <div><strong>{leads.filter((lead) => lead.status === "Won").length} won</strong><small>{won ? `$${won.toLocaleString()} in deals` : `${leads.filter(inQueue).length} still open`}</small></div>
       </header>
-      <div className="pipeline-board">
+      <nav className="pipeline-stage-nav" aria-label="Jump to pipeline stage"><span>Jump to</span>{leadStages.map((stage, index) => <button type="button" key={stage} onClick={() => boardRef.current?.children[index]?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest", inline: "start" })}>{stage}</button>)}</nav>
+      <div className="pipeline-board" ref={boardRef}>
         {leadStages.map((stage) => {
           const items = leads.filter((lead) => lead.status === stage);
           return (
@@ -4004,7 +4209,7 @@ function Pipeline({
 
 // Campaigns with leads, plus new ones that so far only have a script.
 function allCampaigns(leads: Lead[], settings: Record<string, CampaignSettings>) {
-  return [...new Set([...campaignsOf(leads), ...Object.keys(settings).filter((name) => settings[name]?.script || settings[name]?.pdf)])].sort((left, right) => left.localeCompare(right));
+  return [...new Set([...campaignsOf(leads), ...Object.keys(settings)])].sort((left, right) => left.localeCompare(right));
 }
 
 function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScript }: { leads: Lead[]; onStart: (name: string) => void; onView: (name: string) => void; onStage: (name: string) => void; onImport: (name?: string) => void; settings: Record<string, CampaignSettings>; onScript: (name: string) => void }) {
@@ -4026,7 +4231,7 @@ function Campaigns({ leads, onStart, onView, onStage, onImport, settings, onScri
           const toCall = items.filter(inQueue).length;
           return (
             <article className="campaign-card" key={name}>
-              <header><h2>{name}</h2><span>{items.length} lead{items.length === 1 ? "" : "s"}{settings[name]?.script || settings[name]?.pdf ? " · Script" : ""}{settings[name]?.value ? ` · $${settings[name]!.value!.toLocaleString()} a deal` : ""}</span></header>
+              <header><h2>{name}</h2><span>{items.length} lead{items.length === 1 ? "" : "s"}{settings[name]?.script || settings[name]?.pdf ? " · Script ready" : " · No script yet"}{settings[name]?.value ? ` · $${settings[name]!.value!.toLocaleString()} a deal` : ""}</span></header>
               {/* One bar for the whole campaign: each stage's share of its leads, same colors as the counts below. */}
               <div className="campaign-bar" aria-hidden="true">
                 {leadStages.map((stage) => { const count = items.filter((lead) => lead.status === stage).length; return count ? <i key={stage} className={`dot--${campaignStageTone[stage]}`} style={{ flexGrow: count }} /> : null; })}
@@ -4055,32 +4260,122 @@ function scriptRules(text = "") {
   return text.replace(/\r\n/g, "\n").split("\n").filter((line) => !/^(\s{2,}|\t)\S/.test(line)).map((line) => parseCondition(line)).filter((rule): rule is NonNullable<typeof rule> => Boolean(rule)).map((rule) => `If ${describeCondition(rule)}`);
 }
 // One card per campaign: what its script has, with links into that campaign's Settings popup.
-function ScriptsPage({ leads, settings, campaign, onEdit }: { leads: Lead[]; settings: Record<string, CampaignSettings>; campaign: string; onEdit: (name: string, tab: CampaignTab) => void }) {
-  const names = allCampaigns(leads, settings).filter((name) => !campaign || name === campaign);
+// The campaign picker for setting up one campaign (Scripts): a panel on the left. Record pages use the top dropdown.
+// "All campaigns" is the first row, only where the page can show every campaign at once.
+function CampaignRail({ campaigns, value, onPick, detail, allowAll = false }: { campaigns: string[]; value: string; onPick: (name: string) => void; detail: (name: string) => string; allowAll?: boolean }) {
+  const row = (name: string, label: string, sub: string) => (
+    <button key={name} type="button" className={name === value ? "is-active" : ""} aria-current={name === value || undefined} onClick={() => onPick(name)}>
+      <b>{label}</b>
+      <small>{sub}</small>
+    </button>
+  );
   return (
-    <section className="campaigns-page">
-      <div className="campaigns-head"><p>Each campaign's script, its variables and voicemails. Edit them in the campaign's settings.</p></div>
-      {!names.length && <div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div>}
-      <div className="campaign-list">
-        {names.map((name) => {
-          const own = settings[name] || {};
-          const script = own.script?.trim() ? (own.pdf ? "Text and PDF" : "Text") : own.pdf ? "PDF" : "None";
-          return (
-            <article className="campaign-card" key={name}>
-              <header><h2>{name}</h2><span>{(() => { const count = leads.filter((lead) => lead.campaigns?.includes(name)).length; return `${count} lead${count === 1 ? "" : "s"}`; })()}</span></header>
-              <dl className="campaign-stages campaign-stages--static">
-                <div><dt>Script</dt><dd>{script}</dd></div>
-                <div><dt>Variables</dt><dd>{scriptVariables(own.script || "").length}</dd></div>
-                <div><dt>Only-if rules</dt><dd>{scriptRules(own.script).length}</dd></div>
-              </dl>
-              <div className="campaign-card__actions">
-                <button type="button" className="text-link" onClick={() => onEdit(name, "variables")}>Variables</button>
-                <button type="button" className="primary-button" onClick={() => onEdit(name, "script")}><FileText size={16} aria-hidden="true" /> {script === "None" ? "Write the script" : "Edit script"}</button>
-              </div>
-            </article>
-          );
-        })}
-      </div>
+    <nav className="campaign-rail" aria-label="Campaigns">
+      <p>Campaigns</p>
+      {allowAll && row(allCampaignsValue, "All campaigns", detail(allCampaignsValue))}
+      {campaigns.map((name) => row(name, name, detail(name)))}
+    </nav>
+  );
+}
+
+// For pages that need one campaign when "All campaigns" is picked: says why, and lists the campaigns to pick from.
+function PickCampaign({ title, body, campaigns, detail, onPick }: { title: string; body: string; campaigns: string[]; detail: (name: string) => string; onPick: (name: string) => void }) {
+  return (
+    <div className="pick-campaign">
+      <FileText size={20} aria-hidden="true" />
+      <b>{title}</b>
+      <span>{body}</span>
+      <CampaignRail campaigns={campaigns} value="" onPick={onPick} detail={detail} />
+    </div>
+  );
+}
+
+function ScriptPreview({ item, campaign, onClose, onEdit }: { item: CampaignScript; campaign: string; onClose: () => void; onEdit: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => { dialogRef.current?.showModal(); }, []);
+  return <dialog ref={dialogRef} className="script-preview" aria-labelledby="script-preview-title" onClose={onClose}>
+    <div className="script-preview__toolbar"><button type="button" className="script-preview__back" onClick={onClose}><ArrowRight size={16} aria-hidden="true" /> All scripts</button><button type="button" className="quiet-button" onClick={onEdit}>Edit script</button></div>
+    <article className="script-preview__page">
+      <header className="script-preview__header">
+        <div className="script-preview__symbol" aria-hidden="true"><ScrollText size={24} /></div>
+        <div><p className="script-preview__campaign">{campaign}</p><h2 id="script-preview-title">{item.name}</h2></div>
+      </header>
+      <div className="script-preview__divider"><span>THE SCRIPT</span><span aria-hidden="true" /></div>
+      <div className="script-preview__body">{item.script.trim() ? <ScriptView text={item.script} /> : <p>No script text yet.</p>}</div>
+      <footer className="script-preview__end"><ScrollText size={16} aria-hidden="true" /><span>End of script</span></footer>
+    </article>
+  </dialog>;
+}
+
+// Scripts, per campaign: every script it has, and a radio to pick the one the call screen shows.
+// A campaign has to be picked first (left), so it's always clear whose scripts you're looking at and adding to.
+function ScriptsPage({ leads, calls, settings, campaign, onPick, onEdit, onChanged }: { leads: Lead[]; calls: CallRecord[]; settings: Record<string, CampaignSettings>; campaign: string; onPick: (name: string) => void; onEdit: (name: string, tab: CampaignTab, scriptId?: string) => void; onChanged: (message: string) => Promise<void> }) {
+  const all = allCampaigns(leads, settings);
+  const names = all.includes(campaign) ? [campaign] : [];
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<{ campaign: string; item: CampaignScript } | null>(null);
+  const change = async (name: string, body: Record<string, string>, message: string) => {
+    setBusy(true);
+    try {
+      await api("/api/campaigns/script", { method: "PUT", body: JSON.stringify({ campaign: name, ...body }) });
+      await onChanged(message);
+    } catch (error) {
+      await onChanged(error instanceof Error ? error.message : "Couldn't change the script.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="scripts-page">
+      <p className="scripts-page__lede">Choose the script to use when calling. Performance comes from logged outcomes.</p>
+      {!all.length && <div className="empty-state">No campaigns yet. Start one on the Campaigns page.</div>}
+      {all.length > 0 && <div>
+      {!names.length && <PickCampaign title="Scripts belong to one campaign" body="Pick the campaign whose scripts you want to see, add to or switch. The sidebar switches to it too." campaigns={all} detail={(name) => { const count = campaignScripts(settings[name] || {}).length; return `${count} script${count === 1 ? "" : "s"}`; }} onPick={onPick} />}
+      {names.map((name) => {
+        const own = settings[name] || {};
+        const scripts = campaignScripts(own);
+        const inUse = scripts.some((item) => item.id === own.activeScript) ? own.activeScript : scripts[0]?.id;
+        const count = leads.filter((lead) => lead.campaigns?.includes(name)).length;
+        const performance = scripts.map((script) => {
+          const attempts = calls.filter((call) => call.scriptCampaign === name && call.scriptId === script.id);
+          const results = attempts.map((call) => calls.find((result) => result.sourceCallId === call.id)).filter((call): call is CallRecord => Boolean(call));
+          const connects = results.filter((call) => conversationOutcomes.includes(call.outcome)).length;
+          const meetings = results.filter((call) => call.outcome === "Meeting booked").length;
+          return { id: script.id, attempts: attempts.length, results: results.length, connects, meetings };
+        });
+        const eligible = performance.filter((item) => item.connects >= 20 && item.meetings > 0).sort((left, right) => right.meetings / right.connects - left.meetings / left.connects);
+        const leader = eligible.length >= 2 && eligible[0].meetings / eligible[0].connects > eligible[1].meetings / eligible[1].connects ? eligible[0].id : null;
+        return (
+          <section className="scripts-campaign" key={name} aria-label={`Scripts for ${name}`}>
+            <header>
+              <div><h2>{name}</h2><span>{count} lead{count === 1 ? "" : "s"}{own.pdf ? " · PDF attached" : ""}</span></div>
+              <button type="button" className="quiet-button" onClick={() => onEdit(name, "variables")}>Variables</button>
+            </header>
+            {!scripts.length && <p className="scripts-campaign__empty">No script yet. <button type="button" className="text-link" onClick={() => onEdit(name, "script", "new")}>Write the first one</button></p>}
+            <ul className="script-cards" aria-label={`Scripts for ${name}`}>
+              {scripts.map((item) => {
+                const variables = scriptVariables(item.script).length;
+                const rules = scriptRules(item.script).length;
+                const { attempts, results, connects, meetings } = performance.find((entry) => entry.id === item.id)!;
+                return (
+                  <li key={item.id} className={`script-card${item.id === inUse ? " is-in-use" : ""}`}>
+                    <div className="script-card__heading"><div className="script-card__title"><span className="script-card__icon" aria-hidden="true"><ScrollText size={16} /></span><h3><button type="button" className="script-card__open" onClick={() => setPreview({ campaign: name, item })} aria-label={`Preview ${item.name}`}>{item.name}</button></h3></div>{item.id === inUse && <span className="script-card__badge">In use</span>}</div>
+                    <p className="script-card__meta">{variables} variable{variables === 1 ? "" : "s"}{rules ? ` · ${rules} only-if rule${rules === 1 ? "" : "s"}` : ""}</p>
+                    <div className="script-card__performance"><b>Script performance · All time{item.id === leader ? " · Highest meeting rate" : ""}</b>{attempts ? <><span>{attempts} call{attempts === 1 ? "" : "s"} · {connects} connect{connects === 1 ? "" : "s"} · {meetings} meeting{meetings === 1 ? "" : "s"}</span><span>{connects ? `${Math.round(meetings / connects * 100)}% meeting rate${connects < 20 ? " · Early results" : ""}` : "No logged connects yet"}{attempts > results ? ` · ${attempts - results} without a linked outcome` : ""}</span></> : <span>No tracked calls yet. Results start with new calls.</span>}</div>
+                    <div className="script-card__actions">
+                      {item.id !== inUse && <button type="button" className="quiet-button" disabled={busy} onClick={() => void change(name, { activate: item.id }, `${item.name} is now the script for ${name}.`)}>Use this script</button>}
+                      <button type="button" className="text-link" onClick={() => onEdit(name, "script", item.id)}>Edit</button>
+                      <button type="button" className="text-link" disabled={busy} onClick={() => { if (window.confirm(`Delete ${item.name}? This cannot be undone.`)) void change(name, { remove: item.id }, `${item.name} deleted.`); }}>Delete</button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        );
+      })}
+      </div>}
+      {preview && <ScriptPreview item={preview.item} campaign={preview.campaign} onClose={() => setPreview(null)} onEdit={() => { setPreview(null); onEdit(preview.campaign, "script", preview.item.id); }} />}
     </section>
   );
 }
@@ -4093,7 +4388,7 @@ const triggerInfo: Record<AutomationTrigger, { title: string; detail: string; ic
   transcribed: { title: "Call transcribed", detail: "After a transcribed call ends and you log the outcome", icon: FileText },
 };
 const stepInfo: Record<AutomationStep["type"], { title: string; detail: string; icon: typeof PhoneCall }> = {
-  if: { title: "Only continue if", detail: "Stop here unless the lead matches", icon: Filter },
+  if: { title: "If", detail: "Check the lead, then go down Yes or No", icon: Filter },
   say: { title: "Show a line", detail: "A line to say, at the top of the call screen", icon: MessageSquare },
   ask: { title: "Ask AI", detail: "Ask about the call and save the answer to a lead field", icon: Sparkles },
   wait: { title: "Wait", detail: "Pause, then carry on with the next steps", icon: Hourglass },
@@ -4133,7 +4428,7 @@ function stepSummary(step: AutomationStep, vault: Recording[]) {
   return `${step.days} business day${step.days === 1 ? "" : "s"} out, 10:00`;
 }
 function triggerSummary(item: Automation) {
-  const where = item.campaigns?.length ? item.campaigns.join(", ") : "Any campaign";
+  const where = item.campaigns?.length ? `Runs for ${item.campaigns.join(", ")}` : "Runs for every campaign";
   if (item.trigger !== "outcome" && item.trigger !== "transcribed") return where;
   return `${where} · ${item.outcomes?.length ? item.outcomes.join(", ") : "any outcome"}`;
 }
@@ -4159,7 +4454,7 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
     }
   };
   const create = (trigger: AutomationTrigger) => {
-    const item: Automation = { id: `au_${Date.now()}`, name: triggerInfo[trigger].title, on: true, trigger, campaigns: [], ...(trigger === "outcome" || trigger === "transcribed" ? { outcomes: [] } : {}), steps: [] };
+    const item: Automation = { id: `au_${Date.now()}`, name: triggerInfo[trigger].title, on: false, trigger, campaigns: [], ...(trigger === "outcome" || trigger === "transcribed" ? { outcomes: [] } : {}), nodes: [{ id: "trigger", step: null, x: 0, y: 0 }], edges: [] };
     setPicking(false);
     setCreated(item);
     setOpenId(item.id);
@@ -4178,7 +4473,7 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
   return (
     <section className="flow-page">
       <div className="campaigns-head">
-        <p>Each automation starts with a trigger, from the campaigns you pick on it, and runs its steps in order.</p>
+        <p>Choose what starts an automation, then build its steps. New automations stay off until you turn them on.</p>
         <div className="campaigns-head__actions"><button type="button" className="primary-button" onClick={() => setPicking(true)}><Plus size={16} aria-hidden="true" /> New automation</button></div>
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
@@ -4190,7 +4485,7 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
               <article className={`automation-row${item.on ? "" : " is-off"}`} key={item.id}>
                 <button type="button" className="automation-row__open" onClick={() => setOpenId(item.id)}>
                   <span className="automation-row__icon" aria-hidden="true"><Icon size={18} /></span>
-                  <span className="automation-row__text"><b>{item.name}</b><small>{triggerInfo[item.trigger].title} · {triggerSummary(item)} · {item.steps.length ? item.steps.map((step) => stepInfo[step.type].title).join(" → ") : "No steps yet"}</small></span>
+                  <span className="automation-row__text"><b>{item.name}</b><small>{triggerInfo[item.trigger].title} · {triggerSummary(item)} · {flowSteps(item).length ? flowSteps(item).map((step) => stepInfo[step.type].title).join(" → ") : "No steps yet"}</small></span>
                 </button>
                 <label className="automation-switch">
                   <input type="checkbox" role="switch" checked={item.on} onChange={() => void save(list.map((entry) => (entry.id === item.id ? { ...entry, on: !entry.on } : entry)))} />
@@ -4232,9 +4527,52 @@ function AutomationsPage({ automations, leads, settings, vault, onRefresh, onOpe
 
 // One automation on the canvas: the trigger, its steps joined by wires, and a + to add the next step. Clicking a
 // node opens its settings on the right. Changes save half a second after the last edit.
+// The automation editor, n8n style: nodes on a canvas you pan and zoom. Drag from a node's output dot to another
+// node to connect them (one output can feed several nodes); an If has Yes and No outputs. The + on an output adds a
+// node already connected there. Loops are refused. Clicking a node opens its settings on the right.
+type FlowCardData = { id: string };
+const FlowContext = createContext<{ draft: Automation; vault: Recording[]; selected: string | null; onAdd: (id: string, port: FlowEdge["port"]) => void } | null>(null);
+function FlowCard({ id }: { id: string }) {
+  const flow = useContext(FlowContext)!;
+  const node = flow.draft.nodes?.find((entry) => entry.id === id);
+  if (!node) return null;
+  const step = node.step;
+  const Icon = step ? stepInfo[step.type].icon : triggerInfo[flow.draft.trigger].icon;
+  const kind = !step ? "trigger" : step.type === "if" ? "switch" : "action";
+  const ports: [FlowEdge["port"], string][] = step?.type === "if" ? [["yes", "Yes"], ["no", "No"]] : [["out", ""]];
+  return (
+    <div className={`flow-card${flow.selected === id ? " is-selected" : ""}`}>
+      {step && <Handle type="target" position={Position.Left} className="flow-handle" />}
+      <div className={`flow-node flow-node--${kind}${step && !stepReady(step) ? " is-unfinished" : ""}`}>
+        <span className="flow-node__icon" aria-hidden="true"><Icon size={18} /></span>
+        <span className="flow-node__text"><b>{step ? stepInfo[step.type].title : triggerInfo[flow.draft.trigger].title}</b><small>{step ? stepSummary(step, flow.vault) : triggerSummary(flow.draft)}</small></span>
+      </div>
+      {ports.map(([port, label], index) => {
+        const top = ports.length === 1 ? "50%" : `${30 + index * 40}%`;
+        return (
+          <Fragment key={port}>
+            <Handle type="source" position={Position.Right} id={port} className={`flow-handle flow-handle--${port}`} style={{ top }} />
+            {label && <span className={`flow-port flow-port--${port}`} style={{ top }}>{label}</span>}
+            <button type="button" className="flow-plus nodrag" style={{ top }} onClick={(event) => { event.stopPropagation(); flow.onAdd(id, port); }} aria-label={`Add a node after ${step ? stepInfo[step.type].title : "the trigger"}${label ? ` (${label})` : ""}`}><Plus size={14} /></button>
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
+const flowNodeTypes = { card: ({ id }: { id: string }) => <FlowCard id={id} /> };
+const toFlowNode = (node: FlowNode) => ({ id: node.id, type: "card", position: { x: node.x, y: node.y }, data: { id: node.id } as FlowCardData, deletable: node.id !== "trigger" });
+const toFlowEdge = (edge: FlowEdge) => ({ id: `${edge.from}:${edge.port}:${edge.to}`, source: edge.from, sourceHandle: edge.port, target: edge.to, className: `flow-edge flow-edge--${edge.port}` });
+
 function AutomationEditor({ automation, leads: allLeads, settings: allSettings, vault, error, onBack, onSave, onDelete, onOpenVault }: { automation: Automation; leads: Lead[]; settings: Record<string, CampaignSettings>; vault: Recording[]; error: string | null; onBack: () => void; onSave: (next: Automation) => Promise<void>; onDelete: () => void; onOpenVault: () => void }) {
-  const [draft, setDraft] = useState(automation);
-  const [panel, setPanel] = useState<"trigger" | "add" | number | null>(automation.steps.length ? null : "add");
+  const [draft, setDraft] = useState<Automation>(() => { const { steps: _old, ...rest } = automation; return { ...rest, ...flowGraph(automation) }; });
+  const nodes = draft.nodes || [];
+  const edges = draft.edges || [];
+  // The panel shows the trigger, a node's settings (its id), or the list of nodes to add after `addFrom`.
+  const [panel, setPanel] = useState<string | null>(nodes.length > 1 ? null : "add");
+  const [addFrom, setAddFrom] = useState<{ id: string; port: FlowEdge["port"] } | null>(nodes.length > 1 ? null : { id: "trigger", port: "out" });
+  const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(nodes.map(toFlowNode));
+  const [flowEdges, setFlowEdges, onEdgesChange] = useEdgesState(edges.map(toFlowEdge));
   const dirty = useRef(false);
   useEffect(() => {
     if (!dirty.current) return;
@@ -4242,17 +4580,43 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
     return () => window.clearTimeout(timer);
   }, [draft]);
   const change = (next: Automation) => { dirty.current = true; setDraft(next); };
-  const setStep = (index: number, step: AutomationStep) => change({ ...draft, steps: draft.steps.map((item, at) => (at === index ? step : item)) });
   const back = () => { if (dirty.current) { dirty.current = false; void onSave(draft); } onBack(); };
-  const TriggerIcon = triggerInfo[draft.trigger].icon;
   const campaignNames = allCampaigns(allLeads, allSettings);
   // The leads this trigger hears from: the picked campaigns' leads, or everyone.
   const leads = draft.campaigns?.length ? allLeads.filter((lead) => lead.campaigns?.some((name) => draft.campaigns!.includes(name))) : allLeads;
   const scripts = (draft.campaigns?.length ? draft.campaigns : campaignNames).map((name) => allSettings[name]?.script || "").join("\n");
   const columns = [...new Set(leads.flatMap((lead) => Object.keys(lead.details || {})))].sort();
-  const asked = draft.steps.flatMap((item) => (item.type === "ask" && item.field.trim() ? [[`detail:${item.field.trim()}`, `${item.field.trim()} (from Ask AI)`] as [string, string]] : []));
+  const asked = flowSteps(draft).flatMap((item) => (item.type === "ask" && item.field.trim() ? [[`detail:${item.field.trim()}`, `${item.field.trim()} (from Ask AI)`] as [string, string]] : []));
   const fields: [string, string][] = [...asked, ...scriptVariables(scripts).map((name) => [name, `{{${name}}}`] as [string, string]), ...variableFields.filter(([key]) => key !== "phone"), ...columns.map((column) => [`detail:${column}`, column] as [string, string])];
-  const step = typeof panel === "number" ? draft.steps[panel] : undefined;
+  const openNode = panel && panel !== "trigger" && panel !== "add" ? nodes.find((node) => node.id === panel) : undefined;
+  const step = openNode?.step || undefined;
+  const connect = (edge: FlowEdge) => {
+    if (edge.to === "trigger" || edge.from === edge.to || flowReaches(edges, edge.to, edge.from) || edges.some((item) => item.from === edge.from && item.port === edge.port && item.to === edge.to)) return false;
+    change({ ...draft, edges: [...edges, edge] });
+    setFlowEdges((current) => [...current, toFlowEdge(edge)]);
+    return true;
+  };
+  const addNode = (type: AutomationStep["type"]) => {
+    const source = addFrom ? nodes.find((node) => node.id === addFrom.id) : undefined;
+    const siblings = source ? edges.filter((edge) => edge.from === source.id).length : 0;
+    const node: FlowNode = { id: `n${Date.now().toString(36)}`, step: newStep(type), x: (source?.x ?? 0) + 300, y: (source?.y ?? 0) + siblings * 110 + (addFrom?.port === "no" ? 60 : 0) };
+    const edge: FlowEdge | null = source && addFrom ? { from: source.id, port: addFrom.port, to: node.id } : null;
+    change({ ...draft, nodes: [...nodes, node], edges: edge ? [...edges, edge] : edges });
+    setFlowNodes((current) => [...current, toFlowNode(node)]);
+    if (edge) setFlowEdges((current) => [...current, toFlowEdge(edge)]);
+    setAddFrom(null);
+    setPanel(node.id);
+  };
+  const removeNodes = (ids: string[]) => {
+    const gone = new Set(ids.filter((id) => id !== "trigger"));
+    if (!gone.size) return;
+    change({ ...draft, nodes: nodes.filter((node) => !gone.has(node.id)), edges: edges.filter((edge) => !gone.has(edge.from) && !gone.has(edge.to)) });
+    setFlowNodes((current) => current.filter((node) => !gone.has(node.id)));
+    setFlowEdges((current) => current.filter((edge) => !gone.has(edge.source) && !gone.has(edge.target)));
+    if (panel && gone.has(panel)) setPanel(null);
+  };
+  const setStep = (id: string, next: AutomationStep) => change({ ...draft, nodes: nodes.map((node) => (node.id === id ? { ...node, step: next } : node)) });
+  const addTitle = addFrom ? (() => { const from = nodes.find((node) => node.id === addFrom.id); const name = from?.step ? stepInfo[from.step.type].title : triggerInfo[draft.trigger].title; return addFrom.port === "out" ? `After ${name}` : `If ${addFrom.port === "yes" ? "Yes" : "No"}`; })() : "Add a node";
   return (
     <section className={`flow-page${panel !== null ? " has-panel" : ""}`}>
       <div className="flow-editor-head">
@@ -4265,32 +4629,39 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
         <button type="button" className="text-link" onClick={() => { if (window.confirm(`Delete ${draft.name}?`)) { dirty.current = false; onDelete(); } }}><Trash2 size={16} aria-hidden="true" /> Delete</button>
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <div className="flow-canvas">
-        <div className="flow-chain">
-          <button type="button" className={`flow-node flow-node--trigger${panel === "trigger" ? " is-selected" : ""}`} onClick={() => setPanel("trigger")}>
-            <span className="flow-node__icon" aria-hidden="true"><TriggerIcon size={18} /></span>
-            <span className="flow-node__text"><b>{triggerInfo[draft.trigger].title}</b><small>{triggerSummary(draft)}</small></span>
-          </button>
-          {draft.steps.map((item, index) => {
-            const Icon = stepInfo[item.type].icon;
-            return (
-              <Fragment key={index}>
-                <span className="flow-wire" aria-hidden="true" />
-                <button type="button" className={`flow-node flow-node--${item.type === "if" ? "switch" : "action"}${panel === index ? " is-selected" : ""}${stepReady(item) ? "" : " is-unfinished"}`} onClick={() => setPanel(index)}>
-                  <span className="flow-node__icon" aria-hidden="true"><Icon size={18} /></span>
-                  <span className="flow-node__text"><b>{stepInfo[item.type].title}</b><small>{stepSummary(item, vault)}</small></span>
-                </button>
-              </Fragment>
-            );
-          })}
-          <span className="flow-wire" aria-hidden="true" />
-          <button type="button" className={`flow-add${panel === "add" ? " is-selected" : ""}`} onClick={() => setPanel("add")} aria-label="Add a step"><Plus size={20} /></button>
+      <p className="flow-editor-status">{draft.on ? "Active · " : "Off · "}{triggerInfo[draft.trigger].title}. {triggerSummary(draft)}. {flowSteps(draft).length ? `${flowSteps(draft).length} step${flowSteps(draft).length === 1 ? "" : "s"} added.` : "Add a step, then turn it on when you're ready."} Changes save automatically.</p>
+      <FlowContext.Provider value={{ draft, vault, selected: panel, onAdd: (id, port) => { setAddFrom({ id, port }); setPanel("add"); } }}>
+        <div className="flow-board">
+          <ReactFlow
+            nodes={flowNodes}
+            edges={flowEdges}
+            nodeTypes={flowNodeTypes}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={(connection) => { if (connection.source && connection.target) connect({ from: connection.source, port: (connection.sourceHandle || "out") as FlowEdge["port"], to: connection.target }); }}
+            isValidConnection={(connection) => Boolean(connection.source && connection.target && connection.target !== "trigger" && connection.source !== connection.target && !flowReaches(edges, connection.target, connection.source))}
+            onNodeClick={(_, node) => { setAddFrom(null); setPanel(node.id === "trigger" ? "trigger" : node.id); }}
+            onPaneClick={() => setPanel(null)}
+            onNodeDragStop={(_, __, moved) => { const at = new Map(moved.map((node) => [node.id, node.position])); change({ ...draft, nodes: nodes.map((node) => (at.has(node.id) ? { ...node, x: Math.round(at.get(node.id)!.x), y: Math.round(at.get(node.id)!.y) } : node)) }); }}
+            onNodesDelete={(deleted) => removeNodes(deleted.map((node) => node.id))}
+            onEdgesDelete={(deleted) => { const gone = new Set(deleted.map((edge) => edge.id)); change({ ...draft, edges: edges.filter((edge) => !gone.has(toFlowEdge(edge).id)) }); }}
+            deleteKeyCode={["Backspace", "Delete"]}
+            fitView
+            fitViewOptions={{ maxZoom: 1, padding: 0.3 }}
+            minZoom={0.3}
+            maxZoom={1.5}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background gap={20} size={1.2} />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+          <p className="flow-board__hint">Drag from a dot to connect. Click a line or node and press Delete to remove it.</p>
         </div>
-      </div>
+      </FlowContext.Provider>
       {panel !== null && (
         <aside className="flow-panel" role="dialog" aria-labelledby="flow-panel-title">
           <header>
-            <h2 id="flow-panel-title">{panel === "trigger" ? triggerInfo[draft.trigger].title : panel === "add" ? "What happens next?" : step ? stepInfo[step.type].title : ""}</h2>
+            <h2 id="flow-panel-title">{panel === "trigger" ? triggerInfo[draft.trigger].title : panel === "add" ? addTitle : step ? stepInfo[step.type].title : ""}</h2>
             <button type="button" className="close-button" onClick={() => setPanel(null)} aria-label="Close"><X size={18} /></button>
           </header>
           {panel === "trigger" && (
@@ -4315,21 +4686,22 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
           )}
           {panel === "add" && (
             <div className="flow-options">
+              {!addFrom && <p className="campaign-settings__hint">It's added on its own. Drag from another node's dot to connect it, or use the + on a node to add one already connected.</p>}
               {stepsFor[draft.trigger].map((type) => {
                 const Icon = stepInfo[type].icon;
                 return (
-                  <button type="button" className="flow-option" key={type} onClick={() => { change({ ...draft, steps: [...draft.steps, newStep(type)] }); setPanel(draft.steps.length); }}>
+                  <button type="button" className="flow-option" key={type} onClick={() => addNode(type)}>
                     <span className={`flow-option__icon flow-option__icon--${type === "if" ? "switch" : "action"}`} aria-hidden="true"><Icon size={18} /></span>
-                    <span><b>{stepInfo[type].title}</b><small>{stepInfo[type].detail}</small></span>
+                    <span><b>{stepInfo[type].title}</b><small>{type === "if" ? "Goes down Yes or No, so each answer can lead somewhere different" : stepInfo[type].detail}</small></span>
                   </button>
                 );
               })}
             </div>
           )}
-          {step && typeof panel === "number" && (
-            <StepSettings step={step} fields={fields} leads={leads} settings={allSettings} vault={vault} onOpenVault={onOpenVault}
-              onChange={(next) => setStep(panel, next)}
-              onRemove={() => { change({ ...draft, steps: draft.steps.filter((_, at) => at !== panel) }); setPanel(null); }} />
+          {step && openNode && (
+            <StepSettings step={step} fields={fields} leads={leads} settings={allSettings} vault={vault} campaigns={draft.campaigns || []} onOpenVault={onOpenVault}
+              onChange={(next) => setStep(openNode.id, next)}
+              onRemove={() => removeNodes([openNode.id])} />
           )}
         </aside>
       )}
@@ -4338,7 +4710,7 @@ function AutomationEditor({ automation, leads: allLeads, settings: allSettings, 
 }
 
 // One step's settings in the side panel.
-function StepSettings({ step, fields, leads, settings, vault, onOpenVault, onChange, onRemove }: { step: AutomationStep; fields: [string, string][]; leads: Lead[]; settings: Record<string, CampaignSettings>; vault: Recording[]; onOpenVault: () => void; onChange: (step: AutomationStep) => void; onRemove: () => void }) {
+function StepSettings({ step, fields, leads, settings, vault, campaigns = [], onOpenVault, onChange, onRemove }: { step: AutomationStep; fields: [string, string][]; leads: Lead[]; settings: Record<string, CampaignSettings>; vault: Recording[]; campaigns?: string[]; onOpenVault: () => void; onChange: (step: AutomationStep) => void; onRemove: () => void }) {
   const variablesOf = (lead: Lead) => settings[scriptCampaignOf(lead, settings) || ""]?.variables;
   const values = step.type === "if" && step.field ? [...new Set(leads.map((lead) => fieldValue(step.field, lead, variablesOf(lead))).filter(Boolean))].slice(0, 50) : [];
   const matching = step.type === "if" && step.field ? leads.filter((lead) => matches(step, lead, variablesOf(lead))).length : 0;
@@ -4381,14 +4753,29 @@ function StepSettings({ step, fields, leads, settings, vault, onOpenVault, onCha
       {step.type === "say" && <label>Line<textarea rows={4} value={step.text} onChange={(event) => onChange({ ...step, text: event.target.value })} placeholder="Hey {{first_name}}, I see you don't have a website yet." /><small>Use {"{{variables}}"} like in the script.</small></label>}
       {step.type === "play" && (vault.length ? (
         <>
-          <label>Voicemail<select value={step.recordingId} onChange={(event) => onChange({ ...step, recordingId: event.target.value })}><option value="" disabled>Pick a voicemail…</option>{vault.map((item) => <option key={item.id} value={item.id}>{item.name}{item.seconds ? ` (${clockOf(item.seconds)})` : ""}</option>)}</select></label>
-          {step.recordingId && vault.some((item) => item.id === step.recordingId) && <audio controls preload="none" src={`/api/voicemails/${step.recordingId}/audio`} />}
+          {(() => {
+            // Voicemails tagged for this automation's campaigns first, each with what it says, so you pick by reading.
+            const fits = (item: Recording) => !campaigns.length || !item.campaigns?.length || item.campaigns.some((name) => campaigns.includes(name));
+            const option = (item: Recording) => <option key={item.id} value={item.id}>{item.name}{item.seconds ? ` (${clockOf(item.seconds)})` : ""}{item.says ? ` · ${item.says.slice(0, 60)}` : ""}</option>;
+            const picked = vault.find((item) => item.id === step.recordingId);
+            const others = vault.filter((item) => !fits(item));
+            return (
+              <>
+                <label>Voicemail<select value={step.recordingId} onChange={(event) => onChange({ ...step, recordingId: event.target.value })}>
+                  <option value="" disabled>Pick a voicemail…</option>
+                  {others.length ? <><optgroup label={campaigns.length ? "For these campaigns" : "Voicemails"}>{vault.filter(fits).map(option)}</optgroup><optgroup label="Other voicemails">{others.map(option)}</optgroup></> : vault.map(option)}
+                </select></label>
+                {picked?.says && <p className="campaign-settings__hint">"{picked.says}"</p>}
+                {picked && <audio controls preload="none" src={`/api/voicemails/${picked.id}/audio`} />}
+              </>
+            );
+          })()}
           <small>After it plays, the call ends and the lead is logged as Voicemail.</small>
         </>
       ) : <p className="campaign-settings__hint">No voicemails yet. <button type="button" className="text-link" onClick={onOpenVault}>Record one in Voicemails</button></p>)}
       {step.type === "stage" && <label>Stage<select value={step.stage} onChange={(event) => onChange({ ...step, stage: event.target.value })}>{leadStages.map((stage) => <option key={stage}>{stage}</option>)}</select></label>}
       {step.type === "followup" && <label>Business days out<input type="number" min={0} max={60} value={step.days} onChange={(event) => onChange({ ...step, days: Math.max(0, Math.min(60, Number(event.target.value) || 0)) })} /><small>At 10:00. A time you pick when logging the call wins.</small></label>}
-      <button type="button" className="text-link flow-step-settings__remove" onClick={onRemove}><Trash2 size={16} aria-hidden="true" /> Remove this step</button>
+      <button type="button" className="text-link flow-step-settings__remove" onClick={onRemove}><Trash2 size={16} aria-hidden="true" /> Remove this node</button>
     </div>
   );
 }
@@ -4416,7 +4803,22 @@ function leadsPlace(leads: Lead[]) {
   const city = top(located.filter((place) => place.state![0] === code && place.city).map((place) => place.city));
   return { label: city ? `${city}, ${code}` : state[1], search: city || state[1], state: state[1] };
 }
-const weatherCache = new Map<string, Promise<{ temperature: number; code: number } | null>>();
+const weatherIcons = import.meta.glob<string>("/node_modules/@meteocons/svg/flat/{clear-day,clear-night,partly-cloudy-day,partly-cloudy-night,cloudy,fog,drizzle,rain,snow,thunderstorms}.svg", { eager: true, query: "?url", import: "default" });
+const stillWeatherIcons = import.meta.glob<string>("/node_modules/@meteocons/svg-static/flat/{clear-day,clear-night,partly-cloudy-day,partly-cloudy-night,cloudy,fog,drizzle,rain,snow,thunderstorms}.svg", { eager: true, query: "?url", import: "default" });
+function weatherIcon(code: number, day: boolean) {
+  if (code === 0) return day ? "clear-day" : "clear-night";
+  if (code <= 2) return day ? "partly-cloudy-day" : "partly-cloudy-night";
+  if (code === 3) return "cloudy";
+  if (code <= 48) return "fog";
+  if (code <= 57) return "drizzle";
+  if (code <= 67) return "rain";
+  if (code <= 77) return "snow";
+  if (code <= 82) return "rain";
+  if (code <= 86) return "snow";
+  return "thunderstorms";
+}
+type CurrentWeather = { temperature: number; code: number; day: boolean };
+const weatherCache = new Map<string, Promise<CurrentWeather | null>>();
 function fetchWeather(place: { search: string; state: string }) {
   const key = `${place.search}|${place.state}`;
   if (!weatherCache.has(key))
@@ -4425,28 +4827,36 @@ function fetchWeather(place: { search: string; state: string }) {
       const results: { latitude: number; longitude: number; name: string; admin1?: string }[] = found.results || [];
       const spot = results.find((result) => result.admin1 === place.state || result.name === place.state) || results[0];
       if (!spot) return null;
-      const weather = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${spot.latitude}&longitude=${spot.longitude}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`).then((response) => response.json());
+      const weather = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${spot.latitude}&longitude=${spot.longitude}&current=temperature_2m,weather_code,is_day&temperature_unit=fahrenheit`).then((response) => response.json());
       const current = weather.current;
-      return typeof current?.temperature_2m === "number" ? { temperature: Math.round(current.temperature_2m), code: current.weather_code } : null;
+      return typeof current?.temperature_2m === "number" && typeof current?.weather_code === "number" ? { temperature: Math.round(current.temperature_2m), code: current.weather_code, day: current.is_day !== 0 } : null;
     })().catch(() => null));
   return weatherCache.get(key)!;
 }
 function WeatherCard({ leads }: { leads: Lead[] }) {
   const place = leadsPlace(leads);
-  const [weather, setWeather] = useState<{ temperature: number; code: number } | null>(null);
+  const key = place ? `${place.search}|${place.state}` : "";
+  const [result, setResult] = useState<{ key: string; weather: CurrentWeather | null } | null>(null);
   useEffect(() => {
     let live = true;
-    setWeather(null);
-    if (place) void fetchWeather(place).then((result) => { if (live) setWeather(result); });
+    if (place) void fetchWeather(place).then((weather) => { if (live) setResult({ key, weather }); });
     return () => { live = false; };
-  }, [place?.search, place?.state]);
-  // No place or no answer from the weather service: no card.
-  if (!place || !weather) return null;
+  }, [key]);
+  if (!place) return null;
+  const loading = result?.key !== key;
+  const weather = loading ? null : result.weather;
+  const icon = weather ? weatherIcon(weather.code, weather.day) : null;
   return (
-    <section className="analytics-card home-weather">
-      <h2>Weather in {place.label}</h2>
-      <p><b>{weather.temperature}°F</b> {weatherWords(weather.code)}</p>
-      <p className="field-hint">Where most of these leads are, right now.</p>
+    <section className="analytics-card home-weather" aria-busy={loading}>
+      <div className="home-weather__heading"><h2>Weather in {place.label}</h2><span>Right now</span></div>
+      {loading ? <div className="home-weather__current" role="status"><span className="sr-only">Loading weather</span><div aria-hidden="true"><span className="skeleton home-weather__skeleton-temperature" /><span className="skeleton home-weather__skeleton-condition" /></div><span className="skeleton home-weather__skeleton-icon" aria-hidden="true" /></div> : weather && icon ? <div className="home-weather__current">
+        <div><p className="home-weather__temperature">{weather.temperature}<span>°F</span></p><p className="home-weather__condition">{weatherWords(weather.code)}</p></div>
+        <picture aria-hidden="true">
+          <source media="(prefers-reduced-motion: reduce)" srcSet={stillWeatherIcons[`/node_modules/@meteocons/svg-static/flat/${icon}.svg`]} />
+          <img src={weatherIcons[`/node_modules/@meteocons/svg/flat/${icon}.svg`]} alt="" width="112" height="112" />
+        </picture>
+      </div> : <p className="home-weather__hint">Weather is unavailable right now.</p>}
+      <p className="home-weather__hint">Where most of your leads are</p>
     </section>
   );
 }
@@ -4481,7 +4891,8 @@ function Home({ state, all, followUps, onOpenLead, onStart, onGo }: { state: Sta
   const money = (value: number) => (value ? ` · $${value.toLocaleString()}` : "");
   const campaigns = campaignsOf(state.leads);
   return (
-    <section className="analytics-page">
+    <section className="analytics-page home-dashboard">
+      <section className="home-focus"><div><h2>{due.length ? `${due.length} follow-up${due.length === 1 ? "" : "s"} to check` : "Ready for your next call?"}</h2><p>{due.length ? "Callbacks and meetings due today are waiting in Tasks." : "Choose a campaign and pick up where you left off."}</p></div><button type="button" className="primary-button" onClick={() => due.length ? onGo("followups") : campaigns.length === 1 ? onStart(campaigns[0]) : onGo("campaigns")}>{due.length ? "Open Tasks" : campaigns.length === 1 ? "Start calling" : "View campaigns"} <ArrowRight size={16} aria-hidden="true" /></button></section>
       <div className="analytics-grid">
         <section className="analytics-card">
           <h2>Today and this month</h2>
@@ -4489,7 +4900,8 @@ function Home({ state, all, followUps, onOpenLead, onStart, onGo }: { state: Sta
             <thead><tr><th scope="col"><span className="sr-only">Measure</span></th><th scope="col">Today</th><th scope="col">This month</th></tr></thead>
             <tbody>
               <tr><td>Calls</td><td>{today.calls}</td><td>{month.calls}</td></tr>
-              <tr><td>Conversations</td><td>{today.conversations}</td><td>{month.conversations}</td></tr>
+              <tr><td>Connects</td><td>{today.conversations}</td><td>{month.conversations}</td></tr>
+              <tr><td>Connect rate</td><td>{today.calls ? `${Math.round(today.conversations / today.calls * 100)}%` : "–"}</td><td>{month.calls ? `${Math.round(month.conversations / month.calls * 100)}%` : "–"}</td></tr>
               <tr><td>Meetings booked</td><td>{today.meetings}</td><td>{month.meetings}</td></tr>
               <tr><td>Deals won</td><td>{today.won}{money(today.value)}</td><td>{month.won}{money(month.value)}</td></tr>
             </tbody>
@@ -4803,8 +5215,9 @@ function DncList({ onClose, onSaved }: { onClose: () => void; onSaved: (message:
   return <div className="modal-backdrop"><form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="dnc-list-title"><button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button><h2 id="dnc-list-title">Do-not-call list</h2><p>Paste one phone number per line. Matching leads are immediately suppressed.</p>{error && <p className="form-error" role="alert">{error}</p>}<label>Phone numbers<textarea value={numbers} onChange={(event) => setNumbers(event.target.value)} placeholder={"+15551234567\n+15557654321"} required /></label><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Suppress numbers"}</button></form></div>;
 }
 
-function CallOutcome({ lead, automations, settings, bookingUrl, onBook, onClose, onSaved }: { lead: Lead; automations?: Automation[]; settings: Record<string, CampaignSettings>; bookingUrl: string; onBook: () => void; onClose: () => void; onSaved: (outcome: string) => Promise<void> }) {
+function CallOutcome({ lead, callId, automations, settings, bookingUrl, onBook, onClose, onSaved }: { lead: Lead; callId?: string; automations?: Automation[]; settings: Record<string, CampaignSettings>; bookingUrl: string; onBook: () => void; onClose: () => void; onSaved: (outcome: string) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
+  const [linkToCall, setLinkToCall] = useState(Boolean(callId));
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState("");
   const [followUpAt, setFollowUpAt] = useState("");
@@ -4818,13 +5231,14 @@ function CallOutcome({ lead, automations, settings, bookingUrl, onBook, onClose,
   };
   // A callback or a meeting without a time never becomes a task, so those two need one.
   const needsDate = outcome === "Callback" || outcome === "Meeting booked";
-  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt") }) }); await onSaved(String(form.get("outcome"))); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
+  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setError(null); const form = new FormData(event.currentTarget); try { await api("/api/calls/record", { method: "POST", body: JSON.stringify({ leadId: lead.id, callId: linkToCall ? callId : undefined, outcome: form.get("outcome"), note: form.get("note"), followUpAt: form.get("followUpAt") }) }); await onSaved(String(form.get("outcome"))); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this call outcome."); } finally { setBusy(false); } };
   return (
     <div className="modal-backdrop">
       <form className="lead-form" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="outcome-title">
         <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
         <h2 id="outcome-title">Log call outcome</h2>
         <p>Record the result for {leadLabel(lead)}. This updates the lead and call history, then moves you to the next lead.</p>
+        {callId && <label><span><input type="checkbox" checked={linkToCall} onChange={(event) => setLinkToCall(event.target.checked)} /> Link this result to your last call to this lead</span></label>}
         {error && <p className="form-error" role="alert">{error}</p>}
         <label>Outcome<select name="outcome" value={outcome} onChange={(event) => pickOutcome(event.target.value)} required><option value="" disabled>Choose what happened…</option><option>Interested</option><option>Meeting booked</option><option>Callback</option><option>Maybe later</option><option>No answer</option><option>Busy</option><option>Voicemail</option><option>Not interested</option><option>Wrong number</option><option>Do not call</option></select></label>
         {outcome === "Meeting booked" && (bookingUrl
@@ -4839,27 +5253,39 @@ function CallOutcome({ lead, automations, settings, bookingUrl, onBook, onClose,
 }
 
 function ActivityLog({ activity, leads, onOpenLead }: { activity: State["activity"]; leads: Lead[]; onOpenLead: (id: string) => void }) {
-  // Log lines about a lead start with its name ("Dr. Aaron Fleming · Follow-up").
-  // shortcut: matched by name, so two leads with the same name open the first; store the lead id on events if that matters.
-  const byLabel = new Map<string, Lead>();
-  for (const lead of leads) if (!byLabel.has(leadLabel(lead))) byLabel.set(leadLabel(lead), lead);
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("All activity");
+  const categoryOf = (action: string) => /call|outcome|voicemail|interested|meeting booked|no answer|busy|wrong number/i.test(action) ? "Calls" : /script|campaign/i.test(action) ? "Scripts & campaigns" : /task|follow-up/i.test(action) ? "Tasks" : /lead|dnc/i.test(action) ? "Leads" : "Workspace";
+  const icons: Record<string, typeof Phone> = { Calls: PhoneCall, "Scripts & campaigns": ScrollText, Tasks: ListChecks, Leads: UserRound, Workspace: SlidersHorizontal };
+  const filtered = activity.filter((event) => (category === "All activity" || categoryOf(event.action) === category) && `${event.action} ${event.detail} ${event.at}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const groups: { label: string; events: State["activity"] }[] = [];
+  for (const event of filtered) {
+    const label = event.at.includes(",") ? event.at.split(",")[0] : event.at || "Earlier";
+    if (groups.at(-1)?.label !== label) groups.push({ label, events: [] });
+    groups.at(-1)!.events.push(event);
+  }
   return (
-    <section className="activity-log">
-      {activity.map((event) => {
-        const lead = byLabel.get(event.detail.split(" · ")[0]);
-        return (
-        <article key={event.id}>
-          <span className="activity-mark">
-            <ClipboardList size={18} />
-          </span>
-          <div>
-            <h2>{event.action}</h2>
-            <p>{lead ? <button type="button" className="text-link" onClick={() => onOpenLead(lead.id)}>{event.detail}</button> : event.detail}</p>
-          </div>
-          <time>{event.at}</time>
-        </article>
-        );
-      })}
+    <section className="activity-log" aria-label="Workspace activity">
+      <div className="activity-log__controls">
+        <label className="activity-log__search"><Search size={17} aria-hidden="true" /><span className="sr-only">Search activity</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search activity" /></label>
+        <label className="activity-log__filter"><span className="sr-only">Activity type</span><select value={category} onChange={(event) => setCategory(event.target.value)}>{["All activity", "Calls", "Leads", "Scripts & campaigns", "Tasks", "Workspace"].map((option) => <option key={option}>{option}</option>)}</select></label>
+      </div>
+      <p className="activity-log__count" aria-live="polite">{filtered.length} {filtered.length === 1 ? "event" : "events"}{activity.length >= 500 ? " · Showing the latest 500 events" : ""}</p>
+      {groups.map((group, groupIndex) => <section className="activity-log__day" key={`${group.label}-${groupIndex}`}>
+        <h3>{group.label}</h3>
+        <div className="activity-log__events">{group.events.map((event) => {
+          const matches = leads.filter((lead) => leadLabel(lead) === event.detail.split(" · ")[0]);
+          const lead = event.leadId ? leads.find((candidate) => candidate.id === event.leadId) : matches.length === 1 ? matches[0] : undefined;
+          const kind = categoryOf(event.action);
+          const Icon = icons[kind];
+          return <article key={event.id}>
+            <span className="activity-mark" aria-hidden="true"><Icon size={16} /></span>
+            <div className="activity-log__event"><h4>{event.action}</h4>{event.detail && <p>{lead ? <button type="button" className="text-link" onClick={() => onOpenLead(lead.id)}>{event.detail}</button> : event.detail}</p>}<span>{kind}</span></div>
+            <time>{event.at.includes(",") ? event.at.split(",").slice(1).join(",").trim() : ""}</time>
+          </article>;
+        })}</div>
+      </section>)}
+      {!filtered.length && <div className="activity-log__empty"><ClipboardList size={22} aria-hidden="true" /><strong>{activity.length ? "No matching activity" : "No activity yet"}</strong><span>{activity.length ? "Try a different search or activity type." : "Workspace activity will appear here as you work."}</span></div>}
     </section>
   );
 }
@@ -4887,7 +5313,9 @@ function setupSteps(state: State): SetupStep[] {
     { done: Boolean(state.connection), title: "Connect your Twilio account", body: "Paste your Account SID and Auth Token here and press Validate. Both are on your Twilio Console home page; the link above the fields opens it. They're checked and stored encrypted.", target: "settings", action: "Open Settings", screen: "settings", spot: "twilio" },
     { done: Boolean(state.connection?.selectedNumber), title: "Pick the number leads will see", body: "Once Twilio is connected, your numbers are listed here. Choose the one leads see as caller ID and save it. Need a number? The link here opens your Twilio numbers.", target: "settings", action: "Open Settings", screen: "settings", spot: "number,twilio" },
     { done: Boolean(state.connection), title: "Choose how you take calls", body: "\"In this app\" plays calls through your browser: use a headset and allow the microphone. You can switch to Zoiper or your phone here instead.", target: "settings", action: "Open Settings", screen: "settings", spot: "answer-on,twilio" },
-    { done: Boolean(state.callbackReachable), title: "Start Open Dialer the easy way", body: "On your computer, always start with Start Open Dialer.bat. It opens Docker Desktop and the local database, builds the app, and opens the tunnel Twilio needs to reach you. Keep its window open while you call. A hosted copy needs none of this.", target: null, action: "" },
+    // Optional: whether Twilio can reach the app depends on the address it was opened at (localhost never counts),
+    // so as a required step it flickered and could never tick off for good.
+    { done: Boolean(state.callbackReachable), title: "Start Open Dialer the easy way", body: "On your computer, always start with Start Open Dialer.bat. It opens Docker Desktop and the local database, builds the app, and opens the tunnel Twilio needs to reach you. Keep its window open while you call. A hosted copy needs none of this.", target: null, action: "", optional: true },
     { done: state.leads.length > 0, title: "Add your leads", body: "New campaign: name it and write the script first, then import its CSV. Match the columns; only a phone number is required. Leads → Import CSV works too.", target: "campaigns", action: "Open Campaigns", screen: "campaigns", spot: "new-campaign" },
     { done: scripts, title: "Set up each campaign", body: "Settings on a campaign card, or Campaigns → Scripts in the sidebar for every campaign's script at a glance. General: what a won deal is worth. Script: type {{name}} or ((NAME)) where lead details go, or use the Variable button. Variables: what fills each one, with real examples from your leads, and Clean with AI to make messy values sound natural.", target: "campaigns", action: "Open Campaigns", optional: true, screen: "campaigns", spot: "campaign-settings,new-campaign" },
     { done: Boolean(state.settings?.fields?.length), title: "Add custom fields", body: "Extra details your team fills in on every lead, like Territory. They show on each lead's form, in the CSV import, and as script variables.", target: "settings", action: "Open Settings", optional: true, screen: "settings", spot: "settings-fields" },
@@ -4899,33 +5327,53 @@ function setupSteps(state: State): SetupStep[] {
   ];
 }
 
-// The checklist: what's done, plus the guided tour, from the start or from any step.
-function SetupGuide({ state, onClose, onTour }: { state: State; onClose: () => void; onTour: (step: number) => void }) {
+// Settings → Roadmap: what's coming, from src/roadmap.ts.
+function Roadmap() {
+  return (
+    <section className="settings-panel roadmap">
+      <header className="roadmap__intro"><div><h2>What's ahead</h2><p>A look at where Open Dialer is going, from the next improvements to ideas for later.</p></div><span className="roadmap__intro-icon" aria-hidden="true"><Workflow size={27} /></span></header>
+      {roadmap.map((group) => (
+        <section key={group.stage} className={`roadmap__group${group.stage === "Unibox" ? " roadmap__group--feature" : ""}`} aria-labelledby={`roadmap-${group.stage}`}>
+          <header><span className="roadmap__marker" aria-hidden="true" /><div><h3 id={`roadmap-${group.stage}`}>{group.stage}</h3><p>{group.note}</p></div></header>
+          <ul>
+            {group.items.map((item) => (
+              <li key={item.title}>
+                <b>{item.title}{item.undecided && <em>Undecided</em>}</b>
+                <small>{item.detail}</small>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </section>
+  );
+}
+
+// The checklist (Settings → Setup): what's done, plus the guided tour, from the start or from any step.
+function SetupChecklist({ state, onTour }: { state: State; onTour: (step: number) => void }) {
   const steps = setupSteps(state);
   const required = steps.filter((step) => !step.optional);
   const done = required.filter((step) => step.done).length;
   return (
-    <div className="modal-backdrop">
-      <section className="lead-form setup-guide" role="dialog" aria-modal="true" aria-labelledby="setup-guide-title">
-        <button type="button" className="close-button" onClick={onClose} aria-label="Close"><X /></button>
-        <h2 id="setup-guide-title">Setup guide</h2>
-        <p>{done === required.length ? "Everything you need is set up. Take the tour any time for a refresher." : `${done} of ${required.length} done. Each step ticks itself off once it's finished.`}</p>
-        <div className="dash-progress setup-guide__progress"><span><i style={{ width: `${Math.round((done / required.length) * 100)}%` }} /></span></div>
-        <button type="button" className="primary-button setup-guide__tour" onClick={() => onTour(Math.max(0, steps.findIndex((step) => !step.done)))}><Play size={16} aria-hidden="true" /> {done === required.length ? "Take the tour" : "Continue with the tour"}</button>
-        <ol className="setup-steps">
-          {steps.map((step, index) => (
-            <li key={step.title} className={step.done ? "is-done" : undefined}>
-              <span className="setup-steps__mark" aria-hidden="true">{step.done ? <Check size={14} /> : index + 1}</span>
-              <div>
-                <b>{step.title}{step.optional && <em className="setup-steps__optional">Optional</em>}<span className="sr-only">{step.done ? " (done)" : " (to do)"}</span></b>
-                <small>{step.body}</small>
-              </div>
-              <button type="button" className="quiet-button" onClick={() => onTour(index)}>Show me</button>
-            </li>
-          ))}
-        </ol>
-      </section>
-    </div>
+    <section className="settings-panel setup-guide">
+      <span className="panel-kicker">Getting started</span>
+      <h2>Setup</h2>
+      <p>{done === required.length ? "Everything you need is set up. Take the tour any time for a refresher." : `${done} of ${required.length} done. Each step ticks itself off once it's finished.`}</p>
+      <div className="dash-progress setup-guide__progress"><span><i style={{ width: `${Math.round((done / required.length) * 100)}%` }} /></span></div>
+      <button type="button" className="primary-button setup-guide__tour" onClick={() => onTour(Math.max(0, steps.findIndex((step) => !step.done)))}><Play size={16} aria-hidden="true" /> {done === required.length ? "Take the tour" : "Continue with the tour"}</button>
+      <ol className="setup-steps">
+        {steps.map((step, index) => (
+          <li key={step.title} className={step.done ? "is-done" : undefined}>
+            <span className="setup-steps__mark" aria-hidden="true">{step.done ? <Check size={14} /> : index + 1}</span>
+            <div>
+              <b>{step.title}{step.optional && <em className="setup-steps__optional">Optional</em>}<span className="sr-only">{step.done ? " (done)" : " (to do)"}</span></b>
+              <small>{step.body}</small>
+            </div>
+            <button type="button" className="quiet-button" onClick={() => onTour(index)}>Show me</button>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
@@ -5016,7 +5464,17 @@ function Settings({
   fullState,
   onRefresh,
   onNotice,
+  initialPage,
+  onTour,
+  lightMode,
+  onTheme,
+  onOpenLead,
 }: {
+  initialPage?: SettingsPage;
+  onTour: (step: number) => void;
+  lightMode: boolean;
+  onTheme: (light: boolean) => void;
+  onOpenLead: (id: string) => void;
   fullState: State;
   fields?: string[];
   campaignSettings: Record<string, CampaignSettings>;
@@ -5042,7 +5500,7 @@ function Settings({
   const [bridgeNumber, setBridgeNumber] = useState(usesAppPhone(connection) ? "" : (connection?.bridgeNumber || "").replace(/^sip:/i, ""));
   const owner = me.role === "owner";
   const [area, setArea] = useState<SettingsArea>(owner ? "general" : "account");
-  const [page, setPage] = useState<SettingsPage>(owner ? "numbers" : "profile");
+  const [page, setPage] = useState<SettingsPage>(initialPage || (owner ? "numbers" : "profile"));
   const validate = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
@@ -5122,13 +5580,15 @@ function Settings({
   // Each tab's sidebar is a few titled groups of pages.
   const sections: Record<SettingsArea, { title: string; items: { id: SettingsPage; label: string; icon: typeof Phone }[] }[]> = {
     general: [
+      { title: "Getting started", items: [{ id: "setup", label: "Setup", icon: BadgeCheck }, { id: "roadmap", label: "Roadmap", icon: Workflow }] },
       { title: "Costs", items: [{ id: "costs", label: "Features & costs", icon: ChartColumn }] },
       { title: "Calling", items: [{ id: "numbers", label: "Phone numbers", icon: Phone }, { id: "booking", label: "Booking link", icon: CalendarPlus }] },
       { title: "Integrations", items: [{ id: "ai", label: "AI", icon: Sparkles }, { id: "email", label: "Email", icon: Mail }] },
-      { title: "Workspace", items: [{ id: "team", label: "Team", icon: Users }, { id: "fields", label: "Custom fields", icon: SlidersHorizontal }, ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : [])] },
+      { title: "Workspace", items: [{ id: "team", label: "Team", icon: Users }, { id: "fields", label: "Custom fields", icon: SlidersHorizontal }, { id: "logs", label: "Logs", icon: ClipboardList }, ...(me.admin ? [{ id: "companies" as const, label: "Companies", icon: Building2 }] : [])] },
     ],
     account: [
-      { title: "Account", items: [{ id: "profile", label: "Profile", icon: UserRound }, { id: "privacy", label: "Privacy", icon: ShieldCheck }, { id: "about", label: "About", icon: BadgeCheck }] },
+      ...(owner ? [] : [{ title: "Getting started", items: [{ id: "setup" as const, label: "Setup", icon: BadgeCheck }, { id: "roadmap" as const, label: "Roadmap", icon: Workflow }] }]),
+      { title: "Account", items: [{ id: "profile", label: "Profile", icon: UserRound }, { id: "appearance", label: "Appearance", icon: lightMode ? Sun : Moon }, ...(owner ? [] : [{ id: "logs" as const, label: "Logs", icon: ClipboardList }]), { id: "privacy", label: "Privacy", icon: ShieldCheck }, { id: "about", label: "About", icon: BadgeCheck }] },
     ],
   };
   return (
@@ -5152,7 +5612,25 @@ function Settings({
           ))}
         </aside>
         <div className="settings-content">
-        {page === "numbers" ? (
+        {page === "setup" ? <SetupChecklist state={fullState} onTour={onTour} /> : page === "roadmap" ? <Roadmap /> : page === "appearance" ? (
+          <section className="settings-panel">
+            <span className="panel-kicker">Account</span>
+            <h2>Appearance</h2>
+            <p>How Open Dialer looks on this device.</p>
+            <div className="call-list__views theme-choice" role="radiogroup" aria-label="Theme">
+              {([[false, "Dark", Moon], [true, "Light", Sun]] as const).map(([light, label, Icon]) => (
+                <button key={label} type="button" role="radio" aria-checked={lightMode === light} className={lightMode === light ? "is-active" : ""} onClick={() => onTheme(light)}><Icon size={16} aria-hidden="true" /> {label}</button>
+              ))}
+            </div>
+          </section>
+        ) : page === "logs" ? (
+          <section className="settings-panel settings-panel--wide">
+            <span className="panel-kicker">Workspace</span>
+            <h2>Logs</h2>
+            <p>Recent workspace activity, newest first. Up to 500 events are kept.</p>
+            <ActivityLog activity={fullState.activity} leads={fullState.leads} onOpenLead={onOpenLead} />
+          </section>
+        ) : page === "numbers" ? (
           <section className="settings-grid">
       <article className="settings-card connection-card" data-tour="twilio">
         <div>

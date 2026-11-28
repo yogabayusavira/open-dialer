@@ -16,8 +16,11 @@
     "local": "node scripts/start-local.mjs"
   },
   "dependencies": {
+    "@meteocons/svg": "^0.1.0",
+    "@meteocons/svg-static": "^0.1.0",
     "@twilio/voice-sdk": "^2.19.0",
     "@vitejs/plugin-react": "latest",
+    "@xyflow/react": "^13.0.3",
     "lucide-react": "latest",
     "pdfjs-dist": "^5.7.284",
     "pg": "^8.23.1",

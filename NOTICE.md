@@ -14,11 +14,11 @@ details.
 
 These terms apply to Open Dialer and to every version based on it.
 
-1. **Keep the credit (section 7(b)).** Every copy and every modified version you run or distribute must keep, in its
-   user interface where people using it can see it, the attribution "Powered by Open Dialer · by Yoga Bayu Savira"
-   (as shown in the app's sidebar and in Settings → About), together with a link to the source code. You may restyle
-   it to fit your design, but it must stay visible and readable. Copyright and license notices in the source files
-   and in this file must also be kept.
+1. **Keep the credit (section 7(b)).** Every copy and every modified version you run or distribute must keep a visible,
+   readable "Powered by Open Dialer" credit in its user interface, linked to the source code. The full attribution,
+   "Powered by Open Dialer · by Yoga Bayu Savira", must be available from that credit on hover and keyboard focus,
+   and readable in Settings → About (or an equivalent accessible About or legal-notices page). You may restyle the
+   credit to fit your design. Copyright and license notices in the source files and in this file must also be kept.
 2. **No use of the name or logo (section 7(e)).** This license gives no right to use the name "Open Dialer", its logo
    or other branding to name or promote your own version. If you change the program and offer it to others, give it
    a different name, while keeping the credit in term 1.
@@ -33,3 +33,4 @@ license from the copyright holder. See [COMMERCIAL.md](COMMERCIAL.md).
 ## Third-party software
 
 Open Dialer uses open source packages listed in `package.json`. Each keeps its own license.
+Weather icons are Meteocons by Bas Milius, under the MIT license; see [docs/METEOCONS-LICENSE.txt](docs/METEOCONS-LICENSE.txt).

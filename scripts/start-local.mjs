@@ -4,12 +4,57 @@
 // Run: npm run local   (or double-click "Start Open Dialer.bat" on Windows)
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const root = join(import.meta.dirname, "..");
 const port = Number(process.env.PORT || 3000);
 const log = (message) => console.log(`[open-dialer] ${message}`);
+
+function portIsInUse(port) {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    socket.once("connect", () => { socket.destroy(); resolve(true); });
+    socket.once("error", () => resolve(false));
+  });
+}
+
+async function clearEarlierOpenDialer() {
+  if (!(await portIsInUse(port))) return;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/session`, { signal: AbortSignal.timeout(2_000) });
+    const session = await response.json();
+    if (!response.ok || typeof session.authenticated !== "boolean" || typeof session.firstRun !== "boolean") throw new Error();
+  } catch {
+    log(`Port ${port} is already being used by another app. Close that app, then start Open Dialer again.`);
+    process.exit(1);
+  }
+  if (process.platform !== "win32") {
+    log(`Open Dialer is already running on port ${port}. Close it, then start again.`);
+    process.exit(1);
+  }
+
+  const listeners = spawnSync(
+    "powershell",
+    ["-NoProfile", "-Command", `Get-NetTCPConnection -LocalPort ${port} -State Listen | Select-Object -ExpandProperty OwningProcess`],
+    { encoding: "utf8" },
+  );
+  const processIds = [...new Set(listeners.stdout.match(/\d+/g) || [])];
+  if (!processIds.length) {
+    log(`Couldn't stop the earlier Open Dialer server on port ${port}. Close it, then start again.`);
+    process.exit(1);
+  }
+
+  log("Closing the earlier Open Dialer server so this session gets a fresh Cloudflare tunnel…");
+  for (const processId of processIds) spawnSync("taskkill", ["/PID", processId, "/T", "/F"], { stdio: "ignore" });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (!(await portIsInUse(port))) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  log(`The earlier Open Dialer server is still using port ${port}. Close it, then start again.`);
+  process.exit(1);
+}
 
 function findCloudflared() {
   const candidates = [process.env.CLOUDFLARED, "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe", "C:\\Program Files\\cloudflared\\cloudflared.exe"].filter(Boolean);
@@ -39,6 +84,15 @@ function startTunnel(cloudflared) {
 }
 
 // The database can run in Docker on this computer (container open-dialer-db, see .env). Start it and wait until it answers.
+await clearEarlierOpenDialer();
+
+const cloudflared = findCloudflared();
+if (!cloudflared) {
+  log("cloudflared isn't installed, so Twilio can't reach this computer and calls won't connect.");
+  log("Install it with: winget install --id Cloudflare.cloudflared   then start again.");
+  process.exit(1);
+}
+
 const envText = existsSync(join(root, ".env")) ? readFileSync(join(root, ".env"), "utf8") : "";
 if (/^DATABASE_URL=.*@127\.0\.0\.1:5433\//m.test(envText)) {
   const pause = (seconds) => spawnSync(process.platform === "win32" ? "timeout" : "sleep", process.platform === "win32" ? ["/t", String(seconds), "/nobreak"] : [String(seconds)], { stdio: "ignore" });
@@ -79,22 +133,16 @@ process.on("SIGINT", () => { stopAll(); process.exit(0); });
 process.on("SIGTERM", () => { stopAll(); process.exit(0); });
 
 const env = { ...process.env, PORT: String(port) };
-const cloudflared = findCloudflared();
-if (!cloudflared) {
-  log("cloudflared isn't installed, so Twilio can't reach this computer and calls won't connect.");
-  log("Install it with: winget install --id Cloudflare.cloudflared   then start again.");
+log("Opening a Cloudflare tunnel so Twilio can reach the app…");
+const { tunnel, address } = startTunnel(cloudflared);
+children.push(tunnel);
+const url = await address;
+if (url) {
+  // An address set in the environment wins over the one in .env.
+  env.OPEN_DIALER_PUBLIC_URL = url;
+  log(`Twilio will reach the app at ${url}`);
 } else {
-  log("Opening a Cloudflare tunnel so Twilio can reach the app…");
-  const { tunnel, address } = startTunnel(cloudflared);
-  children.push(tunnel);
-  const url = await address;
-  if (url) {
-    // An address set in the environment wins over the one in .env.
-    env.OPEN_DIALER_PUBLIC_URL = url;
-    log(`Twilio will reach the app at ${url}`);
-  } else {
-    log("The tunnel didn't start in time. The app runs, but calls won't connect until you start again.");
-  }
+  log("The tunnel didn't start in time. The app runs, but calls won't connect until you start again.");
 }
 
 const args = existsSync(join(root, ".env")) ? ["--env-file=.env", "server.mjs"] : ["server.mjs"];
